@@ -1165,6 +1165,16 @@ h3 {
     0 0 0 1px rgba(63, 134, 168, 0.18);
 }
 
+.board-card.is-selected.is-playable,
+.mini-card.is-selected.is-playable {
+  border-color: rgba(84, 185, 107, 0.76);
+  box-shadow:
+    inset 0 0 0 1px rgba(84, 185, 107, 0.34),
+    0 0 0 3px var(--selection-green-glow),
+    0 0 0 8px rgba(84, 185, 107, 0.24),
+    0 20px 40px rgba(16, 24, 36, 0.18);
+}
+
 .board-card.is-promote {
   border-color: rgba(205, 107, 86, 0.4);
   box-shadow:
@@ -1637,7 +1647,7 @@ h3 {
 .hand-grid > .mini-card.is-selected,
 .hand-grid > .mini-card.is-selected:hover {
   transform: translateY(-12px) rotate(0deg);
-  z-index: 3;
+  z-index: 12;
 }
 
 .board-centerline {
@@ -1905,6 +1915,7 @@ h3 {
   .hand-grid > .mini-card.is-selected,
   .hand-grid > .mini-card.is-selected:hover {
     transform: translateY(-8px);
+    z-index: 12;
   }
 
   .resource-strip {

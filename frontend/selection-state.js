@@ -15,6 +15,20 @@
     return ref ? { ...ref } : null;
   }
 
+  function handCardCanTargetRef(state, sourceCardId, targetRef) {
+    if (!state || !sourceCardId || !targetRef) {
+      return false;
+    }
+
+    return state.legal_actions.some(
+      (action) =>
+        action.source?.zone === "hand" &&
+        action.source.instance_id === sourceCardId &&
+        action.target &&
+        refsMatch(action.target, targetRef),
+    );
+  }
+
   function boardTargetExists(player, target) {
     if (!player || !target) {
       return false;
@@ -148,7 +162,10 @@
       autoAction: null,
       nextUiState: {
         selectedCardId: nextSelectedCardId,
-        selectedBoardTarget: cloneRef(uiState.selectedBoardTarget),
+        selectedBoardTarget:
+          nextSelectedCardId && handCardCanTargetRef(state, nextSelectedCardId, uiState.selectedBoardTarget)
+            ? cloneRef(uiState.selectedBoardTarget)
+            : null,
       },
     };
   }

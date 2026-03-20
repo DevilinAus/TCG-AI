@@ -156,6 +156,9 @@ async function submitAction(actionView) {
 
   try {
     aiAutoRunPaused = false;
+    if (actionView.type === "attack") {
+      resetSelections();
+    }
     currentState = await requestJson("/api/action", {
       method: "POST",
       body: JSON.stringify({
@@ -1505,6 +1508,26 @@ function handlePlayerBenchZoneClick(event) {
   event.stopPropagation();
 }
 
+function handleBoardBackgroundClick(event) {
+  if (!currentState || aiIsRunning) {
+    return;
+  }
+
+  const clickedInteractiveElement = event.target.closest(
+    ".mini-card, .board-card, .attack-chip-button, .end-turn-button, .resource-panel, button, select, input, label",
+  );
+  if (clickedInteractiveElement) {
+    return;
+  }
+
+  if (!uiState.selectedCardId && !uiState.selectedBoardTarget) {
+    return;
+  }
+
+  resetSelections();
+  render(currentState);
+}
+
 function syncDevPanelToggleLabel() {
   const devPanel = document.querySelector(".dev-panel");
   const collapseHint = devPanel?.querySelector(".collapse-hint");
@@ -1528,6 +1551,7 @@ document.getElementById("new-game-button").addEventListener("click", newGame);
 document
   .getElementById("player-bench-zone")
   .addEventListener("click", handlePlayerBenchZoneClick, true);
+document.getElementById("player-board-panel").addEventListener("click", handleBoardBackgroundClick);
 document.getElementById("trainer-select").addEventListener("change", handleTrainerChange);
 document.getElementById("deck-select").addEventListener("change", handleDeckChange);
 document.querySelector(".dev-panel")?.addEventListener("toggle", syncDevPanelToggleLabel);

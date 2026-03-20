@@ -232,6 +232,32 @@ test("resolveSelectedCardClick auto-submits when the target is already selected"
   assert.equal(result.nextUiState, null);
 });
 
+test("resolveSelectedCardClick clears an unrelated board target when selecting a hand card", () => {
+  const state = makeState();
+  const refs = makeRefs();
+  state.legal_actions = [
+    {
+      type: "attack",
+      source: refs.playerActive,
+      target: refs.opponentActive,
+    },
+  ];
+
+  const result = resolveSelectedCardClick({
+    state,
+    uiState: {
+      selectedCardId: null,
+      selectedBoardTarget: refs.playerActive,
+    },
+    instanceId: "hand-potion",
+    aiIsRunning: false,
+  });
+
+  assert.equal(result.autoAction, null);
+  assert.equal(result.nextUiState.selectedCardId, "hand-potion");
+  assert.equal(result.nextUiState.selectedBoardTarget, null);
+});
+
 test("resolveSelectedBoardTargetClick hands off to the active Pokemon when a hand target is invalid", () => {
   const state = makeState();
   const refs = makeRefs();
