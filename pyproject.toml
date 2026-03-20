@@ -1,0 +1,8 @@
+[project]
+name = "tcg-ai"
+version = "0.1.0"
+description = "A starter project for a simple Pokemon TCG My First Battle AI."
+requires-python = ">=3.13"
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
