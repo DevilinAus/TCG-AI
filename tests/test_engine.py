@@ -18,9 +18,20 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(len(state.players[0].hand), 4)
         self.assertEqual(len(state.players[1].hand), 3)
 
-    def test_evolution_is_allowed_on_the_first_turn(self) -> None:
+    def test_evolution_is_not_allowed_on_the_first_turn(self) -> None:
         state = create_game(seed=11, human_first=True)
         self._move_card_to_hand(state, 0, "charmeleon")
+
+        evolve_actions = self._find_actions(state, "evolve")
+
+        self.assertEqual(evolve_actions, [])
+
+    def test_evolution_is_allowed_on_a_later_turn_for_a_starting_pokemon(self) -> None:
+        state = create_game(seed=11, human_first=True)
+        self._move_card_to_hand(state, 0, "charmeleon")
+
+        apply_action(state, self._find_action(state, "end_turn"))
+        apply_action(state, self._find_action(state, "end_turn"))
 
         action = self._find_action(state, "evolve", target="active")
         apply_action(state, action)
@@ -120,13 +131,34 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(len(potion_actions), 2)
         self.assertEqual({action["target"] for action in potion_actions}, {"active", "bench:0"})
 
-    def test_evolution_can_target_active_or_matching_benched_pokemon(self) -> None:
+    def test_evolution_cannot_target_a_pokemon_played_this_turn(self) -> None:
+        state = create_game(seed=41, human_first=True)
+        self._move_card_to_hand(state, 0, "charmeleon")
+        self._move_card_to_hand(state, 0, "charmander")
+
+        apply_action(state, self._find_action(state, "end_turn"))
+        apply_action(state, self._find_action(state, "end_turn"))
+
+        bench_action = self._find_action_by_card(state, "bench_basic", "charmander")
+        apply_action(state, bench_action)
+
+        evolve_actions = self._find_actions(state, "evolve")
+
+        self.assertEqual(len(evolve_actions), 1)
+        self.assertEqual(evolve_actions[0]["target"], "active")
+
+    def test_evolution_can_target_active_or_matching_benched_pokemon_on_a_later_turn(self) -> None:
         state = create_game(seed=41, human_first=True)
         self._move_card_to_hand(state, 0, "charmander")
         self._move_card_to_hand(state, 0, "charmeleon")
 
+        apply_action(state, self._find_action(state, "end_turn"))
+        apply_action(state, self._find_action(state, "end_turn"))
+
         bench_action = self._find_action_by_card(state, "bench_basic", "charmander")
         apply_action(state, bench_action)
+        apply_action(state, self._find_action(state, "end_turn"))
+        apply_action(state, self._find_action(state, "end_turn"))
 
         evolve_actions = self._find_actions(state, "evolve")
 
@@ -186,7 +218,7 @@ class EngineTests(unittest.TestCase):
             zone = getattr(player, zone_name)
             if instance_id in zone:
                 zone.remove(instance_id)
-        player.bench.append(PokemonInPlay(stack=[instance_id]))
+        player.bench.append(PokemonInPlay(stack=[instance_id], entered_play_turn=0))
 
     def _move_card_to_energy_zone(self, state, player_index: int, card_id: str) -> None:
         player = state.players[player_index]
@@ -199,7 +231,7 @@ class EngineTests(unittest.TestCase):
 
     def _set_active_pokemon(self, state, player_index: int, card_ids: list[str]) -> None:
         player = state.players[player_index]
-        player.active = PokemonInPlay(stack=[])
+        player.active = PokemonInPlay(stack=[], entered_play_turn=0)
         for card_id in card_ids:
             instance_id = self._find_instance_id(state, player_index, card_id)
             for zone_name in ("hand", "deck", "discard", "energy_zone"):

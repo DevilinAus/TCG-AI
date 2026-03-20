@@ -42,6 +42,7 @@ class CardInstance:
 class PokemonInPlay:
     stack: list[str] = field(default_factory=list)
     damage: int = 0
+    entered_play_turn: int = 0
 
 
 @dataclass
@@ -57,6 +58,7 @@ class PlayerState:
     bench: list[PokemonInPlay] = field(default_factory=list)
     prize_tokens_remaining: int = 3
     energy_played_this_turn: bool = False
+    turns_taken: int = 0
 
 
 @dataclass

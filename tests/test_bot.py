@@ -12,6 +12,7 @@ class BotTests(unittest.TestCase):
         state = create_game(seed=43, human_first=False)
         self._move_card_to_hand(state, 1, "wartortle")
         self._move_card_to_energy_zone(state, 1, "water_energy")
+        self._advance_to_players_next_turn(state, player_index=1)
 
         learner = RewardLearner(exploration_rate=0.0, min_exploration_rate=0.0)
         action = choose_action(state, 1, learner=learner)
@@ -19,6 +20,19 @@ class BotTests(unittest.TestCase):
         self.assertIsNotNone(action)
         self.assertEqual(action["type"], "evolve")
         self.assertEqual(action["target"], "active")
+
+    def _advance_to_players_next_turn(self, state, player_index: int) -> None:
+        while state.current_player == player_index:
+            from backend.tcg_ai.engine import apply_action, list_legal_actions
+
+            end_turn = next(action for action in list_legal_actions(state) if action["type"] == "end_turn")
+            apply_action(state, end_turn)
+
+        while state.current_player != player_index:
+            from backend.tcg_ai.engine import apply_action, list_legal_actions
+
+            end_turn = next(action for action in list_legal_actions(state) if action["type"] == "end_turn")
+            apply_action(state, end_turn)
 
     def _move_card_to_hand(self, state, player_index: int, card_id: str) -> str:
         player = state.players[player_index]

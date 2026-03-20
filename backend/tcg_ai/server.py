@@ -14,9 +14,13 @@ from .bot import choose_action
 from .engine import apply_action, create_game
 from .learning import EpisodeStep, RewardLearner, calculate_reward, extract_action_features, summarize_state
 from .presentation import serialize_state
+from .trainers import TrainerProfile, TrainerStore
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 FRONTEND_DIR = PROJECT_ROOT / "frontend"
+AI_ACTION_DELAY_MIN_MS = 5_000
+AI_ACTION_DELAY_MAX_MS = 8_000
+OPENING_DIE_SIDES = 6
 
 
 class ApiError(Exception):
@@ -35,17 +39,21 @@ class ApiError(Exception):
 class GameSession:
     def __init__(
         self,
-        learner: RewardLearner,
+        trainer: TrainerProfile,
         seed: int | None = None,
         human_first: bool = True,
     ) -> None:
         self.lock = threading.Lock()
-        self.learner = learner
-        self.state = create_game(seed=seed, human_first=human_first)
+        self.trainer = trainer
+        self.learner = trainer.learner
+        self.state = create_game(seed=seed, human_first=human_first, ai_name=trainer.name)
         self.ai_episode_steps: list[EpisodeStep] = []
         self.ai_episode_reward = 0.0
         self.ai_episode_finished = False
-        self.ai_replay_delay_ms = 900
+        self.ai_replay_delay_ms = AI_ACTION_DELAY_MIN_MS
+        self.ai_damage_dealt = 0
+        self.ai_prizes_taken = 0
+        self.ai_progress_awarded = False
 
     def snapshot(self, session_id: str) -> dict[str, Any]:
         return self._serialize_state(session_id)
@@ -60,10 +68,13 @@ class GameSession:
 
     def reset(self, human_first: bool = True, seed: int | None = None) -> None:
         with self.lock:
-            self.state = create_game(seed=seed, human_first=human_first)
+            self.state = create_game(seed=seed, human_first=human_first, ai_name=self.trainer.name)
             self.ai_episode_steps.clear()
             self.ai_episode_reward = 0.0
             self.ai_episode_finished = False
+            self.ai_damage_dealt = 0
+            self.ai_prizes_taken = 0
+            self.ai_progress_awarded = False
 
     def human_action(self, action: dict[str, Any]) -> None:
         with self.lock:
@@ -106,19 +117,22 @@ class GameSession:
         before = summarize_state(self.state, 1)
         features = extract_action_features(self.state, 1, action)
         apply_action(self.state, action)
-        reward = calculate_reward(before, summarize_state(self.state, 1), action)
+        after = summarize_state(self.state, 1)
+        reward = calculate_reward(before, after, action)
         self.learner.record_step_reward(features, action["type"], reward)
         self.ai_episode_steps.append(
             EpisodeStep(features=features, action_type=action["type"], reward=reward)
         )
         self.ai_episode_reward += reward
+        self.ai_damage_dealt += max(0, before.opponent.total_remaining_hp - after.opponent.total_remaining_hp)
+        self.ai_prizes_taken += max(0, after.player.prizes_taken - before.player.prizes_taken)
         self._finalize_ai_episode_if_finished(completed_by_ai_action=True)
         return {
             "action": {
                 "type": action["type"],
                 "label": action["label"],
             },
-            "delay_ms": _replay_delay_for_action(action["type"], default_delay_ms=self.ai_replay_delay_ms),
+            "delay_ms": _replay_delay_for_action(self.state),
             "state": self._serialize_state(session_id),
         }
 
@@ -140,18 +154,29 @@ class GameSession:
             total_episode_reward=total_episode_reward,
             skip_last_step=completed_by_ai_action,
         )
+        if not self.ai_progress_awarded:
+            self.trainer.gain_experience(
+                damage_dealt=self.ai_damage_dealt,
+                prizes_taken=self.ai_prizes_taken,
+            )
+            self.ai_progress_awarded = True
         self.ai_episode_finished = True
 
 
 class SessionStore:
-    def __init__(self, learner: RewardLearner) -> None:
+    def __init__(self, trainers: TrainerStore) -> None:
         self._lock = threading.Lock()
-        self._learner = learner
+        self._trainers = trainers
         self._sessions: dict[str, GameSession] = {}
 
-    def create(self, human_first: bool = True, seed: int | None = None) -> tuple[str, GameSession]:
+    def create(
+        self,
+        trainer: TrainerProfile,
+        human_first: bool = True,
+        seed: int | None = None,
+    ) -> tuple[str, GameSession]:
         session_id = secrets.token_urlsafe(9)
-        session = GameSession(self._learner, seed=seed, human_first=human_first)
+        session = GameSession(trainer, seed=seed, human_first=human_first)
         with self._lock:
             self._sessions[session_id] = session
         return session_id, session
@@ -166,19 +191,26 @@ class SessionStore:
 
 class TcgApplication:
     def __init__(self) -> None:
-        self.learner = RewardLearner()
-        self.sessions = SessionStore(self.learner)
+        self.trainers = TrainerStore()
+        self.learner = self.trainers.get(self.trainers.default_trainer_id).learner
+        self.sessions = SessionStore(self.trainers)
 
     def get_game(self, session_id: str) -> dict[str, Any]:
         session = self.sessions.get(session_id)
-        return session.snapshot(session_id)
+        return self._build_snapshot(session_id, session)
 
     def new_game(self, payload: dict[str, Any]) -> dict[str, Any]:
+        trainer = self._resolve_trainer(payload.get("trainer_id"))
+        human_first, opening_roll = self._resolve_human_first(payload)
         session_id, session = self.sessions.create(
-            human_first=payload.get("human_first", True),
+            trainer=trainer,
+            human_first=human_first,
             seed=payload.get("seed"),
         )
-        return session.snapshot(session_id)
+        if opening_roll is not None:
+            starter_name = session.state.players[session.state.current_player].name
+            session.state.log.insert(1, f"Opening die roll: {opening_roll}. {starter_name} goes first.")
+        return self._build_snapshot(session_id, session)
 
     def human_action(self, payload: dict[str, Any]) -> dict[str, Any]:
         session_id = self._require_string(payload, "session_id", "missing_session_id")
@@ -191,16 +223,22 @@ class TcgApplication:
             session.human_action(action)
         except ValueError as exc:
             raise ApiError(str(exc), "illegal_action", HTTPStatus.BAD_REQUEST) from exc
-        return session.snapshot(session_id)
+        return self._build_snapshot(session_id, session)
 
     def ai_turn(self, payload: dict[str, Any]) -> dict[str, Any]:
         session_id = self._require_string(payload, "session_id", "missing_session_id")
         session = self.sessions.get(session_id)
         replay_steps = session.ai_turn(session_id)
-        snapshot = session.snapshot(session_id)
+        snapshot = self._build_snapshot(session_id, session)
         snapshot["ai_turn_replay"] = {
             "step_delay_ms": session.ai_replay_delay_ms,
-            "steps": replay_steps,
+            "steps": [
+                {
+                    **step,
+                    "state": self._attach_trainer_payload(step["state"], session),
+                }
+                for step in replay_steps
+            ],
         }
         return snapshot
 
@@ -208,7 +246,7 @@ class TcgApplication:
         session_id = self._require_string(payload, "session_id", "missing_session_id")
         session = self.sessions.get(session_id)
         step = session.ai_step(session_id)
-        snapshot = session.snapshot(session_id)
+        snapshot = self._build_snapshot(session_id, session)
         snapshot["ai_step"] = None
         if step is not None:
             snapshot["ai_step"] = {
@@ -216,6 +254,36 @@ class TcgApplication:
                 "delay_ms": step["delay_ms"],
             }
         return snapshot
+
+    def _build_snapshot(self, session_id: str, session: GameSession) -> dict[str, Any]:
+        return self._attach_trainer_payload(session.snapshot(session_id), session)
+
+    def _attach_trainer_payload(self, snapshot: dict[str, Any], session: GameSession) -> dict[str, Any]:
+        snapshot["ai_trainer"] = session.trainer.snapshot(selected=True)
+        snapshot["available_trainers"] = self.trainers.snapshots(selected_id=session.trainer.trainer_id)
+        return snapshot
+
+    def _resolve_trainer(self, trainer_id: Any) -> TrainerProfile:
+        if trainer_id is None:
+            trainer_id = self.trainers.default_trainer_id
+        if not isinstance(trainer_id, str) or not trainer_id:
+            raise ApiError("Missing field: trainer_id", "missing_trainer_id", HTTPStatus.BAD_REQUEST)
+        trainer = self.trainers.get(trainer_id)
+        if trainer is None:
+            raise ApiError("Unknown trainer ID.", "trainer_not_found", HTTPStatus.BAD_REQUEST)
+        return trainer
+
+    @staticmethod
+    def _resolve_human_first(
+        payload: dict[str, Any],
+    ) -> tuple[bool, int | None]:
+        requested_order = payload.get("human_first")
+        if isinstance(requested_order, bool):
+            return requested_order, None
+
+        opening_roll = roll_starting_player_die()
+        human_first = opening_roll <= OPENING_DIE_SIDES // 2
+        return human_first, opening_roll
 
     @staticmethod
     def _require_string(payload: dict[str, Any], key: str, code: str) -> str:
@@ -235,14 +303,12 @@ def make_handler(application: TcgApplication) -> type[BaseHTTPRequestHandler]:
     return ConfiguredTcgRequestHandler
 
 
-def _replay_delay_for_action(action_type: str, default_delay_ms: int) -> int:
-    if action_type == "attack":
-        return default_delay_ms + 350
-    if action_type in {"promote", "play_switch"}:
-        return default_delay_ms + 150
-    if action_type == "end_turn":
-        return max(450, default_delay_ms - 250)
-    return default_delay_ms
+def _replay_delay_for_action(state) -> int:
+    return state.rng.randint(AI_ACTION_DELAY_MIN_MS, AI_ACTION_DELAY_MAX_MS)
+
+
+def roll_starting_player_die() -> int:
+    return secrets.randbelow(OPENING_DIE_SIDES) + 1
 
 
 class TcgRequestHandler(BaseHTTPRequestHandler):
@@ -316,6 +382,9 @@ class TcgRequestHandler(BaseHTTPRequestHandler):
         self.send_response(HTTPStatus.OK)
         self.send_header("Content-Type", header_value)
         self.send_header("Content-Length", str(len(content)))
+        self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+        self.send_header("Pragma", "no-cache")
+        self.send_header("Expires", "0")
         self.end_headers()
         if include_body:
             self.wfile.write(content)

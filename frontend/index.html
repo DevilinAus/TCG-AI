@@ -14,9 +14,20 @@
             <div class="rail-copy">
               <p class="panel-kicker">Digital Arena</p>
               <h1>My First Battle</h1>
-              <p class="deck-matchup">
-                A polished training table with guided actions, cleaner board focus, and compact match intel.
-              </p>
+              <div class="trainer-picker">
+                <label class="trainer-picker-label" for="trainer-select">Choose Gym Leader</label>
+                <select id="trainer-select" class="trainer-select"></select>
+                <p id="trainer-meta" class="trainer-meta">Loading opponents...</p>
+                <div id="trainer-progress" class="trainer-progress" hidden>
+                  <div class="trainer-progress-topline">
+                    <span id="trainer-progress-label" class="trainer-progress-label">XP Progress</span>
+                    <span id="trainer-progress-value" class="trainer-progress-value">0 / 100 XP</span>
+                  </div>
+                  <div class="trainer-progress-track" aria-hidden="true">
+                    <span id="trainer-progress-fill" class="trainer-progress-fill"></span>
+                  </div>
+                </div>
+              </div>
             </div>
 
             <div class="session-row">
@@ -30,22 +41,8 @@
 
             <div class="controls controls-column">
               <button id="new-game-button" class="primary">New Game</button>
-              <button id="ai-turn-button">Run AI Turn</button>
               <button id="clear-selection-button" class="ghost">Clear Selection</button>
             </div>
-          </section>
-
-          <section class="sidebar-section surface-panel rail-panel guide-panel">
-            <div class="spotlight-copy">
-              <p class="panel-kicker">Next Move</p>
-              <div class="spotlight-headline-row">
-                <h2>Guided Actions</h2>
-                <p id="selection-summary" class="selection-summary">No selection yet.</p>
-              </div>
-              <p id="context-instructions" class="context-copy"></p>
-            </div>
-
-            <div id="context-actions" class="context-actions"></div>
           </section>
 
           <details class="sidebar-section support-panel battle-log-panel" open>
@@ -74,44 +71,50 @@
 
         <div class="board-column">
           <section class="table-stage">
-            <article class="player-panel opponent-panel board-panel">
-              <div class="player-header">
-                <div>
-                  <p class="panel-kicker">Opponent</p>
-                  <h2>AI Board</h2>
+            <article id="opponent-board-panel" class="player-panel opponent-panel board-panel">
+              <div class="opponent-layout">
+                <div class="opponent-main-pocket">
+                  <div class="board-zone board-zone-opponent">
+                    <section id="opponent-bench-zone" class="board-row board-row-bench">
+                      <div class="section-header">
+                        <h3>Bench</h3>
+                      </div>
+                      <div id="opponent-bench" class="bench-grid"></div>
+                    </section>
+                  </div>
+
+                  <div class="player-topline opponent-topline">
+                    <section class="player-active-pocket opponent-active-pocket">
+                      <div id="opponent-active" class="active-slot active-slot-floating"></div>
+                    </section>
+
+                    <div class="player-title-block opponent-title-block">
+                      <h2 id="opponent-name">AI Board</h2>
+                      <p id="opponent-kicker" class="panel-kicker">Opponent</p>
+                    </div>
+                  </div>
                 </div>
-                <div id="opponent-summary" class="player-summary"></div>
-              </div>
 
-              <div class="board-zone board-zone-opponent">
-                <section class="board-row board-row-bench">
-                  <div class="section-header">
-                    <h3>Bench</h3>
+                <div class="opponent-side-pocket">
+                  <div class="resource-strip resource-strip-opponent resource-strip-floating">
+                    <section class="resource-panel">
+                      <div class="section-header">
+                        <h3>Energy</h3>
+                      </div>
+                      <div id="opponent-energy" class="mini-card-row"></div>
+                    </section>
+
+                    <section class="resource-panel">
+                      <div class="section-header">
+                        <h3>Discard</h3>
+                      </div>
+                      <div id="opponent-discard" class="mini-card-row"></div>
+                    </section>
                   </div>
-                  <div id="opponent-bench" class="bench-grid"></div>
-                </section>
 
-                <section class="board-row board-row-active">
-                  <div class="section-header section-header-center">
-                    <h3>Active Pokemon</h3>
+                  <div class="opponent-summary-pocket">
+                    <div id="opponent-summary" class="player-summary"></div>
                   </div>
-                  <div id="opponent-active" class="active-slot"></div>
-                </section>
-
-                <div class="resource-strip resource-strip-opponent">
-                  <section class="resource-panel">
-                    <div class="section-header">
-                      <h3>Energy</h3>
-                    </div>
-                    <div id="opponent-energy" class="mini-card-row"></div>
-                  </section>
-
-                  <section class="resource-panel">
-                    <div class="section-header">
-                      <h3>Discard</h3>
-                    </div>
-                    <div id="opponent-discard" class="mini-card-row"></div>
-                  </section>
                 </div>
               </div>
             </article>
@@ -120,56 +123,56 @@
               <span class="board-centerline__orb"></span>
             </div>
 
-            <article class="player-panel player-panel-human board-panel">
-              <div class="player-header">
-                <div>
-                  <p class="panel-kicker">Player</p>
-                  <h2>Your Board</h2>
-                </div>
-                <div id="player-summary" class="player-summary"></div>
-              </div>
-
-              <div class="board-zone board-zone-player">
-                <section class="board-row board-row-active">
-                  <div class="section-header section-header-center">
-                    <h3>Active Pokemon</h3>
-                  </div>
-                  <div id="player-active" class="active-slot"></div>
-                </section>
-
-                <section class="board-row board-row-bench">
-                  <div class="section-header">
-                    <h3>Bench</h3>
-                  </div>
-                  <div id="player-bench" class="bench-grid"></div>
-                </section>
-
-                <div class="resource-strip resource-strip-player">
-                  <section class="resource-panel">
-                    <div class="section-header">
-                      <h3>Energy</h3>
+            <article id="player-board-panel" class="player-panel player-panel-human board-panel">
+              <div class="player-layout">
+                <div class="player-main-pocket">
+                  <div class="player-topline">
+                    <div class="player-title-block">
+                      <p class="panel-kicker">Player</p>
+                      <h2>Your Board</h2>
                     </div>
-                    <div id="player-energy" class="mini-card-row"></div>
-                  </section>
 
-                  <section class="resource-panel">
-                    <div class="section-header">
-                      <h3>Discard</h3>
-                    </div>
-                    <div id="player-discard" class="mini-card-row"></div>
-                  </section>
+                    <section class="player-active-pocket">
+                      <div id="player-active" class="active-slot active-slot-floating"></div>
+                    </section>
+                  </div>
+
+                  <div class="board-zone board-zone-player">
+                    <section id="player-bench-zone" class="board-row board-row-bench">
+                      <div class="section-header">
+                        <h3>Bench</h3>
+                      </div>
+                      <div id="player-bench" class="bench-grid"></div>
+                    </section>
+
+                    <section class="hand-tray">
+                      <div class="hand-header">
+                        <h3>Hand</h3>
+                      </div>
+                      <div id="player-hand" class="hand-grid"></div>
+                    </section>
+                  </div>
                 </div>
 
-                <section class="hand-tray">
-                  <div class="hand-header">
-                    <div>
-                      <p class="panel-kicker">Hand</p>
-                      <h2>Your Cards</h2>
-                    </div>
-                    <p>Choose a card to begin a play.</p>
+                <div class="player-side-pocket">
+                  <div id="player-summary" class="player-summary"></div>
+
+                  <div class="resource-strip resource-strip-player resource-strip-floating">
+                    <section class="resource-panel">
+                      <div class="section-header">
+                        <h3>Energy</h3>
+                      </div>
+                      <div id="player-energy" class="mini-card-row"></div>
+                    </section>
+
+                    <section class="resource-panel">
+                      <div class="section-header">
+                        <h3>Discard</h3>
+                      </div>
+                      <div id="player-discard" class="mini-card-row"></div>
+                    </section>
                   </div>
-                  <div id="player-hand" class="hand-grid"></div>
-                </section>
+                </div>
               </div>
             </article>
           </section>

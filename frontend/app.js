@@ -1,15 +1,19 @@
 const SESSION_STORAGE_KEY = "tcg_ai_session_id";
-const AI_REPLAY_THINK_DELAY_MS = 450;
-const FALLBACK_AI_STEP_DELAY_MS = 900;
+const AI_HUMAN_DELAY_MIN_MS = 5000;
+const AI_HUMAN_DELAY_MAX_MS = 8000;
+const FALLBACK_AI_STEP_DELAY_MS = 6500;
 
 let currentState = null;
 let previousState = null;
 let aiIsRunning = false;
+let aiAutoRunQueued = false;
+let aiAutoRunPaused = false;
 
 const uiState = {
   selectedCardId: null,
   selectedBoardTarget: null,
   availableContextActions: [],
+  selectedTrainerId: null,
 };
 
 async function requestJson(url, options = {}) {
@@ -33,16 +37,28 @@ function sleep(milliseconds) {
   });
 }
 
+function randomDelay(minMilliseconds, maxMilliseconds) {
+  const min = Math.ceil(minMilliseconds);
+  const max = Math.floor(maxMilliseconds);
+  return Math.floor(Math.random() * (max - min + 1)) + min;
+}
+
+function waitForPaint() {
+  return new Promise((resolve) => {
+    window.requestAnimationFrame(() => resolve());
+  });
+}
+
 function getStoredSessionId() {
-  return window.localStorage.getItem(SESSION_STORAGE_KEY);
+  return window.sessionStorage.getItem(SESSION_STORAGE_KEY);
 }
 
 function setStoredSessionId(sessionId) {
-  window.localStorage.setItem(SESSION_STORAGE_KEY, sessionId);
+  window.sessionStorage.setItem(SESSION_STORAGE_KEY, sessionId);
 }
 
 function clearStoredSessionId() {
-  window.localStorage.removeItem(SESSION_STORAGE_KEY);
+  window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
 }
 
 async function refreshGame() {
@@ -54,6 +70,8 @@ async function refreshGame() {
 
   try {
     currentState = await requestJson(`/api/game?session_id=${encodeURIComponent(sessionId)}`);
+    aiAutoRunPaused = false;
+    uiState.selectedTrainerId = uiState.selectedTrainerId || currentState.ai_trainer?.id || null;
     sanitizeSelections(currentState);
     render(currentState);
     maybeRunAiTurn(currentState);
@@ -69,12 +87,19 @@ async function refreshGame() {
 
 async function newGame() {
   try {
+    const payloadBody = {};
+    const trainerId = resolveTrainerSelection(currentState);
+    if (trainerId) {
+      payloadBody.trainer_id = trainerId;
+    }
     const payload = await requestJson("/api/new-game", {
       method: "POST",
-      body: JSON.stringify({ human_first: true }),
+      body: JSON.stringify(payloadBody),
     });
     currentState = payload;
     previousState = null;
+    aiAutoRunPaused = false;
+    uiState.selectedTrainerId = payload.ai_trainer?.id || uiState.selectedTrainerId;
     resetSelections();
     setStoredSessionId(payload.session_id);
     render(currentState);
@@ -90,6 +115,7 @@ async function submitAction(actionView) {
   }
 
   try {
+    aiAutoRunPaused = false;
     currentState = await requestJson("/api/action", {
       method: "POST",
       body: JSON.stringify({
@@ -110,10 +136,13 @@ async function runAiTurn() {
     return;
   }
 
+  aiAutoRunPaused = false;
+  aiAutoRunQueued = false;
   aiIsRunning = true;
+  render(currentState);
   updateStatus("AI is thinking...");
   try {
-    await sleep(AI_REPLAY_THINK_DELAY_MS);
+    await sleep(randomDelay(AI_HUMAN_DELAY_MIN_MS, AI_HUMAN_DELAY_MAX_MS));
     while (currentState && currentState.current_player === 1 && currentState.winner === null) {
       const payload = await requestJson("/api/ai-step", {
         method: "POST",
@@ -123,19 +152,23 @@ async function runAiTurn() {
       currentState = payload;
       sanitizeSelections(currentState);
       render(currentState);
+      await waitForPaint();
 
       if (!step?.action) {
+        if (currentState.current_player === 1 && currentState.winner === null) {
+          await runAiTurnReplayFallback();
+        }
         break;
       }
 
       updateStatus(buildAiReplayStatus(step));
+      await waitForPaint();
 
-      if (currentState.current_player === 1 && currentState.winner === null) {
-        await sleep(step.delay_ms || FALLBACK_AI_STEP_DELAY_MS);
-      }
+      await sleep(step.delay_ms || FALLBACK_AI_STEP_DELAY_MS);
     }
   } catch (error) {
-    updateStatus(error.message);
+    aiAutoRunPaused = true;
+    updateStatus(`AI auto-run stopped: ${error.message} Refresh or restart the backend server, then try again.`);
   } finally {
     aiIsRunning = false;
     if (currentState) {
@@ -144,9 +177,67 @@ async function runAiTurn() {
   }
 }
 
+async function runAiTurnReplayFallback() {
+  if (!currentState) {
+    return;
+  }
+
+  const payload = await requestJson("/api/ai-turn", {
+    method: "POST",
+    body: JSON.stringify({ session_id: currentState.session_id }),
+  });
+
+  const replaySteps = payload.ai_turn_replay?.steps || [];
+  for (const replayStep of replaySteps) {
+    currentState = replayStep.state;
+    sanitizeSelections(currentState);
+    render(currentState);
+    updateStatus(buildAiReplayStatus(replayStep));
+    await waitForPaint();
+    await sleep(replayStep.delay_ms || FALLBACK_AI_STEP_DELAY_MS);
+  }
+
+  currentState = payload;
+  sanitizeSelections(currentState);
+}
+
 function buildAiReplayStatus(step) {
   const label = step.action?.label || "AI takes an action";
   return `AI action: ${label}`;
+}
+
+function resolveTrainerSelection(state) {
+  return (
+    uiState.selectedTrainerId ||
+    state?.ai_trainer?.id ||
+    state?.available_trainers?.[0]?.id ||
+    ""
+  );
+}
+
+function buildTrainerLabel(trainer) {
+  return `${trainer.name} • Lv. ${trainer.level}`;
+}
+
+function getTrainerLevelProgress(trainer) {
+  const xpIntoLevel = Math.max(0, Number(trainer?.xp_into_level || 0));
+  const xpToNextLevel = Math.max(0, Number(trainer?.xp_to_next_level || 0));
+  const totalLevelXp = Math.max(1, xpIntoLevel + xpToNextLevel);
+  const progressPercent = Math.max(0, Math.min(100, (xpIntoLevel / totalLevelXp) * 100));
+  return {
+    xpIntoLevel,
+    xpToNextLevel,
+    totalLevelXp,
+    progressPercent,
+    nextLevel: Math.max(1, Number(trainer?.level || 1)) + 1,
+  };
+}
+
+function handleTrainerChange(event) {
+  uiState.selectedTrainerId = event.target.value || null;
+  if (currentState) {
+    render(currentState);
+  }
 }
 
 function maybeRunAiTurn(state) {
@@ -154,8 +245,30 @@ function maybeRunAiTurn(state) {
     return;
   }
   if (state.current_player === 1) {
-    window.setTimeout(runAiTurn, 400);
+    queueAiTurn();
   }
+}
+
+function queueAiTurn() {
+  if (
+    aiAutoRunQueued ||
+    aiAutoRunPaused ||
+    aiIsRunning ||
+    !currentState ||
+    currentState.current_player !== 1 ||
+    currentState.winner !== null
+  ) {
+    return;
+  }
+
+  aiAutoRunQueued = true;
+  window.setTimeout(() => {
+    aiAutoRunQueued = false;
+    if (!currentState || currentState.current_player !== 1 || currentState.winner !== null || aiIsRunning) {
+      return;
+    }
+    void runAiTurn();
+  }, 0);
 }
 
 function resetSelections() {
@@ -198,7 +311,13 @@ function render(state) {
   uiState.availableContextActions = context.actions;
 
   renderMatchMeta(state);
-  document.getElementById("selection-summary").textContent = describeSelection(state, context);
+  renderTrainerPicker(state);
+  renderOpponentIdentity(state);
+  renderTurnHighlights(state);
+  const selectionSummaryElement = document.getElementById("selection-summary");
+  if (selectionSummaryElement) {
+    selectionSummaryElement.textContent = describeSelection(state, context);
+  }
   renderPlayerSummary(document.getElementById("player-summary"), human);
   renderPlayerSummary(document.getElementById("opponent-summary"), ai);
 
@@ -232,7 +351,6 @@ function render(state) {
     ai.active,
     {
       clickable: false,
-      compact: true,
       selectedTarget: null,
       context,
       previousPokemon: previousSnapshot?.players?.[1]?.active || null,
@@ -249,6 +367,7 @@ function render(state) {
       previousBench: previousSnapshot?.players?.[0]?.bench || [],
     },
   );
+  syncBenchZoneState(document.getElementById("player-bench-zone"), state);
   renderPokemonList(
     document.getElementById("opponent-bench"),
     ai.bench,
@@ -261,19 +380,26 @@ function render(state) {
   );
 
   renderHand(document.getElementById("player-hand"), human.hand, context, previousSnapshot?.players?.[0]?.hand || []);
-  renderContextActions(document.getElementById("context-actions"), context.actions);
+  const contextActionsElement = document.getElementById("context-actions");
+  if (contextActionsElement) {
+    renderContextActions(contextActionsElement, context.actions);
+  }
   renderDebugActions(document.getElementById("debug-actions"), state.legal_actions);
   renderLog(document.getElementById("battle-log"), state.log, previousSnapshot?.log || []);
 
-  document.getElementById("context-instructions").textContent = context.instructions;
+  const contextInstructionsElement = document.getElementById("context-instructions");
+  if (contextInstructionsElement) {
+    contextInstructionsElement.textContent = context.instructions;
+  }
   document.getElementById("new-game-button").disabled = aiIsRunning;
   document.getElementById("clear-selection-button").disabled =
     aiIsRunning || (!uiState.selectedCardId && !uiState.selectedBoardTarget);
-  document.getElementById("ai-turn-button").disabled =
-    aiIsRunning || state.current_player !== 1 || state.winner !== null;
 
   updateStatus(makeStatusMessage(state, context));
   previousState = JSON.parse(JSON.stringify(state));
+  if (state.current_player === 1 && state.winner === null) {
+    queueAiTurn();
+  }
 }
 
 function renderEnergyRow(element, energyCards, options) {
@@ -295,13 +421,20 @@ function renderEnergyRow(element, energyCards, options) {
 function renderDiscard(element, discardTop, discardCount) {
   element.innerHTML = "";
   if (!discardTop) {
-    element.appendChild(buildPlaceholder("Discard pile empty."));
+    element.appendChild(buildPlaceholder("Empty."));
     return;
   }
 
-  const card = buildMiniCard(discardTop);
-  const meta = card.querySelector(".card-meta");
-  meta.textContent = `Top of discard • ${discardCount} total`;
+  const card = buildMiniCard(discardTop, {
+    hideAccent: true,
+    hideCopy: true,
+  });
+  card.classList.add("pile-card", "discard-pile-card");
+  card.title = `${discardTop.name} • ${discardCount} card${discardCount === 1 ? "" : "s"}`;
+  if (discardCount > 1) {
+    card.classList.add("is-stacked");
+  }
+  card.appendChild(buildPileCountBadge(discardCount));
   element.appendChild(card);
 }
 
@@ -323,6 +456,7 @@ function renderPokemonList(element, pokemonList, options) {
       buildPokemonCard(pokemon, {
         ...options,
         compact: true,
+        benchCard: true,
         previousPokemon,
       }),
     );
@@ -399,17 +533,21 @@ function renderLog(element, logEntries, previousLogEntries) {
 
 function buildPokemonCard(pokemon, options) {
   if (!pokemon) {
-    return buildPlaceholder("No Pokemon in this slot.");
+    return buildActiveSlotPlaceholder();
   }
 
   const card = document.createElement("article");
   const classNames = ["board-card"];
   const isCompact = !!options.compact;
+  const isBenchCard = !!options.benchCard;
   if (options.clickable) {
     classNames.push("is-clickable");
   }
   if (isCompact) {
     classNames.push("is-compact");
+  }
+  if (isBenchCard) {
+    classNames.push("is-bench-card");
   }
   if (options.selectedTarget && refsMatch(options.selectedTarget, pokemon.ref)) {
     classNames.push("is-selected");
@@ -434,9 +572,10 @@ function buildPokemonCard(pokemon, options) {
   card.className = classNames.join(" ");
   card.dataset.element = pokemon.element || "";
   card.dataset.kind = pokemon.kind || "";
+  card.title = pokemon.name;
+  card.setAttribute("aria-label", pokemon.name);
   const hpPercent = pokemon.hp ? Math.max(0, Math.round((pokemon.remaining_hp / pokemon.hp) * 100)) : 0;
   const healthClass = hpPercent <= 33 ? "is-danger" : hpPercent <= 66 ? "is-warning" : "";
-  const evolutionLine = pokemon.stack.map((cardItem) => cardItem.name).join(" -> ");
   const primaryStageLabel = isCompact
     ? `HP ${pokemon.remaining_hp}/${pokemon.hp}`
     : `${formatStageLabel(pokemon.stage)} • ${formatElementLabel(pokemon.element)}`;
@@ -445,15 +584,20 @@ function buildPokemonCard(pokemon, options) {
   if (pokemon.damage > 0) {
     compactStatPills.push(`<span class="info-pill">Damage ${pokemon.damage}</span>`);
   }
-  if (pokemon.can_attack) {
-    compactStatPills.push('<span class="info-pill is-accent">Attack ready</span>');
-  }
   if (pokemon.requires_promotion) {
     compactStatPills.push('<span class="info-pill">Promote</span>');
   }
   if (!compactStatPills.length && isCompact) {
     compactStatPills.push('<span class="info-pill">Benched</span>');
   }
+  if (isBenchCard) {
+    card.innerHTML = `${buildPokemonImageMarkup(pokemon)}`;
+    if (options.clickable) {
+      card.addEventListener("click", () => toggleSelectedBoardTarget(pokemon.ref));
+    }
+    return card;
+  }
+
   card.innerHTML = `
     ${buildPokemonImageMarkup(pokemon)}
     <div class="card-copy">
@@ -473,23 +617,45 @@ function buildPokemonCard(pokemon, options) {
         ${isCompact ? compactStatPills.join("") : `
           <span class="info-pill">Damage ${pokemon.damage}</span>
           <span class="info-pill">HP ${pokemon.remaining_hp}/${pokemon.hp}</span>
-          ${pokemon.can_attack ? '<span class="info-pill is-accent">Attack ready</span>' : ""}
         `}
       </div>
       ${isCompact ? "" : `
         <div class="attack-list">
-          ${pokemon.attacks.map(renderAttackChip).join("")}
+          ${pokemon.attacks.map((attack, attackIndex) => renderAttackChip(pokemon, attack, attackIndex, options)).join("")}
         </div>
-        <p class="card-meta card-stack">Evolution line: ${escapeHtml(evolutionLine)}</p>
       `}
-      ${isCompact && compactTags === "Benched" ? "" : `<p class="card-tags">${escapeHtml(isCompact ? compactTags : describePokemonTags(pokemon))}</p>`}
+      ${isCompact && compactTags !== "Benched" ? `<p class="card-tags">${escapeHtml(compactTags)}</p>` : ""}
     </div>
   `;
+
+  const attackButtons = card.querySelectorAll(".attack-chip-button[data-attack-index]");
+  for (const attackButton of attackButtons) {
+    attackButton.addEventListener("click", (event) => {
+      event.stopPropagation();
+      const attackIndex = Number(attackButton.dataset.attackIndex);
+      const attackAction = findAttackActionForPokemon(pokemon, attackIndex);
+      if (attackAction) {
+        submitAction(attackAction);
+      }
+    });
+  }
 
   if (options.clickable) {
     card.addEventListener("click", () => toggleSelectedBoardTarget(pokemon.ref));
   }
   return card;
+}
+
+function buildActiveSlotPlaceholder() {
+  const element = document.createElement("article");
+  element.className = "board-card active-slot-placeholder";
+  element.setAttribute("aria-label", "Active Spot");
+  element.innerHTML = `
+    <div class="active-slot-placeholder-copy">
+      <span class="active-slot-placeholder-label">Active Spot</span>
+    </div>
+  `;
+  return element;
 }
 
 function buildMiniCard(card, options = {}) {
@@ -513,24 +679,35 @@ function buildMiniCard(card, options = {}) {
   element.className = classNames.join(" ");
   element.dataset.element = card.element || "";
   element.dataset.kind = card.kind || "";
-  const typeLabel = formatCardAccentLabel(card);
-  const meta = [formatKindLabel(card.kind), card.stage ? formatStagePillLabel(card.stage) : ""]
-    .filter(Boolean)
-    .join(" • ");
+  const copyMarkup = options.hideCopy
+    ? ""
+    : (() => {
+        const typeLabel = formatCardAccentLabel(card);
+        const meta = options.metaText ??
+          [formatKindLabel(card.kind), card.stage ? formatStagePillLabel(card.stage) : ""]
+            .filter(Boolean)
+            .join(" • ");
+        const accentMarkup = options.hideAccent
+          ? ""
+          : `<div class="type-pill">${escapeHtml(typeLabel)}</div>`;
+        return `
+          <div class="card-copy">
+            <div class="card-title-row">
+              <div class="card-title-group">
+                <div class="card-title">${escapeHtml(card.name)}</div>
+                <p class="card-meta">${escapeHtml(meta)}</p>
+              </div>
+              ${accentMarkup}
+            </div>
+          </div>
+        `;
+      })();
   element.innerHTML = `
     <div class="mini-card-media">
       ${buildCardImageMarkup(card.image_url, card.name)}
       ${options.playable ? '<div class="mini-card-badge">Ready</div>' : ""}
     </div>
-    <div class="card-copy">
-      <div class="card-title-row">
-        <div class="card-title-group">
-          <div class="card-title">${escapeHtml(card.name)}</div>
-          <p class="card-meta">${escapeHtml(meta)}</p>
-        </div>
-        <div class="type-pill">${escapeHtml(typeLabel)}</div>
-      </div>
-    </div>
+    ${copyMarkup}
   `;
   return element;
 }
@@ -539,33 +716,27 @@ function buildEnergySpotCard(energyCards, options = {}) {
   let element;
   if (energyCards.length) {
     const topCard = energyCards[energyCards.length - 1];
-    element = buildMiniCard(topCard, { clickable: options.clickable });
-    element.classList.add("energy-pile-card");
+    element = buildMiniCard(topCard, {
+      clickable: options.clickable,
+      hideAccent: true,
+      hideCopy: true,
+    });
+    element.classList.add("pile-card", "energy-pile-card");
     if (energyCards.length > 1) {
       element.classList.add("is-stacked");
-      const badge = document.createElement("div");
-      badge.className = "energy-count-badge";
-      badge.textContent = String(energyCards.length);
-      element.appendChild(badge);
-    }
-
-    const meta = element.querySelector(".card-meta");
-    if (meta) {
-      meta.textContent =
-        energyCards.length === 1 ? "1 energy in play" : `${energyCards.length} energy in play`;
+      element.appendChild(buildPileCountBadge(energyCards.length));
     }
   } else {
     element = document.createElement("article");
-    const classNames = ["mini-card", "energy-pile-card", "energy-empty-card"];
+    const classNames = ["mini-card", "pile-card", "energy-pile-card", "energy-empty-card"];
     if (options.clickable) {
       classNames.push("is-clickable");
     }
     element.className = classNames.join(" ");
     element.innerHTML = `
-      <div class="energy-empty-state">Energy spot empty.</div>
+      <div class="energy-empty-state">Empty</div>
       <div class="card-copy">
-        <div class="card-title">Energy Spot</div>
-        <p class="card-meta">0 energy in play</p>
+        <p class="card-meta">No attachments</p>
       </div>
     `;
   }
@@ -577,6 +748,13 @@ function buildEnergySpotCard(energyCards, options = {}) {
     element.classList.add("is-targetable");
   }
   return element;
+}
+
+function buildPileCountBadge(count) {
+  const badge = document.createElement("div");
+  badge.className = "pile-count-badge";
+  badge.textContent = String(count);
+  return badge;
 }
 
 function buildPlaceholder(text) {
@@ -598,7 +776,6 @@ function buildPokemonImageMarkup(pokemon) {
     pokemon.remaining_hp !== pokemon.hp
       ? `
         <div class="card-hp-badge">
-          <span class="card-hp-label">HP</span>
           <span class="card-hp-value">${pokemon.remaining_hp}<span class="card-hp-total">/${pokemon.hp}</span></span>
         </div>
       `
@@ -621,37 +798,60 @@ function buildPokemonImageMarkup(pokemon) {
   `;
 }
 
-function renderAttackChip(attack) {
+function renderAttackChip(pokemon, attack, attackIndex, options) {
+  const attackAction = findAttackActionForPokemon(pokemon, attackIndex);
+  const isPlayersActivePokemon =
+    options.clickable &&
+    pokemon.ref?.player_index === 0 &&
+    pokemon.ref?.zone === "active";
+  const tagName = isPlayersActivePokemon ? "button" : "div";
+  const classes = ["attack-chip"];
+  if (isPlayersActivePokemon) {
+    classes.push("attack-chip-button");
+    if (attackAction) {
+      classes.push("is-ready");
+    }
+  }
   const effect =
     attack.effect && attack.effect !== "none"
       ? `<span class="attack-effect">${escapeHtml(formatEffectLabel(attack.effect))}</span>`
       : "";
+  const tagAttributes = [
+    `class="${classes.join(" ")}"`,
+    `data-attack-index="${attackIndex}"`,
+  ];
+  if (tagName === "button") {
+    tagAttributes.push('type="button"');
+    if (!attackAction || aiIsRunning) {
+      tagAttributes.push("disabled");
+    }
+  }
   return `
-    <div class="attack-chip">
+    <${tagName} ${tagAttributes.join(" ")}>
       <div class="attack-topline">
         <span class="attack-name">${escapeHtml(attack.name)}</span>
         <span class="attack-stats">Cost ${attack.cost} • Damage ${attack.damage}</span>
       </div>
       ${effect}
-    </div>
+    </${tagName}>
   `;
 }
 
-function describePokemonTags(pokemon) {
-  const tags = [];
-  if (pokemon.can_attack) {
-    tags.push("Attack ready");
+function findAttackActionForPokemon(pokemon, attackIndex) {
+  if (!currentState || !pokemon?.ref) {
+    return null;
   }
-  if (pokemon.requires_promotion) {
-    tags.push("Must promote");
-  }
-  if (pokemon.target_action_types.length) {
-    tags.push(`Targeted by ${pokemon.target_action_types.join(", ")}`);
-  }
-  if (pokemon.source_action_types.length && !pokemon.can_attack && !pokemon.requires_promotion) {
-    tags.push(`Can ${pokemon.source_action_types.join(", ")}`);
-  }
-  return tags.length ? tags.join(" • ") : "No immediate action";
+
+  return (
+    currentState.legal_actions.find(
+      (actionView) =>
+        actionView.type === "attack" &&
+        actionView.source?.zone === pokemon.ref.zone &&
+        actionView.source?.player_index === pokemon.ref.player_index &&
+        actionView.source?.instance_id === pokemon.ref.instance_id &&
+        actionView.action?.attack_index === attackIndex,
+    ) || null
+  );
 }
 
 function describeCompactPokemonTags(pokemon) {
@@ -682,6 +882,98 @@ function renderMatchMeta(state) {
       : state.current_player === 0 || state.pending_promotion_for === 0
         ? "session-chip session-chip-accent"
         : "session-chip";
+}
+
+function renderTrainerPicker(state) {
+  const trainerSelect = document.getElementById("trainer-select");
+  const trainerMeta = document.getElementById("trainer-meta");
+  const trainerProgress = document.getElementById("trainer-progress");
+  const trainerProgressLabel = document.getElementById("trainer-progress-label");
+  const trainerProgressValue = document.getElementById("trainer-progress-value");
+  const trainerProgressFill = document.getElementById("trainer-progress-fill");
+  if (
+    !trainerSelect ||
+    !trainerMeta ||
+    !trainerProgress ||
+    !trainerProgressLabel ||
+    !trainerProgressValue ||
+    !trainerProgressFill
+  ) {
+    return;
+  }
+
+  const trainers = state.available_trainers || [];
+  const selectedTrainerId = resolveTrainerSelection(state);
+  trainerSelect.innerHTML = trainers
+    .map(
+      (trainer) => `
+        <option value="${escapeHtml(trainer.id)}">${escapeHtml(buildTrainerLabel(trainer))}</option>
+      `,
+    )
+    .join("");
+  trainerSelect.value = selectedTrainerId;
+  trainerSelect.disabled = aiIsRunning;
+
+  const selectedTrainer =
+    trainers.find((trainer) => trainer.id === selectedTrainerId) || state.ai_trainer || null;
+  if (!selectedTrainer) {
+    trainerMeta.textContent = "Choose a gym leader for your next battle.";
+    trainerProgress.hidden = true;
+    return;
+  }
+
+  const isCurrentOpponent = state.ai_trainer?.id === selectedTrainer.id;
+  const prefix = isCurrentOpponent ? "Current opponent" : "Next battle";
+  trainerMeta.textContent =
+    `${prefix}: ${selectedTrainer.name} • Lv. ${selectedTrainer.level} • ` +
+    `${selectedTrainer.experience} XP • ${selectedTrainer.specialty} specialist`;
+
+  const progress = getTrainerLevelProgress(selectedTrainer);
+  trainerProgress.hidden = false;
+  trainerProgressLabel.textContent = `${progress.xpToNextLevel} XP to Lv. ${progress.nextLevel}`;
+  trainerProgressValue.textContent = `${progress.xpIntoLevel} / ${progress.totalLevelXp} XP`;
+  trainerProgressFill.style.width = `${progress.progressPercent}%`;
+}
+
+function renderOpponentIdentity(state) {
+  const opponentName = document.getElementById("opponent-name");
+  const opponentKicker = document.getElementById("opponent-kicker");
+  if (!opponentName || !opponentKicker) {
+    return;
+  }
+
+  const trainer = state.ai_trainer;
+  if (!trainer) {
+    opponentName.textContent = "AI Board";
+    opponentKicker.textContent = "Opponent";
+    return;
+  }
+
+  opponentName.textContent = trainer.name;
+  opponentKicker.textContent = `${trainer.specialty} Gym Leader • Lv. ${trainer.level}`;
+}
+
+function renderTurnHighlights(state) {
+  const boardPanels = [
+    {
+      element: document.getElementById("player-board-panel"),
+      player: state.players[0],
+      isActive: state.current_player === 0,
+    },
+    {
+      element: document.getElementById("opponent-board-panel"),
+      player: state.players[1],
+      isActive: state.current_player === 1,
+    },
+  ];
+
+  for (const boardPanel of boardPanels) {
+    if (!boardPanel.element) {
+      continue;
+    }
+    boardPanel.element.dataset.element = boardPanel.player.element || "";
+    boardPanel.element.classList.toggle("is-turn-active", boardPanel.isActive);
+  }
 }
 
 function renderPlayerSummary(element, player) {
@@ -812,18 +1104,43 @@ function makePhaseLabel(state) {
 }
 
 function toggleSelectedCard(instanceId) {
-  uiState.selectedCardId = uiState.selectedCardId === instanceId ? null : instanceId;
+  const nextSelectedCardId = uiState.selectedCardId === instanceId ? null : instanceId;
+
+  if (
+    nextSelectedCardId &&
+    uiState.selectedBoardTarget &&
+    tryAutoSubmitHandTargetedAction(nextSelectedCardId, uiState.selectedBoardTarget)
+  ) {
+    return;
+  }
+
+  uiState.selectedCardId = nextSelectedCardId;
   render(currentState);
 }
 
 function toggleSelectedBoardTarget(targetRef) {
+  const currentTarget = uiState.selectedBoardTarget;
   const nextTarget =
-    uiState.selectedBoardTarget && refsMatch(uiState.selectedBoardTarget, targetRef)
+    currentTarget && refsMatch(currentTarget, targetRef)
       ? null
       : { ...targetRef };
 
-  if (nextTarget && tryAutoSubmitTargetedAction(nextTarget)) {
-    return;
+  if (nextTarget) {
+    if (tryAutoSubmitTargetedAction(nextTarget)) {
+      return;
+    }
+
+    if (
+      currentTarget &&
+      !refsMatch(currentTarget, nextTarget) &&
+      tryAutoSubmitBoardTargetedAction(currentTarget, nextTarget)
+    ) {
+      return;
+    }
+
+    if (tryAutoSubmitPromotion(nextTarget)) {
+      return;
+    }
   }
 
   uiState.selectedBoardTarget = nextTarget;
@@ -831,24 +1148,108 @@ function toggleSelectedBoardTarget(targetRef) {
 }
 
 function tryAutoSubmitTargetedAction(targetRef) {
-  if (!currentState || !uiState.selectedCardId) {
+  return tryAutoSubmitHandTargetedAction(uiState.selectedCardId, targetRef);
+}
+
+function tryAutoSubmitHandTargetedAction(sourceCardId, targetRef) {
+  if (!currentState || !sourceCardId || aiIsRunning) {
     return false;
   }
 
   const matchingActions = currentState.legal_actions.filter(
     (action) =>
       action.source?.zone === "hand" &&
-      action.source.instance_id === uiState.selectedCardId &&
+      action.source.instance_id === sourceCardId &&
       action.target &&
       refsMatch(action.target, targetRef),
   );
 
-  if (matchingActions.length === 1 && matchingActions[0].type === "play_energy") {
+  if (matchingActions.length !== 1) {
+    return false;
+  }
+
+  submitAction(matchingActions[0]);
+  return true;
+}
+
+function tryAutoSubmitBoardTargetedAction(sourceRef, targetRef) {
+  if (!currentState || aiIsRunning) {
+    return false;
+  }
+
+  const matchingActions = currentState.legal_actions.filter(
+    (action) =>
+      action.source &&
+      action.source.zone !== "hand" &&
+      refsMatch(action.source, sourceRef) &&
+      action.target &&
+      refsMatch(action.target, targetRef),
+  );
+
+  if (matchingActions.length === 1) {
     submitAction(matchingActions[0]);
     return true;
   }
 
   return false;
+}
+
+function tryAutoSubmitPromotion(sourceRef) {
+  if (!currentState || aiIsRunning) {
+    return false;
+  }
+
+  const matchingActions = currentState.legal_actions.filter(
+    (action) =>
+      action.type === "promote" &&
+      action.source &&
+      refsMatch(action.source, sourceRef),
+  );
+
+  if (matchingActions.length !== 1) {
+    return false;
+  }
+
+  const [action] = matchingActions;
+  if (action.target?.zone === "active" && (action.target.instance_id ?? null) === null) {
+    submitAction(action);
+    return true;
+  }
+
+  return false;
+}
+
+function tryAutoSubmitBenchPlay() {
+  const actionView = findBenchPlayAction(currentState);
+  if (!actionView) {
+    return false;
+  }
+
+  submitAction(actionView);
+  return true;
+}
+
+function findBenchPlayAction(state) {
+  if (!state || !uiState.selectedCardId || aiIsRunning) {
+    return null;
+  }
+
+  const matchingActions = state.legal_actions.filter(
+    (action) =>
+      action.type === "bench_basic" &&
+      action.source?.zone === "hand" &&
+      action.source.instance_id === uiState.selectedCardId,
+  );
+
+  return matchingActions.length === 1 ? matchingActions[0] : null;
+}
+
+function syncBenchZoneState(element, state) {
+  if (!element) {
+    return;
+  }
+
+  element.classList.toggle("is-actionable", !!findBenchPlayAction(state));
 }
 
 function clearSelectionsAndRender() {
@@ -910,6 +1311,12 @@ function deriveContext(state) {
         action.source.zone !== "hand" &&
         refsMatch(action.source, uiState.selectedBoardTarget),
     );
+    const directSourceActions = sourceActions.filter(
+      (action) => !action.target || refsMatch(action.target, uiState.selectedBoardTarget),
+    );
+    const targetedBoardActions = sourceActions.filter(
+      (action) => action.target && !refsMatch(action.target, uiState.selectedBoardTarget),
+    );
     const targetActions = legalActions.filter(
       (action) =>
         action.source?.zone === "hand" &&
@@ -917,14 +1324,21 @@ function deriveContext(state) {
         refsMatch(action.target, uiState.selectedBoardTarget),
     );
 
-    actions = sourceActions;
+    actions = directSourceActions;
+    const visibleBoardTargets = targetedBoardActions
+      .map((action) => action.target)
+      .filter((target) => !(target.zone === "active" && (target.instance_id ?? null) === null));
+    if (visibleBoardTargets.length) {
+      instructions.push("This Pokemon is selected. Now choose one of the highlighted board targets.");
+      collectUniqueRefs(visibleBoardTargets, highlightedTargets);
+    }
     for (const action of targetActions) {
       highlightedHandIds.add(action.source.instance_id);
     }
     if (targetActions.length) {
       instructions.push("This target is valid. Now choose one of the highlighted hand cards.");
     }
-    if (!sourceActions.length && !targetActions.length) {
+    if (!directSourceActions.length && !targetActions.length && !targetedBoardActions.length) {
       instructions.push("No legal actions are tied to this board card right now.");
     }
   } else {
@@ -1004,23 +1418,36 @@ function refsMatch(left, right) {
 }
 
 function makeStatusMessage(state, context) {
+  const battleLabel = `${state.players[0].deck_name} vs ${state.ai_trainer?.name || state.players[1].deck_name}`;
   if (state.winner === 0) {
-    return `${state.matchup_label} • Game over: you won.`;
+    return `${battleLabel} • Game over: you won.`;
   }
   if (state.winner === 1) {
-    return `${state.matchup_label} • Game over: the AI won.`;
+    return `${battleLabel} • Game over: the AI won.`;
+  }
+  if (aiAutoRunPaused && state.current_player === 1) {
+    return `${battleLabel} • AI auto-run is paused. Refresh or restart the backend server, then try again.`;
   }
   if (state.pending_promotion_for === 0) {
-    return `${state.matchup_label} • Promotion required. ${context.instructions}`;
+    return `${battleLabel} • Promotion required. ${context.instructions}`;
   }
   if (state.current_player === 0) {
-    return `${state.matchup_label} • Your turn. ${context.instructions}`;
+    return `${battleLabel} • Your turn. ${context.instructions}`;
   }
-  return `${state.matchup_label} • AI turn in progress.`;
+  return `${battleLabel} • AI turn in progress.`;
 }
 
 function updateStatus(message) {
   document.getElementById("status-banner").textContent = message;
+}
+
+function handlePlayerBenchZoneClick(event) {
+  if (!tryAutoSubmitBenchPlay()) {
+    return;
+  }
+
+  event.preventDefault();
+  event.stopPropagation();
 }
 
 function escapeHtml(text) {
@@ -1033,8 +1460,11 @@ function escapeHtml(text) {
 }
 
 document.getElementById("new-game-button").addEventListener("click", newGame);
-document.getElementById("ai-turn-button").addEventListener("click", runAiTurn);
 document
   .getElementById("clear-selection-button")
   .addEventListener("click", clearSelectionsAndRender);
+document
+  .getElementById("player-bench-zone")
+  .addEventListener("click", handlePlayerBenchZoneClick, true);
+document.getElementById("trainer-select").addEventListener("change", handleTrainerChange);
 window.addEventListener("load", refreshGame);

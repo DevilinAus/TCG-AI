@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import patch
 
-from backend.tcg_ai.server import ApiError, TcgApplication
+from backend.tcg_ai.server import (
+    AI_ACTION_DELAY_MAX_MS,
+    AI_ACTION_DELAY_MIN_MS,
+    ApiError,
+    TcgApplication,
+)
+from backend.tcg_ai.models import PokemonInPlay
 
 
 class ApiTests(unittest.TestCase):
@@ -18,6 +25,31 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(state["players"][0]["energy_count"], 0)
         self.assertTrue(state["players"][0]["hand"][0]["image_url"].startswith("/assets/cards/"))
         self.assertEqual(state["ai_learning"]["games_played"], 0)
+        self.assertEqual(state["ai_trainer"]["id"], "brock")
+        self.assertEqual(state["ai_trainer"]["level"], 1)
+        self.assertEqual(len(state["available_trainers"]), 8)
+
+    def test_new_game_can_target_a_specific_gym_leader(self) -> None:
+        state = self.app.new_game({"human_first": True, "trainer_id": "misty"})
+
+        self.assertEqual(state["ai_trainer"]["id"], "misty")
+        self.assertEqual(state["ai_trainer"]["name"], "Misty")
+        self.assertEqual(state["players"][1]["name"], "Misty")
+        self.assertEqual(
+            [trainer["id"] for trainer in state["available_trainers"]],
+            ["brock", "misty", "lt_surge", "erika", "koga", "sabrina", "blaine", "giovanni"],
+        )
+        selected_trainer = next(
+            trainer for trainer in state["available_trainers"] if trainer["id"] == "misty"
+        )
+        self.assertTrue(selected_trainer["selected"])
+
+    def test_new_game_rolls_for_the_starting_player_when_turn_order_is_not_provided(self) -> None:
+        with patch("backend.tcg_ai.server.roll_starting_player_die", return_value=5):
+            state = self.app.new_game({"trainer_id": "misty"})
+
+        self.assertEqual(state["current_player"], 1)
+        self.assertIn("Opening die roll: 5. Misty goes first.", [entry["text"] for entry in state["log"]])
 
     def test_sessions_are_isolated_from_each_other(self) -> None:
         first_state = self.app.new_game({"human_first": True})
@@ -75,6 +107,9 @@ class ApiTests(unittest.TestCase):
         self.assertGreater(updated["ai_learning"]["recent_episode_rewards"][0], 0)
         self.assertEqual(len(updated["ai_turn_replay"]["steps"]), 1)
         self.assertEqual(updated["ai_turn_replay"]["steps"][0]["action"]["type"], "attack")
+        self.assertDelayInRange(updated["ai_turn_replay"]["steps"][0]["delay_ms"])
+        self.assertEqual(updated["ai_trainer"]["experience"], 26)
+        self.assertEqual(updated["ai_trainer"]["level"], 1)
         attack_bias = self._find_action_bias(updated["ai_learning"]["action_biases"], "attack")
         self.assertEqual(attack_bias["samples"], 1)
 
@@ -91,6 +126,8 @@ class ApiTests(unittest.TestCase):
 
         replay_steps = updated["ai_turn_replay"]["steps"]
         self.assertEqual([step["action"]["type"] for step in replay_steps], ["play_energy", "attack"])
+        self.assertDelayInRange(replay_steps[0]["delay_ms"])
+        self.assertDelayInRange(replay_steps[1]["delay_ms"])
         self.assertEqual(replay_steps[0]["state"]["players"][1]["energy_count"], 1)
         self.assertEqual(replay_steps[0]["state"]["current_player"], 1)
         self.assertEqual(replay_steps[1]["state"]["current_player"], 0)
@@ -111,11 +148,29 @@ class ApiTests(unittest.TestCase):
         second_step = self.app.ai_step({"session_id": state["session_id"]})
 
         self.assertEqual(first_step["ai_step"]["action"]["type"], "play_energy")
+        self.assertDelayInRange(first_step["ai_step"]["delay_ms"])
         self.assertEqual(first_step["players"][1]["energy_count"], 1)
         self.assertEqual(first_step["current_player"], 1)
         self.assertEqual(second_step["ai_step"]["action"]["type"], "attack")
+        self.assertDelayInRange(second_step["ai_step"]["delay_ms"])
         self.assertEqual(second_step["players"][0]["active"]["damage"], 10)
         self.assertEqual(second_step["current_player"], 0)
+
+    def test_promotion_actions_reference_a_benched_source_and_empty_active_target(self) -> None:
+        state = self.app.new_game({"human_first": True})
+        session = self.app.sessions.get(state["session_id"])
+        self._move_card_to_bench(session.state, 0, "growlithe")
+        session.state.players[0].active = None
+        session.state.current_player = 0
+        session.state.pending_promotion_for = 0
+
+        snapshot = self.app.get_game(state["session_id"])
+        promote_action = self._find_action(snapshot, "promote")
+
+        self.assertEqual(promote_action["source"]["zone"], "bench")
+        self.assertEqual(promote_action["source"]["name"], "Growlithe")
+        self.assertEqual(promote_action["target"]["zone"], "active")
+        self.assertIsNone(promote_action["target"]["instance_id"])
 
     def _find_action(self, state: dict, action_type: str) -> dict:
         for action in state["legal_actions"]:
@@ -138,6 +193,15 @@ class ApiTests(unittest.TestCase):
                 zone.remove(instance_id)
         player.energy_zone.append(instance_id)
 
+    def _move_card_to_bench(self, state, player_index: int, card_id: str) -> None:
+        player = state.players[player_index]
+        instance_id = self._find_instance_id(state, player_index, card_id)
+        for zone_name in ("hand", "deck", "discard", "energy_zone"):
+            zone = getattr(player, zone_name)
+            if instance_id in zone:
+                zone.remove(instance_id)
+        player.bench.append(PokemonInPlay(stack=[instance_id]))
+
     def _find_instance_id(self, state, player_index: int, card_id: str) -> str:
         player = state.players[player_index]
         for zone_name in ("hand", "deck", "discard", "energy_zone"):
@@ -146,6 +210,10 @@ class ApiTests(unittest.TestCase):
                 if state.cards[instance_id].card_id == card_id:
                     return instance_id
         self.fail(f"Could not find instance of {card_id} for player {player_index}")
+
+    def assertDelayInRange(self, delay_ms: int) -> None:
+        self.assertGreaterEqual(delay_ms, AI_ACTION_DELAY_MIN_MS)
+        self.assertLessEqual(delay_ms, AI_ACTION_DELAY_MAX_MS)
 
 
 if __name__ == "__main__":

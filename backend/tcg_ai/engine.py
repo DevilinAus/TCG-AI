@@ -11,14 +11,18 @@ BENCH_LIMIT = 3
 HEAL_AMOUNT = 30
 
 
-def create_game(seed: int | None = None, human_first: bool = True) -> GameState:
+def create_game(
+    seed: int | None = None,
+    human_first: bool = True,
+    ai_name: str = "AI",
+) -> GameState:
     """Create a new game for the Charmander vs Squirtle MVP matchup."""
     if seed is None:
         seed = random.randint(1, 999_999)
 
     rng = random.Random(seed)
     human_player, human_cards = _build_player_state("You", DECK_DEFINITIONS["charmander"], 0, rng)
-    ai_player, ai_cards = _build_player_state("AI", DECK_DEFINITIONS["squirtle"], 1, rng)
+    ai_player, ai_cards = _build_player_state(ai_name, DECK_DEFINITIONS["squirtle"], 1, rng)
 
     current_player = 0 if human_first else 1
     state = GameState(
@@ -85,7 +89,7 @@ def list_legal_actions(state: GameState) -> list[dict[str, Any]]:
         if card.kind != "pokemon" or card.stage != "stage1":
             continue
 
-        if _can_evolve(state, player.active, card):
+        if _can_evolve(state, player, player.active, card):
             base_name = _pokemon_name(state, player.active)
             actions.append(
                 {
@@ -97,7 +101,7 @@ def list_legal_actions(state: GameState) -> list[dict[str, Any]]:
             )
 
         for bench_index, pokemon in enumerate(player.bench):
-            if _can_evolve(state, pokemon, card):
+            if _can_evolve(state, player, pokemon, card):
                 base_name = _pokemon_name(state, pokemon)
                 actions.append(
                     {
@@ -177,7 +181,7 @@ def apply_action(state: GameState, action: dict[str, Any]) -> GameState:
     if action_type == "bench_basic":
         card_id = _remove_from_hand(player, action["hand_card_id"])
         card = card_definition(state, card_id)
-        player.bench.append(PokemonInPlay(stack=[card_id]))
+        player.bench.append(PokemonInPlay(stack=[card_id], entered_play_turn=state.turn_number))
         state.log.append(f"{player.name} benched {card.name}.")
         return state
 
@@ -285,7 +289,7 @@ def _build_player_state(
         deck=deck_ids,
         hand=hand,
         energy_zone=[],
-        active=PokemonInPlay(stack=[starter_card]),
+        active=PokemonInPlay(stack=[starter_card], entered_play_turn=0),
     )
     return player, cards
 
@@ -294,6 +298,7 @@ def _begin_turn(state: GameState, player_index: int) -> None:
     state.current_player = player_index
     state.turn_number += 1
     player = state.players[player_index]
+    player.turns_taken += 1
     player.energy_played_this_turn = False
     state.log.append(f"Turn {state.turn_number}: {_player_possessive(player.name)} turn.")
     if player.deck:
@@ -400,8 +405,17 @@ def _remove_from_hand(player: PlayerState, instance_id: str) -> str:
     return instance_id
 
 
-def _can_evolve(state: GameState, pokemon: PokemonInPlay | None, evolution_card: CardDefinition) -> bool:
+def _can_evolve(
+    state: GameState,
+    player: PlayerState,
+    pokemon: PokemonInPlay | None,
+    evolution_card: CardDefinition,
+) -> bool:
     if pokemon is None:
+        return False
+    if player.turns_taken <= 1:
+        return False
+    if pokemon.entered_play_turn >= state.turn_number:
         return False
     base_card = get_top_card_definition(state, pokemon)
     return base_card is not None and base_card.name == evolution_card.evolves_from
