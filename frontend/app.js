@@ -18,6 +18,11 @@ const uiState = {
   selectedHumanDeckId: null,
 };
 
+const pointerState = {
+  clientX: null,
+  clientY: null,
+};
+
 const {
   deriveInteractionContext,
   findBenchPlayActionForSelection,
@@ -60,6 +65,41 @@ function waitForPaint() {
   return new Promise((resolve) => {
     window.requestAnimationFrame(() => resolve());
   });
+}
+
+function syncCursorForPointerPosition() {
+  if (pointerState.clientX === null || pointerState.clientY === null) {
+    document.body.style.cursor = "";
+    return;
+  }
+
+  const hoveredElement = document.elementFromPoint(pointerState.clientX, pointerState.clientY);
+  const interactiveAncestor = hoveredElement?.closest(
+    [
+      ".mini-card.is-clickable",
+      ".board-card.is-clickable",
+      ".active-slot-placeholder.is-clickable",
+      ".attack-chip-button:not(:disabled)",
+      ".end-turn-button.is-ready:not(:disabled)",
+      ".action-button:not(:disabled)",
+      "button:not(:disabled)",
+      "select:not(:disabled)",
+      "label",
+    ].join(", "),
+  );
+  document.body.style.cursor = interactiveAncestor ? "pointer" : "";
+}
+
+function handlePointerMove(event) {
+  pointerState.clientX = event.clientX;
+  pointerState.clientY = event.clientY;
+  syncCursorForPointerPosition();
+}
+
+function handlePointerLeaveWindow() {
+  pointerState.clientX = null;
+  pointerState.clientY = null;
+  document.body.style.cursor = "";
 }
 
 function getStoredSessionId() {
@@ -197,6 +237,10 @@ async function runAiTurn() {
       render(currentState);
       await waitForPaint();
 
+      if (currentState.current_player !== 1 || currentState.winner !== null) {
+        break;
+      }
+
       if (!step?.action) {
         if (currentState.current_player === 1 && currentState.winner === null) {
           await runAiTurnReplayFallback();
@@ -237,6 +281,11 @@ async function runAiTurnReplayFallback() {
     render(currentState);
     updateStatus(buildAiReplayStatus(replayStep));
     await waitForPaint();
+
+    if (currentState.current_player !== 1 || currentState.winner !== null) {
+      break;
+    }
+
     await sleep(replayStep.delay_ms || FALLBACK_AI_STEP_DELAY_MS);
   }
 
@@ -493,6 +542,7 @@ function render(state) {
 
   updateStatus(makeStatusMessage(state, context));
   previousState = JSON.parse(JSON.stringify(state));
+  syncCursorForPointerPosition();
   if (state.current_player === 1 && state.winner === null) {
     queueAiTurn();
   }
@@ -1555,5 +1605,7 @@ document.getElementById("player-board-panel").addEventListener("click", handleBo
 document.getElementById("trainer-select").addEventListener("change", handleTrainerChange);
 document.getElementById("deck-select").addEventListener("change", handleDeckChange);
 document.querySelector(".dev-panel")?.addEventListener("toggle", syncDevPanelToggleLabel);
+window.addEventListener("pointermove", handlePointerMove);
+window.addEventListener("pointerleave", handlePointerLeaveWindow);
 syncDevPanelToggleLabel();
 window.addEventListener("load", refreshGame);
