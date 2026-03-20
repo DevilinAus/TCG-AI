@@ -138,6 +138,62 @@ class RewardLearner:
                 "action_biases": action_biases,
             }
 
+    def export_state(self) -> dict[str, Any]:
+        with self._lock:
+            return {
+                "learning_rate": self.learning_rate,
+                "discount": self.discount,
+                "exploration_rate": self.exploration_rate,
+                "min_exploration_rate": self.min_exploration_rate,
+                "feature_weights": dict(self._feature_weights),
+                "action_counts": dict(self._action_counts),
+                "action_totals": dict(self._action_totals),
+                "recent_episode_rewards": list(self._recent_episode_rewards),
+                "games_played": self._games_played,
+                "wins": self._wins,
+                "losses": self._losses,
+            }
+
+    def load_state(self, payload: dict[str, Any]) -> None:
+        if not isinstance(payload, dict):
+            return
+
+        with self._lock:
+            self.learning_rate = float(payload.get("learning_rate", self.learning_rate))
+            self.discount = float(payload.get("discount", self.discount))
+            self.exploration_rate = float(payload.get("exploration_rate", self.exploration_rate))
+            self.min_exploration_rate = float(
+                payload.get("min_exploration_rate", self.min_exploration_rate)
+            )
+            self._feature_weights = defaultdict(
+                float,
+                {
+                    str(feature): float(weight)
+                    for feature, weight in payload.get("feature_weights", {}).items()
+                },
+            )
+            self._action_counts = defaultdict(
+                int,
+                {
+                    str(action_type): int(count)
+                    for action_type, count in payload.get("action_counts", {}).items()
+                },
+            )
+            self._action_totals = defaultdict(
+                float,
+                {
+                    str(action_type): float(total)
+                    for action_type, total in payload.get("action_totals", {}).items()
+                },
+            )
+            self._recent_episode_rewards = deque(
+                [float(reward) for reward in payload.get("recent_episode_rewards", [])],
+                maxlen=MAX_RECENT_EPISODES,
+            )
+            self._games_played = int(payload.get("games_played", self._games_played))
+            self._wins = int(payload.get("wins", self._wins))
+            self._losses = int(payload.get("losses", self._losses))
+
     def _apply_weight_update(self, features: Iterable[str], reward: float) -> None:
         feature_list = tuple(features)
         if not feature_list:
@@ -297,10 +353,16 @@ def _pokemon_attack_potential(
             continue
 
         expected_damage = attack.damage
-        if attack.effect == "coin_flip_bonus_30":
+        if attack.effect == "coin_flip_bonus_20":
+            expected_damage += 10
+        elif attack.effect == "coin_flip_bonus_30":
             expected_damage += 15
+        elif attack.effect == "coin_flip_bonus_40":
+            expected_damage += 20
         elif attack.effect == "coin_flip_fail":
             expected_damage //= 2
+        elif attack.effect == "bonus_per_benched_matching_element_20":
+            expected_damage += 20 * _count_benched_matching_element(state, pokemon, card.element)
         best = max(best, expected_damage)
 
     return best
@@ -344,9 +406,34 @@ def _attack_would_knock_out(
 
     attack = active_card.attacks[attack_index]
     damage = attack.damage
-    if attack.effect == "coin_flip_bonus_30":
+    if attack.effect == "coin_flip_bonus_20":
+        damage += 10
+    elif attack.effect == "coin_flip_bonus_30":
         damage += 15
+    elif attack.effect == "coin_flip_bonus_40":
+        damage += 20
     elif attack.effect == "coin_flip_fail":
         damage //= 2
+    elif attack.effect == "bonus_per_benched_matching_element_20":
+        damage += 20 * _count_benched_matching_element(state, player.active, active_card.element)
 
     return damage >= max(0, defending_card.hp - opponent.active.damage)
+
+
+def _count_benched_matching_element(
+    state: GameState,
+    pokemon: PokemonInPlay | None,
+    element: str | None,
+) -> int:
+    if pokemon is None or not element:
+        return 0
+
+    for player in state.players:
+        if pokemon is player.active:
+            return sum(
+                1
+                for benched in player.bench
+                if (benched_card := get_top_card_definition(state, benched)) is not None
+                and benched_card.element == element
+            )
+    return 0

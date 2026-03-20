@@ -6,7 +6,16 @@ from typing import Literal
 
 CardKind = Literal["pokemon", "trainer", "energy"]
 Stage = Literal["basic", "stage1"]
-AttackEffect = Literal["none", "coin_flip_bonus_30", "coin_flip_fail"]
+AttackEffect = Literal[
+    "none",
+    "coin_flip_bonus_20",
+    "coin_flip_bonus_30",
+    "coin_flip_bonus_40",
+    "coin_flip_fail",
+    "heal_self_10",
+    "heal_self_20",
+    "bonus_per_benched_matching_element_20",
+]
 TrainerEffect = Literal["heal_30", "switch_active"]
 
 

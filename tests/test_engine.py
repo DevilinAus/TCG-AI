@@ -18,6 +18,14 @@ class EngineTests(unittest.TestCase):
         self.assertEqual(len(state.players[0].hand), 4)
         self.assertEqual(len(state.players[1].hand), 3)
 
+    def test_new_game_can_start_with_bulbasaur_and_pair_against_pikachu(self) -> None:
+        state = create_game(seed=7, human_first=True, human_deck_id="bulbasaur")
+
+        self.assertEqual(card_definition(state, state.players[0].active.stack[-1]).name, "Bulbasaur")
+        self.assertEqual(card_definition(state, state.players[1].active.stack[-1]).name, "Pikachu")
+        self.assertEqual(state.players[0].deck_name, "Bulbasaur Deck")
+        self.assertEqual(state.players[1].deck_name, "Pikachu Deck")
+
     def test_evolution_is_not_allowed_on_the_first_turn(self) -> None:
         state = create_game(seed=11, human_first=True)
         self._move_card_to_hand(state, 0, "charmeleon")
@@ -107,6 +115,32 @@ class EngineTests(unittest.TestCase):
 
         self.assertEqual(state.players[0].active.damage, 0)
         self.assertEqual(state.current_player, 0)
+
+    def test_self_heal_attack_recovers_damage_after_attacking(self) -> None:
+        state = create_game(seed=29, human_first=True, human_deck_id="bulbasaur")
+        self._set_active_pokemon(state, 0, ["oddish"])
+        self._set_active_pokemon(state, 1, ["pikachu"])
+        self._move_card_to_energy_zone(state, 0, "grass_energy")
+        state.players[0].active.damage = 20
+
+        action = self._find_action(state, "attack", attack_index=0)
+        apply_action(state, action)
+
+        self.assertEqual(state.players[0].active.damage, 10)
+        self.assertEqual(state.players[1].active.damage, 10)
+
+    def test_matching_bench_attack_bonus_adds_damage(self) -> None:
+        state = create_game(seed=29, human_first=True, human_deck_id="pikachu")
+        self._set_active_pokemon(state, 0, ["magneton"])
+        self._set_active_pokemon(state, 1, ["exeggutor"])
+        self._bench_basic_directly(state, 0, "magnemite")
+        self._move_card_to_energy_zone(state, 0, "lightning_energy")
+        self._move_card_to_energy_zone(state, 0, "lightning_energy")
+
+        action = self._find_action(state, "attack", attack_index=1)
+        apply_action(state, action)
+
+        self.assertEqual(state.players[1].active.damage, 40)
 
     def test_bench_limit_blocks_benching_a_fourth_basic(self) -> None:
         state = create_game(seed=31, human_first=True)

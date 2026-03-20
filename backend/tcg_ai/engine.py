@@ -4,7 +4,13 @@ from collections import defaultdict
 import random
 from typing import Any
 
-from .cards import CARD_DEFINITIONS, DECK_DEFINITIONS, DeckDefinition
+from .cards import (
+    CARD_DEFINITIONS,
+    DEFAULT_HUMAN_DECK_ID,
+    DECK_DEFINITIONS,
+    DeckDefinition,
+    paired_deck_id_for,
+)
 from .models import CardDefinition, CardInstance, GameState, PlayerState, PokemonInPlay
 
 BENCH_LIMIT = 3
@@ -15,14 +21,17 @@ def create_game(
     seed: int | None = None,
     human_first: bool = True,
     ai_name: str = "AI",
+    human_deck_id: str = DEFAULT_HUMAN_DECK_ID,
 ) -> GameState:
-    """Create a new game for the Charmander vs Squirtle MVP matchup."""
+    """Create a new game for the selected My First Battle deck pairing."""
     if seed is None:
         seed = random.randint(1, 999_999)
 
     rng = random.Random(seed)
-    human_player, human_cards = _build_player_state("You", DECK_DEFINITIONS["charmander"], 0, rng)
-    ai_player, ai_cards = _build_player_state(ai_name, DECK_DEFINITIONS["squirtle"], 1, rng)
+    human_deck = DECK_DEFINITIONS[human_deck_id]
+    ai_deck = DECK_DEFINITIONS[paired_deck_id_for(human_deck_id)]
+    human_player, human_cards = _build_player_state("You", human_deck, 0, rng)
+    ai_player, ai_cards = _build_player_state(ai_name, ai_deck, 1, rng)
 
     current_player = 0 if human_first else 1
     state = GameState(
@@ -32,7 +41,7 @@ def create_game(
         rng=rng,
         seed=seed,
     )
-    state.log.append("New game started: Charmander Deck vs Squirtle Deck.")
+    state.log.append(f"New game started: {human_deck.name} vs {ai_deck.name}.")
     _begin_turn(state, current_player)
     return state
 
@@ -329,11 +338,25 @@ def _execute_attack(state: GameState, attack_index: int) -> None:
     attack = active_card.attacks[attack_index]
     damage = attack.damage
 
-    if attack.effect == "coin_flip_bonus_30":
+    if attack.effect == "coin_flip_bonus_20":
+        coin = _flip_coin(state)
+        if coin == "heads":
+            damage += 20
+            state.log.append(f"{attacker.name} flipped heads, so {attack.name} does 20 extra damage.")
+        else:
+            state.log.append(f"{attacker.name} flipped tails, so {attack.name} stays at {damage} damage.")
+    elif attack.effect == "coin_flip_bonus_30":
         coin = _flip_coin(state)
         if coin == "heads":
             damage += 30
             state.log.append(f"{attacker.name} flipped heads, so {attack.name} does 30 extra damage.")
+        else:
+            state.log.append(f"{attacker.name} flipped tails, so {attack.name} stays at {damage} damage.")
+    elif attack.effect == "coin_flip_bonus_40":
+        coin = _flip_coin(state)
+        if coin == "heads":
+            damage += 40
+            state.log.append(f"{attacker.name} flipped heads, so {attack.name} does 40 extra damage.")
         else:
             state.log.append(f"{attacker.name} flipped tails, so {attack.name} stays at {damage} damage.")
     elif attack.effect == "coin_flip_fail":
@@ -343,11 +366,29 @@ def _execute_attack(state: GameState, attack_index: int) -> None:
             state.log.append(f"{attacker.name} flipped tails, so {attack.name} does nothing.")
         else:
             state.log.append(f"{attacker.name} flipped heads, so {attack.name} lands.")
+    elif attack.effect == "bonus_per_benched_matching_element_20":
+        benched_matches = _count_benched_matching_element(state, attacker_index, active_card.element)
+        if benched_matches:
+            damage += benched_matches * 20
+            state.log.append(
+                f"{attack.name} gains {benched_matches * 20} bonus damage from matching benched Pokemon."
+            )
 
     defender.active.damage += damage
     state.log.append(
         f"{_player_possessive(attacker.name)} {active_card.name} used {attack.name} for {damage} damage."
     )
+
+    if attack.effect == "heal_self_10" and attacker.active is not None:
+        healed = min(10, attacker.active.damage)
+        attacker.active.damage = max(0, attacker.active.damage - 10)
+        if healed:
+            state.log.append(f"{active_card.name} healed {healed} damage.")
+    elif attack.effect == "heal_self_20" and attacker.active is not None:
+        healed = min(20, attacker.active.damage)
+        attacker.active.damage = max(0, attacker.active.damage - 20)
+        if healed:
+            state.log.append(f"{active_card.name} healed {healed} damage.")
 
     if defender.active.damage >= defending_card.hp:
         _resolve_knock_out(state, attacker_index, defender_index)
@@ -441,6 +482,22 @@ def _player_possessive(name: str) -> str:
     if name == "You":
         return "Your"
     return f"{name}'s"
+
+
+def _count_benched_matching_element(
+    state: GameState,
+    player_index: int,
+    element: str | None,
+) -> int:
+    if not element:
+        return 0
+
+    count = 0
+    for pokemon in state.players[player_index].bench:
+        benched_card = get_top_card_definition(state, pokemon)
+        if benched_card is not None and benched_card.element == element:
+            count += 1
+    return count
 
 
 def _pop_first_matching(
