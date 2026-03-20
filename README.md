@@ -59,6 +59,7 @@ Then open [http://127.0.0.1:8000](http://127.0.0.1:8000).
 
 ```bash
 python3 -m unittest discover -s tests
+node --test tests/test_selection_state.js
 ```
 
 ## Card Art Assets
