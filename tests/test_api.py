@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -14,7 +16,12 @@ from backend.tcg_ai.models import PokemonInPlay
 
 class ApiTests(unittest.TestCase):
     def setUp(self) -> None:
-        self.app = TcgApplication()
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.state_path = Path(self.temp_dir.name) / "trainer_progress.txt"
+        self.app = TcgApplication(trainer_state_path=self.state_path)
+
+    def tearDown(self) -> None:
+        self.temp_dir.cleanup()
 
     def test_new_game_returns_a_session_id_and_display_ready_state(self) -> None:
         state = self.app.new_game({"human_first": True})
@@ -28,6 +35,40 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(state["ai_trainer"]["id"], "brock")
         self.assertEqual(state["ai_trainer"]["level"], 1)
         self.assertEqual(len(state["available_trainers"]), 8)
+
+    def test_lobby_exposes_available_trainers_and_decks_before_a_game_starts(self) -> None:
+        lobby = self.app.lobby()
+
+        self.assertEqual(lobby["human_deck_id"], "charmander")
+        self.assertEqual(lobby["ai_deck_id"], "squirtle")
+        self.assertEqual(lobby["ai_trainer"]["id"], "brock")
+        self.assertEqual(
+            [deck["id"] for deck in lobby["available_decks"]],
+            ["bulbasaur", "charmander", "squirtle", "pikachu"],
+        )
+        selected_deck = next(deck for deck in lobby["available_decks"] if deck["selected"])
+        self.assertEqual(selected_deck["id"], "charmander")
+
+    def test_new_game_can_select_a_human_deck_and_exposes_available_decks(self) -> None:
+        state = self.app.new_game({"human_first": True, "human_deck_id": "bulbasaur"})
+
+        self.assertEqual(state["human_deck_id"], "bulbasaur")
+        self.assertEqual(state["ai_deck_id"], "pikachu")
+        self.assertEqual(state["players"][0]["active"]["card_id"], "bulbasaur")
+        self.assertEqual(state["players"][1]["active"]["card_id"], "pikachu")
+        self.assertEqual(
+            [deck["id"] for deck in state["available_decks"]],
+            ["bulbasaur", "charmander", "squirtle", "pikachu"],
+        )
+        selected_deck = next(deck for deck in state["available_decks"] if deck["id"] == "bulbasaur")
+        self.assertTrue(selected_deck["selected"])
+        self.assertEqual(selected_deck["paired_deck_id"], "pikachu")
+
+    def test_new_game_rejects_an_unknown_human_deck(self) -> None:
+        with self.assertRaises(ApiError) as context:
+            self.app.new_game({"human_first": True, "human_deck_id": "missingno"})
+
+        self.assertEqual(context.exception.code, "human_deck_not_found")
 
     def test_new_game_can_target_a_specific_gym_leader(self) -> None:
         state = self.app.new_game({"human_first": True, "trainer_id": "misty"})
@@ -112,6 +153,29 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(updated["ai_trainer"]["level"], 1)
         attack_bias = self._find_action_bias(updated["ai_learning"]["action_biases"], "attack")
         self.assertEqual(attack_bias["samples"], 1)
+
+    def test_trainer_progress_is_saved_and_loaded_from_text_file(self) -> None:
+        self.app.learner.exploration_rate = 0.0
+        state = self.app.new_game({"human_first": False, "trainer_id": "brock"})
+        session = self.app.sessions.get(state["session_id"])
+        self._move_card_to_energy_zone(session.state, 1, "water_energy")
+        session.state.players[0].active.damage = 60
+        session.state.players[0].bench.clear()
+
+        self.app.ai_turn({"session_id": state["session_id"]})
+
+        self.assertTrue(self.state_path.exists())
+        saved_text = self.state_path.read_text(encoding="utf-8")
+        self.assertIn('"id": "brock"', saved_text)
+        self.assertIn('"experience": 26', saved_text)
+        self.assertIn('"feature_weights"', saved_text)
+
+        reloaded_app = TcgApplication(trainer_state_path=self.state_path)
+        reloaded_state = reloaded_app.new_game({"human_first": True, "trainer_id": "brock"})
+
+        self.assertEqual(reloaded_state["ai_trainer"]["experience"], 26)
+        self.assertEqual(reloaded_state["ai_learning"]["games_played"], 1)
+        self.assertEqual(reloaded_state["ai_learning"]["wins"], 1)
 
     def test_ai_turn_returns_replay_snapshots_for_each_action_in_the_turn(self) -> None:
         self.app.learner.exploration_rate = 0.0

@@ -10,9 +10,15 @@ import threading
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 
+from .cards import (
+    DEFAULT_HUMAN_DECK_ID,
+    DECK_DEFINITIONS,
+    available_deck_snapshots,
+    paired_deck_id_for,
+)
 from .bot import choose_action
 from .engine import apply_action, create_game
-from .learning import EpisodeStep, RewardLearner, calculate_reward, extract_action_features, summarize_state
+from .learning import EpisodeStep, calculate_reward, extract_action_features, summarize_state
 from .presentation import serialize_state
 from .trainers import TrainerProfile, TrainerStore
 
@@ -40,13 +46,23 @@ class GameSession:
     def __init__(
         self,
         trainer: TrainerProfile,
+        trainer_store: TrainerStore,
+        human_deck_id: str = DEFAULT_HUMAN_DECK_ID,
         seed: int | None = None,
         human_first: bool = True,
     ) -> None:
         self.lock = threading.Lock()
         self.trainer = trainer
+        self.trainer_store = trainer_store
+        self.human_deck_id = human_deck_id
+        self.ai_deck_id = paired_deck_id_for(human_deck_id)
         self.learner = trainer.learner
-        self.state = create_game(seed=seed, human_first=human_first, ai_name=trainer.name)
+        self.state = create_game(
+            seed=seed,
+            human_first=human_first,
+            ai_name=trainer.name,
+            human_deck_id=human_deck_id,
+        )
         self.ai_episode_steps: list[EpisodeStep] = []
         self.ai_episode_reward = 0.0
         self.ai_episode_finished = False
@@ -66,9 +82,22 @@ class GameSession:
             ai_learning=self.learner.snapshot(),
         )
 
-    def reset(self, human_first: bool = True, seed: int | None = None) -> None:
+    def reset(
+        self,
+        human_first: bool = True,
+        seed: int | None = None,
+        human_deck_id: str | None = None,
+    ) -> None:
         with self.lock:
-            self.state = create_game(seed=seed, human_first=human_first, ai_name=self.trainer.name)
+            if human_deck_id is not None:
+                self.human_deck_id = human_deck_id
+                self.ai_deck_id = paired_deck_id_for(human_deck_id)
+            self.state = create_game(
+                seed=seed,
+                human_first=human_first,
+                ai_name=self.trainer.name,
+                human_deck_id=self.human_deck_id,
+            )
             self.ai_episode_steps.clear()
             self.ai_episode_reward = 0.0
             self.ai_episode_finished = False
@@ -160,6 +189,7 @@ class GameSession:
                 prizes_taken=self.ai_prizes_taken,
             )
             self.ai_progress_awarded = True
+        self.trainer_store.save_to_disk()
         self.ai_episode_finished = True
 
 
@@ -172,11 +202,18 @@ class SessionStore:
     def create(
         self,
         trainer: TrainerProfile,
+        human_deck_id: str = DEFAULT_HUMAN_DECK_ID,
         human_first: bool = True,
         seed: int | None = None,
     ) -> tuple[str, GameSession]:
         session_id = secrets.token_urlsafe(9)
-        session = GameSession(trainer, seed=seed, human_first=human_first)
+        session = GameSession(
+            trainer,
+            self._trainers,
+            human_deck_id=human_deck_id,
+            seed=seed,
+            human_first=human_first,
+        )
         with self._lock:
             self._sessions[session_id] = session
         return session_id, session
@@ -190,10 +227,22 @@ class SessionStore:
 
 
 class TcgApplication:
-    def __init__(self) -> None:
-        self.trainers = TrainerStore()
+    def __init__(self, trainer_state_path: Path | None = None) -> None:
+        self.trainers = TrainerStore(state_path=trainer_state_path)
         self.learner = self.trainers.get(self.trainers.default_trainer_id).learner
         self.sessions = SessionStore(self.trainers)
+
+    def lobby(self) -> dict[str, Any]:
+        trainer = self.trainers.get(self.trainers.default_trainer_id)
+        if trainer is None:
+            raise ApiError("Default trainer not found.", "trainer_not_found", HTTPStatus.INTERNAL_SERVER_ERROR)
+        return {
+            "ai_trainer": trainer.snapshot(selected=True),
+            "available_trainers": self.trainers.snapshots(selected_id=trainer.trainer_id),
+            "human_deck_id": DEFAULT_HUMAN_DECK_ID,
+            "ai_deck_id": paired_deck_id_for(DEFAULT_HUMAN_DECK_ID),
+            "available_decks": available_deck_snapshots(selected_id=DEFAULT_HUMAN_DECK_ID),
+        }
 
     def get_game(self, session_id: str) -> dict[str, Any]:
         session = self.sessions.get(session_id)
@@ -201,9 +250,11 @@ class TcgApplication:
 
     def new_game(self, payload: dict[str, Any]) -> dict[str, Any]:
         trainer = self._resolve_trainer(payload.get("trainer_id"))
+        human_deck_id = self._resolve_human_deck_id(payload.get("human_deck_id"))
         human_first, opening_roll = self._resolve_human_first(payload)
         session_id, session = self.sessions.create(
             trainer=trainer,
+            human_deck_id=human_deck_id,
             human_first=human_first,
             seed=payload.get("seed"),
         )
@@ -261,6 +312,9 @@ class TcgApplication:
     def _attach_trainer_payload(self, snapshot: dict[str, Any], session: GameSession) -> dict[str, Any]:
         snapshot["ai_trainer"] = session.trainer.snapshot(selected=True)
         snapshot["available_trainers"] = self.trainers.snapshots(selected_id=session.trainer.trainer_id)
+        snapshot["human_deck_id"] = session.human_deck_id
+        snapshot["ai_deck_id"] = session.ai_deck_id
+        snapshot["available_decks"] = available_deck_snapshots(selected_id=session.human_deck_id)
         return snapshot
 
     def _resolve_trainer(self, trainer_id: Any) -> TrainerProfile:
@@ -272,6 +326,20 @@ class TcgApplication:
         if trainer is None:
             raise ApiError("Unknown trainer ID.", "trainer_not_found", HTTPStatus.BAD_REQUEST)
         return trainer
+
+    @staticmethod
+    def _resolve_human_deck_id(human_deck_id: Any) -> str:
+        if human_deck_id is None:
+            return DEFAULT_HUMAN_DECK_ID
+        if not isinstance(human_deck_id, str) or not human_deck_id:
+            raise ApiError(
+                "Missing field: human_deck_id",
+                "missing_human_deck_id",
+                HTTPStatus.BAD_REQUEST,
+            )
+        if human_deck_id not in DECK_DEFINITIONS:
+            raise ApiError("Unknown human deck ID.", "human_deck_not_found", HTTPStatus.BAD_REQUEST)
+        return human_deck_id
 
     @staticmethod
     def _resolve_human_first(
@@ -318,6 +386,10 @@ class TcgRequestHandler(BaseHTTPRequestHandler):
     def do_GET(self) -> None:  # noqa: N802
         parsed = urlparse(self.path)
         try:
+            if parsed.path == "/api/lobby":
+                self._send_json(self.app.lobby())
+                return
+
             if parsed.path == "/api/game":
                 session_id = self._query_value(parsed.query, "session_id")
                 self._send_json(self.app.get_game(session_id))

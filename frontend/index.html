@@ -41,7 +41,10 @@
 
             <div class="controls controls-column">
               <button id="new-game-button" class="primary">New Game</button>
-              <button id="clear-selection-button" class="ghost">Clear Selection</button>
+              <div class="control-select">
+                <label class="trainer-picker-label" for="deck-select">Choose Your Deck</label>
+                <select id="deck-select" class="trainer-select"></select>
+              </div>
             </div>
           </section>
 
@@ -172,6 +175,11 @@
                       <div id="player-discard" class="mini-card-row"></div>
                     </section>
                   </div>
+
+                  <button id="player-end-turn-button" class="end-turn-button" type="button">
+                    <span class="end-turn-button__label">End Turn</span>
+                    <span class="end-turn-button__meta">Turn action</span>
+                  </button>
                 </div>
               </div>
             </article>
@@ -180,6 +188,7 @@
       </section>
     </main>
 
+    <script src="/selection-state.js" defer></script>
     <script src="/app.js" defer></script>
   </body>
 </html>
