@@ -1,0 +1,155 @@
+{
+  "card_catalog_path": "backend/tcg_ai/game_modes/standard/data/catalog/cards.json",
+  "deck_scope": {
+    "deck_count": 18,
+    "requested_decks_only": true
+  },
+  "generated_at": "2026-03-21T06:06:31.778259+00:00",
+  "local_asset_manifest_path": "frontend/assets/cards/standard/shared/manifest.json",
+  "product_lines": {
+    "ex-battle": {
+      "decks": [
+        {
+          "card_count": 60,
+          "deck_id": "ampharos-ex-battle-deck",
+          "name": "Ampharos ex Battle Deck",
+          "planned_for_initial_implementation": true,
+          "release_date": "2023-05-05"
+        },
+        {
+          "card_count": 60,
+          "deck_id": "chien-pao-ex-battle-deck",
+          "name": "Chien-Pao ex Battle Deck",
+          "planned_for_initial_implementation": true,
+          "release_date": "2023-07-14"
+        },
+        {
+          "card_count": 60,
+          "deck_id": "greninja-ex-battle-deck",
+          "name": "Greninja ex Battle Deck",
+          "planned_for_initial_implementation": true,
+          "release_date": "2023-10-06"
+        },
+        {
+          "card_count": 60,
+          "deck_id": "houndoom-ex-battle-deck",
+          "name": "Houndoom ex Battle Deck",
+          "planned_for_initial_implementation": true,
+          "release_date": "2024-04-05"
+        },
+        {
+          "card_count": 60,
+          "deck_id": "iron-leaves-ex-battle-deck",
+          "name": "Iron Leaves ex Battle Deck",
+          "planned_for_initial_implementation": true,
+          "release_date": "2024-10-18"
+        },
+        {
+          "card_count": 60,
+          "deck_id": "kangaskhan-ex-battle-deck",
+          "name": "Kangaskhan ex Battle Deck",
+          "planned_for_initial_implementation": true,
+          "release_date": "2023-10-06"
+        },
+        {
+          "card_count": 60,
+          "deck_id": "lucario-ex-battle-deck",
+          "name": "Lucario ex Battle Deck",
+          "planned_for_initial_implementation": true,
+          "release_date": "2023-05-05"
+        },
+        {
+          "card_count": 60,
+          "deck_id": "melmetal-ex-battle-deck",
+          "name": "Melmetal ex Battle Deck",
+          "planned_for_initial_implementation": true,
+          "release_date": "2024-04-05"
+        },
+        {
+          "card_count": 60,
+          "deck_id": "miraidon-ex-battle-deck",
+          "name": "Miraidon ex Battle Deck",
+          "planned_for_initial_implementation": true,
+          "release_date": "2024-07-12"
+        },
+        {
+          "card_count": 60,
+          "deck_id": "tapu-koko-ex-battle-deck",
+          "name": "Tapu Koko ex Battle Deck",
+          "planned_for_initial_implementation": true,
+          "release_date": "2024-10-18"
+        },
+        {
+          "card_count": 60,
+          "deck_id": "tinkaton-ex-battle-deck",
+          "name": "Tinkaton ex Battle Deck",
+          "planned_for_initial_implementation": true,
+          "release_date": "2023-07-14"
+        },
+        {
+          "card_count": 60,
+          "deck_id": "victini-ex-battle-deck",
+          "name": "Victini ex Battle Deck",
+          "planned_for_initial_implementation": true,
+          "release_date": "2024-07-12"
+        }
+      ],
+      "name": "ex Battle Deck",
+      "planned_for_initial_implementation": true
+    },
+    "ex-deluxe-battle": {
+      "decks": [
+        {
+          "card_count": 60,
+          "deck_id": "koraidon-ex-deluxe-battle-deck",
+          "name": "Koraidon ex Deluxe Battle Deck",
+          "planned_for_initial_implementation": false,
+          "release_date": "2024-08-23"
+        },
+        {
+          "card_count": 60,
+          "deck_id": "meowscarada-ex-deluxe-battle-deck",
+          "name": "Meowscarada ex Deluxe Battle Deck",
+          "planned_for_initial_implementation": false,
+          "release_date": "2023-09-01"
+        },
+        {
+          "card_count": 60,
+          "deck_id": "miraidon-ex-deluxe-battle-deck",
+          "name": "Miraidon ex Deluxe Battle Deck",
+          "planned_for_initial_implementation": false,
+          "release_date": "2024-08-23"
+        },
+        {
+          "card_count": 60,
+          "deck_id": "ninetales-ex-deluxe-battle-deck",
+          "name": "Ninetales ex Deluxe Battle Deck",
+          "planned_for_initial_implementation": false,
+          "release_date": "2024-03-22"
+        },
+        {
+          "card_count": 60,
+          "deck_id": "quaquaval-ex-deluxe-battle-deck",
+          "name": "Quaquaval ex Deluxe Battle Deck",
+          "planned_for_initial_implementation": false,
+          "release_date": "2023-09-01"
+        },
+        {
+          "card_count": 60,
+          "deck_id": "zapdos-ex-deluxe-battle-deck",
+          "name": "Zapdos ex Deluxe Battle Deck",
+          "planned_for_initial_implementation": false,
+          "release_date": "2024-03-22"
+        }
+      ],
+      "name": "ex Deluxe Battle Deck",
+      "planned_for_initial_implementation": false
+    }
+  },
+  "set_catalog_path": "backend/tcg_ai/game_modes/standard/data/catalog/sets.json",
+  "source_summary": {
+    "artwork_files": "Downloaded from the images referenced by PokemonTCG/pokemon-tcg-data",
+    "card_details": "PokemonTCG/pokemon-tcg-data",
+    "deck_lists": "Bulbapedia raw wiki pages"
+  }
+}

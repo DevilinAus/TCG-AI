@@ -6,6 +6,7 @@ from pathlib import Path
 import threading
 from typing import Any
 
+from .game_modes import DEFAULT_GAME_MODE
 from .learning import RewardLearner
 
 LEVEL_XP_STEP = 100
@@ -33,24 +34,51 @@ def level_for_experience(experience: int) -> int:
 
 
 @dataclass
+class TrainerModeProgress:
+    learner: RewardLearner = field(default_factory=RewardLearner, repr=False)
+    experience: int = 0
+
+    def export_state(self) -> dict[str, Any]:
+        return {
+            "experience": self.experience,
+            "learner": self.learner.export_state(),
+        }
+
+
+@dataclass
 class TrainerProfile:
     trainer_id: str
     name: str
     specialty: str
-    learner: RewardLearner = field(default_factory=RewardLearner, repr=False)
-    experience: int = 0
+    _mode_progress: dict[str, TrainerModeProgress] = field(default_factory=dict, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False, repr=False)
 
-    def gain_experience(self, damage_dealt: int, prizes_taken: int) -> int:
+    @property
+    def learner(self) -> RewardLearner:
+        return self.learner_for(DEFAULT_GAME_MODE)
+
+    def learner_for(self, game_mode: str = DEFAULT_GAME_MODE) -> RewardLearner:
+        return self._progress_for(game_mode, create=True).learner
+
+    def gain_experience(
+        self,
+        damage_dealt: int,
+        prizes_taken: int,
+        game_mode: str = DEFAULT_GAME_MODE,
+    ) -> int:
         gained = trainer_experience_for_game(damage_dealt, prizes_taken)
         with self._lock:
-            self.experience += gained
+            progress = self._mode_progress.setdefault(game_mode, TrainerModeProgress())
+            progress.experience += gained
         return gained
 
-    def snapshot(self, selected: bool = False) -> dict[str, Any]:
-        with self._lock:
-            experience = self.experience
-
+    def snapshot(
+        self,
+        selected: bool = False,
+        game_mode: str = DEFAULT_GAME_MODE,
+    ) -> dict[str, Any]:
+        progress = self._progress_for(game_mode, create=False)
+        experience = progress.experience if progress is not None else 0
         level = level_for_experience(experience)
         level_floor = (level - 1) * LEVEL_XP_STEP
         next_level_xp = level * LEVEL_XP_STEP
@@ -63,25 +91,61 @@ class TrainerProfile:
             "xp_into_level": experience - level_floor,
             "xp_to_next_level": max(0, next_level_xp - experience),
             "selected": selected,
+            "game_mode": game_mode,
         }
 
     def export_state(self) -> dict[str, Any]:
         with self._lock:
-            experience = self.experience
+            mode_progress = {
+                game_mode: progress.export_state()
+                for game_mode, progress in self._mode_progress.items()
+            }
         return {
             "id": self.trainer_id,
             "name": self.name,
             "specialty": self.specialty,
-            "experience": experience,
-            "learner": self.learner.export_state(),
+            "modes": mode_progress,
         }
 
     def load_state(self, payload: dict[str, Any]) -> None:
         if not isinstance(payload, dict):
             return
+
+        raw_modes = payload.get("modes")
+        if not isinstance(raw_modes, dict):
+            return
+
+        loaded_progress: dict[str, TrainerModeProgress] = {}
+        for game_mode, mode_payload in raw_modes.items():
+            if not isinstance(game_mode, str) or not isinstance(mode_payload, dict):
+                continue
+            progress = TrainerModeProgress(experience=int(mode_payload.get("experience", 0)))
+            progress.learner.load_state(mode_payload.get("learner", {}))
+            loaded_progress[game_mode] = progress
+
         with self._lock:
-            self.experience = int(payload.get("experience", self.experience))
-        self.learner.load_state(payload.get("learner", {}))
+            self._mode_progress = loaded_progress
+
+    def load_legacy_state(self, payload: dict[str, Any]) -> None:
+        if not isinstance(payload, dict):
+            return
+
+        progress = TrainerModeProgress(experience=int(payload.get("experience", 0)))
+        progress.learner.load_state(payload.get("learner", {}))
+        with self._lock:
+            self._mode_progress[DEFAULT_GAME_MODE] = progress
+
+    def _progress_for(
+        self,
+        game_mode: str,
+        create: bool,
+    ) -> TrainerModeProgress | None:
+        with self._lock:
+            progress = self._mode_progress.get(game_mode)
+            if progress is None and create:
+                progress = TrainerModeProgress()
+                self._mode_progress[game_mode] = progress
+            return progress
 
 
 class TrainerStore:
@@ -98,15 +162,22 @@ class TrainerStore:
     def get(self, trainer_id: str) -> TrainerProfile | None:
         return self._profiles.get(trainer_id)
 
-    def snapshots(self, selected_id: str | None = None) -> list[dict[str, Any]]:
+    def snapshots(
+        self,
+        selected_id: str | None = None,
+        game_mode: str = DEFAULT_GAME_MODE,
+    ) -> list[dict[str, Any]]:
         return [
-            profile.snapshot(selected=profile.trainer_id == selected_id)
+            profile.snapshot(
+                selected=profile.trainer_id == selected_id,
+                game_mode=game_mode,
+            )
             for profile in self._profiles.values()
         ]
 
     def export_state(self) -> dict[str, Any]:
         return {
-            "version": 1,
+            "version": 2,
             "trainers": [profile.export_state() for profile in self._profiles.values()],
         }
 
@@ -130,6 +201,7 @@ class TrainerStore:
         if not isinstance(payload, dict):
             return
 
+        version = int(payload.get("version", 1))
         for trainer_state in payload.get("trainers", []):
             if not isinstance(trainer_state, dict):
                 continue
@@ -139,4 +211,7 @@ class TrainerStore:
             trainer = self._profiles.get(trainer_id)
             if trainer is None:
                 continue
-            trainer.load_state(trainer_state)
+            if version >= 2:
+                trainer.load_state(trainer_state)
+            else:
+                trainer.load_legacy_state(trainer_state)

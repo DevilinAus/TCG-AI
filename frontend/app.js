@@ -2,6 +2,7 @@ const SESSION_STORAGE_KEY = "tcg_ai_session_id";
 const AI_HUMAN_DELAY_MIN_MS = 5000;
 const AI_HUMAN_DELAY_MAX_MS = 8000;
 const FALLBACK_AI_STEP_DELAY_MS = 6500;
+const FACE_DOWN_CARD_IMAGE_URL = "/assets/cards/shared/card-back.svg";
 
 let currentState = null;
 let lobbyState = null;
@@ -66,6 +67,32 @@ function waitForPaint() {
   return new Promise((resolve) => {
     window.requestAnimationFrame(() => resolve());
   });
+}
+
+function syncAdaptiveActiveCardLayout() {
+  const activePockets = document.querySelectorAll(".player-active-pocket, .opponent-active-pocket");
+  for (const pocket of activePockets) {
+    pocket.classList.remove("has-wide-active-card");
+  }
+
+  const activeCards = document.querySelectorAll(".active-slot .board-card:not(.is-compact):not(.active-slot-placeholder)");
+  for (const card of activeCards) {
+    card.classList.remove("is-wide-layout");
+    const attackToplines = card.querySelectorAll(".attack-topline");
+    const needsWideLayout = [...attackToplines].some((topline) => {
+      const stats = topline.querySelector(".attack-stats");
+      if (!stats) {
+        return false;
+      }
+      return topline.scrollWidth > topline.clientWidth || stats.offsetTop > topline.offsetTop;
+    });
+    if (!needsWideLayout) {
+      continue;
+    }
+
+    card.classList.add("is-wide-layout");
+    card.closest(".player-active-pocket, .opponent-active-pocket")?.classList.add("has-wide-active-card");
+  }
 }
 
 function syncCursorForPointerPosition() {
@@ -343,6 +370,10 @@ function resolveGameModeMetadata(state) {
   );
 }
 
+function usesSharedEnergyPool(state) {
+  return resolveGameMode(state) === "my_first_battle";
+}
+
 function renderAppIdentity(state) {
   const appTitle = document.getElementById("app-title");
   const gameModeMeta = document.getElementById("game-mode-meta");
@@ -473,6 +504,8 @@ function render(state) {
   const human = state.players[0];
   const ai = state.players[1];
   const context = deriveContext(state);
+  const faceDownCardImageUrl = resolveFaceDownCardImageUrl(state);
+  const sharedEnergyEnabled = usesSharedEnergyPool(state);
   const playerActiveTargetRef = human.active?.ref || {
     player_index: 0,
     zone: "active",
@@ -513,8 +546,15 @@ function render(state) {
   renderPlayerSummary(document.getElementById("player-summary"), human);
   renderPlayerSummary(document.getElementById("opponent-summary"), ai);
 
-  renderEnergyRow(document.getElementById("player-energy"), human.energy_zone, {
-    clickable: isBoardRefClickable({
+  setSharedEnergyVisibility(sharedEnergyEnabled);
+  renderDeckPile(document.getElementById("player-deck"), human.deck_pile, {
+    imageUrl: faceDownCardImageUrl,
+  });
+  renderDeckPile(document.getElementById("opponent-deck"), ai.deck_pile, {
+    imageUrl: faceDownCardImageUrl,
+  });
+  renderSharedEnergySpot(document.getElementById("player-shared-energy"), human.energy_zone, {
+    clickable: sharedEnergyEnabled && isBoardRefClickable({
       state,
       uiState,
       context,
@@ -525,11 +565,17 @@ function render(state) {
     context,
     targetRef: playerEnergyTargetRef,
   });
-  renderEnergyRow(document.getElementById("opponent-energy"), ai.energy_zone, {
+  renderSharedEnergySpot(document.getElementById("opponent-shared-energy"), ai.energy_zone, {
     clickable: false,
     selectedTarget: null,
     context,
     targetRef: opponentEnergyTargetRef,
+  });
+  renderPrizePile(document.getElementById("player-prizes"), human.prize_pile, {
+    imageUrl: faceDownCardImageUrl,
+  });
+  renderPrizePile(document.getElementById("opponent-prizes"), ai.prize_pile, {
+    imageUrl: faceDownCardImageUrl,
   });
   renderDiscard(document.getElementById("player-discard"), human.discard_top, human.discard_count);
   renderDiscard(document.getElementById("opponent-discard"), ai.discard_top, ai.discard_count);
@@ -611,6 +657,7 @@ function render(state) {
 
   updateStatus(makeStatusMessage(state, context));
   previousState = JSON.parse(JSON.stringify(state));
+  syncAdaptiveActiveCardLayout();
   syncCursorForPointerPosition();
   if (state.current_player === 1 && state.winner === null) {
     queueAiTurn();
@@ -627,20 +674,81 @@ function renderLobby(state) {
   updateStatus("Choose your deck and gym leader, then start a new game.");
 }
 
-function renderEnergyRow(element, energyCards, options) {
+function resolveFaceDownCardImageUrl(state) {
+  return state?.shared_assets?.face_down_card_image_url || FACE_DOWN_CARD_IMAGE_URL;
+}
+
+function setSharedEnergyVisibility(enabled) {
+  for (const pocketId of ["player-shared-energy-pocket", "opponent-shared-energy-pocket"]) {
+    const pocket = document.getElementById(pocketId);
+    if (pocket) {
+      pocket.hidden = !enabled;
+    }
+  }
+}
+
+function renderDeckPile(element, deckPile, options) {
+  if (!element) {
+    return;
+  }
   element.innerHTML = "";
-  const energyCard = buildEnergySpotCard(energyCards, {
+  const count = Number(deckPile?.count ?? 0);
+  const deckCard = buildFaceDownPileCard({
+    imageUrl: options.imageUrl,
+    title: "Deck pile",
+    description: `Deck pile • ${count} card${count === 1 ? "" : "s"} remaining`,
+    badgeText: count,
+    kind: "deck",
+    stacked: count > 1,
+  });
+  element.appendChild(deckCard);
+}
+
+function renderSharedEnergySpot(element, energyCards, options) {
+  if (!element) {
+    return;
+  }
+
+  element.innerHTML = "";
+  const cards = energyCards || [];
+  const energySpot = buildSharedEnergyHolderCard({
+    energyCard: cards[cards.length - 1] || null,
+    count: cards.length,
     clickable: options.clickable,
     selected: !!options.selectedTarget && refsMatch(options.selectedTarget, options.targetRef),
     targetable: options.context.highlightedTargets.some((target) =>
       refsMatch(target, options.targetRef),
     ),
   });
-
   if (options.clickable) {
-    energyCard.addEventListener("click", () => toggleSelectedBoardTarget(options.targetRef));
+    energySpot.addEventListener("click", () => toggleSelectedBoardTarget(options.targetRef));
   }
-  element.appendChild(energyCard);
+  element.appendChild(energySpot);
+}
+
+function renderPrizePile(element, prizePile, options) {
+  if (!element) {
+    return;
+  }
+  element.innerHTML = "";
+  const count = Number(prizePile?.count ?? 0);
+  element.classList.toggle("is-empty", count === 0);
+  if (count <= 0) {
+    element.appendChild(buildPrizeEmptyStamp());
+    return;
+  }
+
+  for (let index = 0; index < count; index += 1) {
+    const prizeCard = buildFaceDownPileCard({
+      imageUrl: options.imageUrl,
+      title: `Prize card ${index + 1}`,
+      description: `Prize card ${index + 1} of ${count}`,
+      kind: "prize",
+    });
+    prizeCard.classList.add("prize-card");
+    prizeCard.setAttribute("aria-hidden", "true");
+    element.appendChild(prizeCard);
+  }
 }
 
 function renderDiscard(element, discardTop, discardCount) {
@@ -695,6 +803,57 @@ function buildBenchEmptyStamp() {
   const element = document.createElement("div");
   element.className = "bench-empty-stamp";
   element.textContent = "Bench Empty";
+  return element;
+}
+
+function buildPrizeEmptyStamp() {
+  const element = document.createElement("div");
+  element.className = "prize-empty-stamp";
+  element.textContent = "Cleared";
+  return element;
+}
+
+function buildSharedEnergyHolderCard(options = {}) {
+  const element = document.createElement("article");
+  const classNames = ["mini-card", "pile-card", "shared-energy-spot"];
+  if (options.count > 0) {
+    classNames.push("is-filled");
+  }
+  if (options.clickable) {
+    classNames.push("is-clickable");
+  }
+  if (options.selected) {
+    classNames.push("is-selected");
+  }
+  if (options.targetable) {
+    classNames.push("is-targetable");
+  }
+  element.className = classNames.join(" ");
+  element.dataset.kind = "shared-energy";
+  element.title = `Shared Energy • ${options.count} in pool`;
+  element.setAttribute("aria-label", `Shared Energy ${options.count}`);
+  const mediaMarkup = options.energyCard
+    ? `
+      <div class="shared-energy-spot__card">
+        ${buildCardImageMarkup(options.energyCard.image_url, options.energyCard.name)}
+      </div>
+    `
+    : `
+      <div class="shared-energy-spot__well" aria-hidden="true">
+        <span class="shared-energy-spot__core">+</span>
+      </div>
+    `;
+  element.innerHTML = `
+    <div class="shared-energy-spot__media">
+      ${mediaMarkup}
+    </div>
+    <div class="shared-energy-spot__copy">
+      <p class="shared-energy-spot__hint">${options.count > 0 ? "Shared pool" : "Play here"}</p>
+    </div>
+  `;
+  if (options.count > 1) {
+    element.appendChild(buildPileCountBadge(options.count));
+  }
   return element;
 }
 
@@ -980,40 +1139,35 @@ function buildMiniCard(card, options = {}) {
   return element;
 }
 
-function buildEnergySpotCard(energyCards, options = {}) {
-  let element;
-  if (energyCards.length) {
-    const topCard = energyCards[energyCards.length - 1];
-    element = buildMiniCard(topCard, {
-      clickable: options.clickable,
-      hideAccent: true,
-      hideCopy: true,
-    });
-    element.classList.add("pile-card", "energy-pile-card");
-    if (energyCards.length > 1) {
-      element.classList.add("is-stacked");
-      element.appendChild(buildPileCountBadge(energyCards.length));
-    }
-  } else {
-    element = document.createElement("article");
-    const classNames = ["mini-card", "pile-card", "energy-pile-card", "energy-empty-card"];
-    if (options.clickable) {
-      classNames.push("is-clickable");
-    }
-    element.className = classNames.join(" ");
-    element.innerHTML = `
-      <div class="energy-empty-state">Empty</div>
-      <div class="card-copy">
-        <p class="card-meta">No attachments</p>
-      </div>
-    `;
+function buildFaceDownPileCard(options = {}) {
+  const element = document.createElement("article");
+  const classNames = ["mini-card", "pile-card", "facedown-pile-card"];
+  if (options.kind) {
+    classNames.push(`facedown-pile-card-${options.kind}`);
   }
-
+  if (options.clickable) {
+    classNames.push("is-clickable");
+  }
   if (options.selected) {
-    element.classList.add("is-selected");
+    classNames.push("is-selected");
   }
   if (options.targetable) {
-    element.classList.add("is-targetable");
+    classNames.push("is-targetable");
+  }
+  if (options.stacked) {
+    classNames.push("is-stacked");
+  }
+  element.className = classNames.join(" ");
+  element.dataset.kind = options.kind || "facedown";
+  element.title = options.description || options.title || "Face-down pile";
+  element.setAttribute("aria-label", element.title);
+  element.innerHTML = `
+    <div class="mini-card-media">
+      ${buildCardImageMarkup(options.imageUrl, options.title || "Face-down card")}
+    </div>
+  `;
+  if (options.badgeText !== undefined && options.badgeText !== null) {
+    element.appendChild(buildPileCountBadge(options.badgeText));
   }
   return element;
 }
@@ -1265,6 +1419,8 @@ function renderTurnHighlights(state) {
 }
 
 function renderLobbyBoard(state) {
+  const faceDownCardImageUrl = resolveFaceDownCardImageUrl(state);
+  const sharedEnergyEnabled = usesSharedEnergyPool(state);
   const selectedDeckId = resolveHumanDeckSelection(state);
   const humanDeck =
     state.available_decks?.find((deck) => deck.id === selectedDeckId) || state.available_decks?.[0] || null;
@@ -1280,8 +1436,13 @@ function renderLobbyBoard(state) {
   );
   renderPlayerSummaryPlaceholder(document.getElementById("player-summary"));
   renderPlayerSummaryPlaceholder(document.getElementById("opponent-summary"));
-  renderEnergyPlaceholder(document.getElementById("player-energy"));
-  renderEnergyPlaceholder(document.getElementById("opponent-energy"));
+  setSharedEnergyVisibility(sharedEnergyEnabled);
+  renderDeckPlaceholder(document.getElementById("player-deck"), faceDownCardImageUrl);
+  renderDeckPlaceholder(document.getElementById("opponent-deck"), faceDownCardImageUrl);
+  renderSharedEnergyPlaceholder(document.getElementById("player-shared-energy"), 0);
+  renderSharedEnergyPlaceholder(document.getElementById("opponent-shared-energy"), 0);
+  renderPrizePlaceholder(document.getElementById("player-prizes"), 3, faceDownCardImageUrl);
+  renderPrizePlaceholder(document.getElementById("opponent-prizes"), 3, faceDownCardImageUrl);
   renderDiscard(document.getElementById("player-discard"), null, 0);
   renderDiscard(document.getElementById("opponent-discard"), null, 0);
   renderPokemonZone(document.getElementById("player-active"), null, {});
@@ -1359,12 +1520,49 @@ function renderPlayerSummaryPlaceholder(element) {
   ].join("");
 }
 
-function renderEnergyPlaceholder(element) {
+function renderDeckPlaceholder(element, imageUrl) {
   if (!element) {
     return;
   }
   element.innerHTML = "";
-  element.appendChild(buildPlaceholder("Empty."));
+  element.appendChild(
+    buildFaceDownPileCard({
+      imageUrl,
+      title: "Deck pile",
+      description: "Deck pile",
+      badgeText: "-",
+      kind: "deck",
+      stacked: true,
+    }),
+  );
+}
+
+function renderSharedEnergyPlaceholder(element, count) {
+  if (!element) {
+    return;
+  }
+  element.innerHTML = "";
+  element.appendChild(
+    buildSharedEnergyHolderCard({
+      energyCard: null,
+      count,
+      clickable: false,
+      selected: false,
+      targetable: false,
+    }),
+  );
+}
+
+function renderPrizePlaceholder(element, count, imageUrl) {
+  renderPrizePile(
+    element,
+    {
+      count,
+    },
+    {
+      imageUrl,
+    },
+  );
 }
 
 function renderPlayerEndTurnButton(state) {
