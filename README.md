@@ -1,11 +1,17 @@
 # TCG AI MVP
 
-This project is a browser-playable MVP of a small Pokemon TCG experience built around the `My First Battle` ruleset. Right now the game supports a single matchup, `Charmander Deck` vs `Squirtle Deck`, with a Python rules engine, a lightweight browser board, and gym leaders that gradually adapt over repeated games.
+This project is a browser-playable Pokemon TCG sandbox with two separate game modes:
+
+- `My First Battle`, which is the current fully playable local experience
+- `Standard`, which is an in-progress `ex Battle Deck` rules prototype on this branch
+
+The app uses a Python rules engine, a board-first browser UI, and local AI/trainer systems that are being expanded toward a future remote ML service.
 
 ## Current MVP
 
-- Play a full local match in the browser with real card art and a board-first UI.
-- Choose a gym leader opponent before starting a new game.
+- Play a full local `My First Battle` match in the browser with real card art and a board-first UI.
+- Start a `Standard` prototype game with imported `ex Battle Deck` data and playable early-turn flow.
+- Choose a gym leader opponent and a deck before starting a new game.
 - Let the backend enforce legal actions, attacks, knockouts, promotion flow, prizes, and win conditions.
 - Watch AI turns replay in the battle log instead of manually driving both sides.
 - Track each leader's battle XP and level as a fun "we've fought a lot" progress indicator.
@@ -18,9 +24,21 @@ This project is a browser-playable MVP of a small Pokemon TCG experience built a
   - contextual click targets for legal plays
   - floating active, bench, hand, discard, and energy zones
   - real local card art
+  - floating selected-card preview
+  - targeted-attack drag indicator for bench-sniping attacks
   - battle log and status banner
   - hidden dev panel with the raw legal action list
-  - gym leader picker and XP progress bar
+  - game mode switcher, deck picker, gym leader picker, and XP progress bar
+- `My First Battle` mode:
+  - playable local matches with the starter deck ruleset kept separate from Standard logic
+  - support for the four `My First Battle` decks in the project assets/data lane
+  - prize coin artwork by deck
+- `Standard` mode on this branch:
+  - shuffled 60-card deck loading from imported `ex Battle Deck` data
+  - opening hands, mulligans, active selection, bench setup, and end-setup flow
+  - benching, supporter/item plays already wired in the Standard engine, energy attachment, evolution, and attacking
+  - attached-energy rendering on Pokemon and targeted attack selection for attacks like `Linear Attack`
+  - a Standard-only local planner / decision layer with a remote-ready state payload boundary
 - In-memory trainer profiles for the original Kanto gym leaders:
   - Brock
   - Misty
@@ -35,6 +53,10 @@ This project is a browser-playable MVP of a small Pokemon TCG experience built a
 ## Gym Leaders Learning To Play
 
 Each gym leader has their own `RewardLearner` profile. When you start a game against Brock, Misty, or another leader, that match uses that leader's personal learner rather than a single shared AI brain.
+
+Right now that learning loop is used by `My First Battle`.
+
+`Standard` is being built on a separate decision path so it can later call a remote ML service with serialized public state, private acting-player state, and legal actions without disturbing the `My First Battle` ruleset.
 
 During AI turns, the backend:
 
@@ -74,17 +96,21 @@ The assets are stored in `frontend/assets/cards/my-first-battle`, and the filena
 
 ## Current API Shape
 
+- `GET /api/lobby`
+  - Returns the current lobby snapshot, available game modes, decks, and trainer metadata.
 - `POST /api/new-game`
   - Creates a new session.
-  - Accepts optional `trainer_id`, `human_first`, and `seed`.
+  - Accepts optional `game_mode`, `trainer_id`, `human_deck_id`, `human_first`, and `seed`.
 - `GET /api/game?session_id=...`
   - Returns the current serialized game state for that session.
 - `POST /api/action`
   - Expects `session_id` and a raw engine action object.
+- `POST /api/ai-step`
+  - Advances exactly one AI action and returns replay metadata for that step.
 - `POST /api/ai-turn`
   - Expects `session_id` and replays the AI turn for that session.
 
-Serialized state also includes the selected trainer snapshot, the available trainer list, and the AI learning snapshot used by the frontend.
+Serialized state also includes the selected trainer snapshot, available game modes, the available trainer/deck lists, and the AI-learning or AI-decision snapshot used by the frontend.
 
 All API errors use a small JSON shape:
 
@@ -99,17 +125,29 @@ All API errors use a small JSON shape:
 
 Use this quick browser path to sanity-check the MVP:
 
-1. Start a new game and choose a gym leader.
-2. Confirm the same session resumes after a page reload.
-3. Click a hand card and verify only legal contextual actions appear.
-4. Bench a Pokemon, attach Energy, and attack.
-5. Let the AI complete its turn through the replay flow.
-6. Play through a knockout and confirm bench promotion works correctly.
-7. Finish a full game and check that the selected leader's XP bar updates.
+1. Start the server and open the browser UI.
+2. Choose a game mode, a deck, and a gym leader.
+3. Start a new game and confirm the same session resumes after a page reload.
+4. Click a hand card and verify only legal contextual actions appear.
+5. Bench a Pokemon, attach Energy, and attack.
+6. Let the AI complete its turn through the replay flow.
+7. Play through a knockout and confirm bench promotion works correctly.
+8. Finish a full game and check that the selected leader's XP bar updates.
+
+For the `Standard` branch flow specifically:
+
+1. Switch to `Standard`.
+2. Start a new game and choose your Active Pokemon.
+3. Bench any extra Basics during setup, then click `End Setup`.
+4. Attach energy, play simple trainer cards, and attack.
+5. Verify targeted attacks only ask for a target when the attack genuinely needs one.
 
 ## Important Limitations
 
-- The current build only supports the `Charmander Deck` vs `Squirtle Deck` `My First Battle` matchup.
+- `My First Battle` is the stable playable mode today.
+- `Standard` is not yet a full rules-complete Pokemon TCG implementation.
+- Several `ex Battle Deck` attacks and card-specific effects are still being added incrementally.
+- Some Standard effects that need richer choice UX or deeper rules support are still intentionally unimplemented.
 - Sessions, trainer XP, and AI learning all live in server memory right now.
 - Restarting the server resets active sessions and gym leader progression.
 - Higher-level gym leaders should trend stronger over time, but level is still only a proxy for battle experience, not a guaranteed measure of decision quality.
