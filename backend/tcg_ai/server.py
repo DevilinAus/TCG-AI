@@ -16,6 +16,8 @@ from .game_modes import (
     available_game_mode_snapshots,
     get_game_mode,
 )
+from .game_modes.standard.policy import StandardPolicyConfig
+from .game_modes.standard.policy_store import StandardPolicyStore
 from .learning import EpisodeStep
 from .trainers import TrainerProfile, TrainerStore
 
@@ -42,31 +44,49 @@ class ApiError(Exception):
 class GameSession:
     def __init__(
         self,
+        session_id: str,
         trainer: TrainerProfile,
         trainer_store: TrainerStore,
         mode: GameModeDefinition,
+        standard_policy_store: StandardPolicyStore,
+        standard_policy_config: StandardPolicyConfig,
         human_deck_id: str | None = None,
         seed: int | None = None,
         human_first: bool = True,
     ) -> None:
         self.lock = threading.Lock()
+        self.session_id = session_id
         self.trainer = trainer
         self.trainer_store = trainer_store
         self.mode = mode
         self.game_mode = mode.game_mode
+        self.standard_policy_store = standard_policy_store
+        self.standard_policy_config = standard_policy_config
         self.human_deck_id = human_deck_id
         self.ai_deck_id = (
             mode.paired_deck_id_for(human_deck_id)
             if human_deck_id is not None and mode.paired_deck_id_for is not None
             else None
         )
-        self.learner = trainer.learner_for(self.game_mode)
+        self.learner = (
+            trainer.learner_for(self.game_mode)
+            if all(
+                hook is not None
+                for hook in (
+                    mode.summarize_state,
+                    mode.calculate_reward,
+                    mode.extract_action_features,
+                )
+            )
+            else None
+        )
         self.state = mode.create_game(
             seed=seed,
             human_first=human_first,
             ai_name=trainer.name,
             human_deck_id=human_deck_id,
         )
+        self.mode_runtime = self._initialize_mode_runtime()
         self.ai_episode_steps: list[EpisodeStep] = []
         self.ai_episode_reward = 0.0
         self.ai_episode_finished = False
@@ -79,12 +99,15 @@ class GameSession:
         return self._serialize_state(session_id)
 
     def _serialize_state(self, session_id: str) -> dict[str, Any]:
-        return self.mode.serialize_state(
+        snapshot = self.mode.serialize_state(
             self.state,
             session_id=session_id,
             viewer=0,
-            ai_learning=self.learner.snapshot(),
+            ai_learning=self.learner.snapshot() if self.learner is not None else None,
         )
+        if self.mode.runtime_snapshot is not None:
+            snapshot["ai_decision_debug"] = self.mode.runtime_snapshot(self.mode_runtime)
+        return snapshot
 
     def reset(
         self,
@@ -106,6 +129,7 @@ class GameSession:
                 ai_name=self.trainer.name,
                 human_deck_id=self.human_deck_id,
             )
+            self.mode_runtime = self._initialize_mode_runtime()
             self.ai_episode_steps.clear()
             self.ai_episode_reward = 0.0
             self.ai_episode_finished = False
@@ -151,6 +175,24 @@ class GameSession:
         if action is None:
             return None
 
+        if self.learner is None or any(
+            hook is None
+            for hook in (
+                self.mode.summarize_state,
+                self.mode.calculate_reward,
+                self.mode.extract_action_features,
+            )
+        ):
+            self.mode.apply_action(self.state, action)
+            return {
+                "action": {
+                    "type": action["type"],
+                    "label": action["label"],
+                },
+                "delay_ms": _replay_delay_for_action(self.state),
+                "state": self._serialize_state(session_id),
+            }
+
         before = self.mode.summarize_state(self.state, 1)
         features = self.mode.extract_action_features(self.state, 1, action)
         self.mode.apply_action(self.state, action)
@@ -174,7 +216,7 @@ class GameSession:
         }
 
     def _finalize_ai_episode_if_finished(self, completed_by_ai_action: bool) -> None:
-        if self.ai_episode_finished or self.state.winner is None:
+        if self.ai_episode_finished or self.state.winner is None or self.learner is None:
             return
 
         terminal_reward = 30.0 if self.state.winner == 1 else -30.0
@@ -201,11 +243,31 @@ class GameSession:
         self.trainer_store.save_to_disk()
         self.ai_episode_finished = True
 
+    def _initialize_mode_runtime(self) -> Any:
+        if self.mode.initialize_session is None:
+            return None
+        return self.mode.initialize_session(
+            self.state,
+            session_id=self.session_id,
+            trainer_id=self.trainer.trainer_id,
+            ai_deck_id=self.ai_deck_id,
+            human_deck_id=self.human_deck_id,
+            policy_store=self.standard_policy_store,
+            policy_config=self.standard_policy_config,
+        )
+
 
 class SessionStore:
-    def __init__(self, trainers: TrainerStore) -> None:
+    def __init__(
+        self,
+        trainers: TrainerStore,
+        standard_policy_store: StandardPolicyStore,
+        standard_policy_config: StandardPolicyConfig,
+    ) -> None:
         self._lock = threading.Lock()
         self._trainers = trainers
+        self._standard_policy_store = standard_policy_store
+        self._standard_policy_config = standard_policy_config
         self._sessions: dict[str, GameSession] = {}
 
     def create(
@@ -218,9 +280,12 @@ class SessionStore:
     ) -> tuple[str, GameSession]:
         session_id = secrets.token_urlsafe(9)
         session = GameSession(
-            trainer,
-            self._trainers,
+            session_id=session_id,
+            trainer=trainer,
+            trainer_store=self._trainers,
             mode=mode,
+            standard_policy_store=self._standard_policy_store,
+            standard_policy_config=self._standard_policy_config,
             human_deck_id=human_deck_id,
             seed=seed,
             human_first=human_first,
@@ -238,20 +303,31 @@ class SessionStore:
 
 
 class TcgApplication:
-    def __init__(self, trainer_state_path: Path | None = None) -> None:
+    def __init__(
+        self,
+        trainer_state_path: Path | None = None,
+        standard_policy_state_path: Path | None = None,
+        standard_policy_config: StandardPolicyConfig | None = None,
+    ) -> None:
         self.trainers = TrainerStore(state_path=trainer_state_path)
+        self.standard_policy_store = StandardPolicyStore(state_path=standard_policy_state_path)
+        self.standard_policy_config = standard_policy_config or StandardPolicyConfig.from_env()
         default_trainer = self.trainers.get(self.trainers.default_trainer_id)
         if default_trainer is None:
             raise ValueError("Default trainer not found.")
         self.learner = default_trainer.learner_for(DEFAULT_GAME_MODE)
-        self.sessions = SessionStore(self.trainers)
+        self.sessions = SessionStore(
+            self.trainers,
+            self.standard_policy_store,
+            self.standard_policy_config,
+        )
 
-    def lobby(self) -> dict[str, Any]:
+    def lobby(self, game_mode: Any = None) -> dict[str, Any]:
         trainer = self.trainers.get(self.trainers.default_trainer_id)
         if trainer is None:
             raise ApiError("Default trainer not found.", "trainer_not_found", HTTPStatus.INTERNAL_SERVER_ERROR)
 
-        mode = self._default_mode()
+        mode = self._resolve_game_mode(game_mode, require_available=False)
         snapshot = {
             "game_mode": mode.game_mode,
             "available_game_modes": available_game_mode_snapshots(selected_id=mode.game_mode),
@@ -278,7 +354,10 @@ class TcgApplication:
         mode = self._resolve_game_mode(payload.get("game_mode"), require_available=True)
         trainer = self._resolve_trainer(payload.get("trainer_id"))
         human_deck_id = self._resolve_human_deck_id(mode, payload.get("human_deck_id"))
-        human_first, opening_roll = self._resolve_human_first(payload)
+        human_first, opening_roll = self._resolve_human_first(
+            payload,
+            use_opening_roll=mode.uses_opening_roll,
+        )
         session_id, session = self.sessions.create(
             trainer=trainer,
             mode=mode,
@@ -413,7 +492,11 @@ class TcgApplication:
     @staticmethod
     def _resolve_human_first(
         payload: dict[str, Any],
+        use_opening_roll: bool = True,
     ) -> tuple[bool, int | None]:
+        if not use_opening_roll:
+            return True, None
+
         requested_order = payload.get("human_first")
         if isinstance(requested_order, bool):
             return requested_order, None
@@ -463,7 +546,8 @@ class TcgRequestHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         try:
             if parsed.path == "/api/lobby":
-                self._send_json(self.app.lobby())
+                requested_mode = self._query_value(parsed.query, "game_mode", required=False)
+                self._send_json(self.app.lobby(requested_mode))
                 return
 
             if parsed.path == "/api/game":
@@ -556,11 +640,13 @@ class TcgRequestHandler(BaseHTTPRequestHandler):
         self.wfile.write(encoded)
 
     @staticmethod
-    def _query_value(raw_query: str, key: str) -> str:
+    def _query_value(raw_query: str, key: str, required: bool = True) -> str | None:
         query = parse_qs(raw_query)
         values = query.get(key)
         if not values or not values[0]:
-            raise ApiError(f"Missing query parameter: {key}", f"missing_{key}", HTTPStatus.BAD_REQUEST)
+            if required:
+                raise ApiError(f"Missing query parameter: {key}", f"missing_{key}", HTTPStatus.BAD_REQUEST)
+            return None
         return values[0]
 
 

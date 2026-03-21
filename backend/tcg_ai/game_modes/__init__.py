@@ -8,6 +8,10 @@ from .my_first_battle import cards as my_first_battle_cards
 from .my_first_battle import engine as my_first_battle_engine
 from .my_first_battle import learning as my_first_battle_learning
 from .my_first_battle import presentation as my_first_battle_presentation
+from .standard import cards as standard_cards
+from .standard import engine as standard_engine
+from .standard import policy as standard_policy
+from .standard import presentation as standard_presentation
 
 DEFAULT_GAME_MODE = "my_first_battle"
 
@@ -18,10 +22,13 @@ class GameModeDefinition:
     name: str
     description: str
     available: bool
+    uses_opening_roll: bool = True
     create_game: Callable[..., Any] | None = None
     apply_action: Callable[..., Any] | None = None
     serialize_state: Callable[..., dict[str, Any]] | None = None
     choose_action: Callable[..., dict[str, Any] | None] | None = None
+    initialize_session: Callable[..., Any] | None = None
+    runtime_snapshot: Callable[..., dict[str, Any]] | None = None
     summarize_state: Callable[..., Any] | None = None
     calculate_reward: Callable[..., float] | None = None
     extract_action_features: Callable[..., tuple[str, ...]] | None = None
@@ -69,8 +76,19 @@ GAME_MODES: dict[str, GameModeDefinition] = {
     "standard": GameModeDefinition(
         game_mode="standard",
         name="Standard",
-        description="Full-size decks with Standard rules. Not available yet.",
-        available=False,
+        description="Full-size 60-card ex Battle Deck opening-hand prototype.",
+        available=True,
+        uses_opening_roll=False,
+        create_game=standard_engine.create_game,
+        apply_action=standard_engine.apply_action,
+        serialize_state=standard_presentation.serialize_state,
+        choose_action=standard_engine.choose_action,
+        initialize_session=standard_policy.initialize_session,
+        runtime_snapshot=standard_policy.runtime_snapshot,
+        default_human_deck_id=standard_cards.DEFAULT_HUMAN_DECK_ID,
+        deck_definitions=standard_cards.DECK_DEFINITIONS,
+        available_deck_snapshots=standard_cards.available_deck_snapshots,
+        paired_deck_id_for=standard_cards.paired_deck_id_for,
     ),
 }
 

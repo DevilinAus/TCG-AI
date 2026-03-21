@@ -27,6 +27,7 @@ const pointerState = {
 
 const {
   deriveInteractionContext,
+  findBackgroundPlayActionForSelection,
   findBenchPlayActionForSelection,
   findBoardTargetLabelForPlayer,
   isBoardRefClickable,
@@ -186,16 +187,29 @@ async function refreshGame() {
   }
 }
 
-async function loadLobby() {
+async function loadLobby(requestedGameModeId = null) {
   try {
-    lobbyState = await requestJson("/api/lobby");
+    const query = requestedGameModeId ? `?game_mode=${encodeURIComponent(requestedGameModeId)}` : "";
+    lobbyState = await requestJson(`/api/lobby${query}`);
     currentState = null;
     previousState = null;
     aiAutoRunPaused = false;
     resetSelections();
-    uiState.selectedGameModeId = uiState.selectedGameModeId || lobbyState.game_mode || null;
-    uiState.selectedTrainerId = uiState.selectedTrainerId || lobbyState.ai_trainer?.id || null;
-    uiState.selectedHumanDeckId = uiState.selectedHumanDeckId || lobbyState.human_deck_id || null;
+    uiState.selectedGameModeId = lobbyState.game_mode || null;
+
+    const availableTrainerIds = new Set((lobbyState.available_trainers || []).map((trainer) => trainer.id));
+    if (!availableTrainerIds.has(uiState.selectedTrainerId)) {
+      uiState.selectedTrainerId = lobbyState.ai_trainer?.id || null;
+    }
+
+    const availableDeckIds = new Set((lobbyState.available_decks || []).map((deck) => deck.id));
+    if (!availableDeckIds.has(uiState.selectedHumanDeckId)) {
+      uiState.selectedHumanDeckId =
+        lobbyState.human_deck_id ||
+        lobbyState.available_decks?.find((deck) => deck.selected)?.id ||
+        lobbyState.available_decks?.[0]?.id ||
+        null;
+    }
     renderLobby(lobbyState);
   } catch (error) {
     updateStatus(error.message);
@@ -245,7 +259,7 @@ async function submitAction(actionView) {
 
   try {
     aiAutoRunPaused = false;
-    if (actionView.type === "attack") {
+    if (actionView.type === "attack" || actionView.type === "mulligan") {
       resetSelections();
     }
     currentState = await requestJson("/api/action", {
@@ -401,9 +415,9 @@ function renderAppIdentity(state) {
     .map((mode) => `
       <button
         type="button"
-        class="game-mode-pill${mode.id === selectedModeId ? " is-selected" : ""}"
+        class="game-mode-pill${mode.id === selectedModeId ? " is-selected" : ""}${mode.available ? "" : " is-unavailable"}"
         data-game-mode="${escapeHtml(mode.id)}"
-        ${mode.available ? "" : "disabled"}
+        aria-disabled="${mode.available ? "false" : "true"}"
       >
         ${escapeHtml(mode.name)}
       </button>
@@ -462,12 +476,14 @@ function handleDeckChange(event) {
 }
 
 function handleGameModeChange(gameModeId) {
-  uiState.selectedGameModeId = gameModeId || null;
   if (currentState) {
+    uiState.selectedGameModeId = currentState.game_mode || null;
     render(currentState);
-  } else if (lobbyState) {
-    renderLobby(lobbyState);
+    return;
   }
+
+  uiState.selectedGameModeId = gameModeId || null;
+  void loadLobby(uiState.selectedGameModeId);
 }
 
 function maybeRunAiTurn(state) {
@@ -518,6 +534,7 @@ function render(state) {
   const human = state.players[0];
   const ai = state.players[1];
   const context = deriveContext(state);
+  const mulliganAction = findOpeningMulliganAction(state);
   const faceDownCardImageUrl = resolveFaceDownCardImageUrl(state);
   const sharedEnergyEnabled = usesSharedEnergyPool(state);
   const playerActiveTargetRef = human.active?.ref || {
@@ -584,9 +601,11 @@ function render(state) {
   });
   renderPrizePile(document.getElementById("player-prizes"), human.prize_pile, {
     imageUrl: faceDownCardImageUrl,
+    compactPile: state.game_mode === "standard",
   });
   renderPrizePile(document.getElementById("opponent-prizes"), ai.prize_pile, {
     imageUrl: faceDownCardImageUrl,
+    compactPile: state.game_mode === "standard",
   });
   renderDiscard(document.getElementById("player-discard"), human.discard_top, human.discard_count);
   renderDiscard(document.getElementById("opponent-discard"), ai.discard_top, ai.discard_count);
@@ -606,6 +625,7 @@ function render(state) {
       context,
       targetRef: playerActiveTargetRef,
       previousPokemon: previousSnapshot?.players?.[0]?.active || null,
+      setupPromptAction: mulliganAction,
     },
   );
   renderPokemonZone(
@@ -649,6 +669,7 @@ function render(state) {
   );
 
   renderHand(document.getElementById("player-hand"), human.hand, context, previousSnapshot?.players?.[0]?.hand || []);
+  renderSelectedCardPreview(state);
   const contextActionsElement = document.getElementById("context-actions");
   if (contextActionsElement) {
     renderContextActions(contextActionsElement, context.actions);
@@ -682,9 +703,18 @@ function renderLobby(state) {
   renderDeckPicker(state);
   renderOpponentIdentity(state);
   renderLobbyBoard(state);
+  const selectedMode = resolveGameModeMetadata(state);
+  const newGameButton = document.getElementById("new-game-button");
+  if (newGameButton) {
+    newGameButton.disabled = aiIsRunning || !selectedMode?.available;
+  }
   syncAdaptiveActiveCardLayout();
   syncCursorForPointerPosition();
-  updateStatus("Choose your deck and gym leader, then start a new game.");
+  updateStatus(
+    selectedMode?.available
+      ? "Choose your deck and gym leader, then start a new game."
+      : "Standard ex Battle Deck data is loaded for preview, but Standard battles are not wired up yet.",
+  );
 }
 
 function resolveFaceDownCardImageUrl(state) {
@@ -759,6 +789,24 @@ function renderPrizePile(element, prizePile, options) {
   element.classList.toggle("is-empty", count === 0);
   if (count <= 0) {
     element.appendChild(buildPrizeEmptyStamp());
+    return;
+  }
+
+  if (options.compactPile) {
+    const prizeCard = buildFaceDownPileCard({
+      imageUrl,
+      title: usesCoinArtwork ? "Prize coin pile" : "Prize card pile",
+      description: usesCoinArtwork
+        ? `Prize pile • ${count} coin${count === 1 ? "" : "s"} remaining`
+        : `Prize pile • ${count} card${count === 1 ? "" : "s"} remaining`,
+      kind: "prize",
+      badgeText: count,
+      stacked: count > 1,
+    });
+    prizeCard.classList.add("prize-pile-card");
+    prizeCard.classList.toggle("prize-pile-card-coin", usesCoinArtwork);
+    prizeCard.setAttribute("aria-hidden", "true");
+    element.appendChild(prizeCard);
     return;
   }
 
@@ -920,6 +968,88 @@ function renderHand(element, hand, context, previousHand) {
   }
 }
 
+function renderSelectedCardPreview(state) {
+  const previewElement = document.getElementById("floating-card-preview");
+  if (!previewElement) {
+    return;
+  }
+
+  const preview = resolveSelectedPreview(state);
+  if (!preview) {
+    previewElement.hidden = true;
+    previewElement.innerHTML = "";
+    return;
+  }
+
+  previewElement.hidden = false;
+  const card = document.createElement("article");
+  card.className = "floating-card-preview__card";
+  card.dataset.element = preview.element || "";
+  card.dataset.kind = preview.kind || "";
+  card.title = preview.name;
+  card.setAttribute("aria-label", `${preview.name} enlarged preview`);
+  card.innerHTML = buildCardImageMarkup(preview.imageUrl, preview.name);
+  previewElement.innerHTML = "";
+  previewElement.appendChild(card);
+}
+
+function resolveSelectedPreview(state) {
+  const player = state?.players?.[0];
+  if (!player) {
+    return null;
+  }
+
+  if (uiState.selectedCardId) {
+    const handCard = player.hand.find((card) => card.instance_id === uiState.selectedCardId);
+    if (handCard) {
+      return {
+        name: handCard.name,
+        imageUrl: handCard.image_url,
+        element: handCard.element,
+        kind: handCard.kind,
+      };
+    }
+  }
+
+  const selectedTarget = uiState.selectedBoardTarget;
+  if (!selectedTarget) {
+    return null;
+  }
+
+  if (player.active?.ref && refsMatch(player.active.ref, selectedTarget)) {
+    return {
+      name: player.active.name,
+      imageUrl: player.active.image_url,
+      element: player.active.element,
+      kind: player.active.kind,
+    };
+  }
+
+  const benchedPokemon = player.bench.find((pokemon) => refsMatch(pokemon.ref, selectedTarget));
+  if (benchedPokemon) {
+    return {
+      name: benchedPokemon.name,
+      imageUrl: benchedPokemon.image_url,
+      element: benchedPokemon.element,
+      kind: benchedPokemon.kind,
+    };
+  }
+
+  if (selectedTarget.zone === "energy") {
+    const topEnergyCard = player.energy_zone?.[player.energy_zone.length - 1] || null;
+    if (topEnergyCard) {
+      return {
+        name: topEnergyCard.name,
+        imageUrl: topEnergyCard.image_url,
+        element: topEnergyCard.element,
+        kind: topEnergyCard.kind,
+      };
+    }
+  }
+
+  return null;
+}
+
 function renderContextActions(element, actions) {
   element.innerHTML = "";
   if (!actions.length) {
@@ -990,6 +1120,9 @@ function didLogEntriesChange(logEntries, previousLogEntries) {
 function buildPokemonCard(pokemon, options) {
   if (!pokemon) {
     return buildActiveSlotPlaceholder(options);
+  }
+  if (pokemon.face_down) {
+    return buildFaceDownPokemonCard(pokemon, options);
   }
 
   const card = document.createElement("article");
@@ -1102,6 +1235,37 @@ function buildPokemonCard(pokemon, options) {
   return card;
 }
 
+function buildFaceDownPokemonCard(pokemon, options) {
+  const card = document.createElement("article");
+  const classNames = ["board-card", "board-card-facedown"];
+  if (options.compact) {
+    classNames.push("is-compact");
+  }
+  if (options.benchCard) {
+    classNames.push("is-bench-card");
+  }
+  card.className = classNames.join(" ");
+  card.dataset.element = "";
+  card.dataset.kind = "pokemon";
+  card.title = pokemon.name || "Face-down Pokemon";
+  card.setAttribute("aria-label", pokemon.name || "Face-down Pokemon");
+  card.innerHTML = `
+    <div class="card-visual">
+      <img src="${escapeHtml(pokemon.image_url || resolveFaceDownCardImageUrl(currentState))}" alt="${escapeHtml(pokemon.name || "Face-down Pokemon")}" loading="lazy" />
+    </div>
+    <div class="card-copy card-copy-facedown">
+      <div class="card-title-row">
+        <div class="card-title-group">
+          <div class="card-title">Face-down Pokemon</div>
+          <p class="card-subtitle">Reveals after setup is complete</p>
+        </div>
+        <div class="stage-pill">Hidden</div>
+      </div>
+    </div>
+  `;
+  return card;
+}
+
 function buildActiveSlotPlaceholder(options = {}) {
   const element = document.createElement("article");
   const classNames = ["board-card", "active-slot-placeholder"];
@@ -1118,9 +1282,30 @@ function buildActiveSlotPlaceholder(options = {}) {
   element.setAttribute("aria-label", "Active empty");
   const copy = document.createElement("div");
   copy.className = "active-slot-placeholder-copy";
-  copy.appendChild(buildStackedStamp(["Active", "Empty"], "bench-empty-stamp active-slot-empty-stamp"));
+  if (options.setupPromptAction) {
+    const prompt = document.createElement("div");
+    prompt.className = "active-slot-setup-prompt";
+    prompt.innerHTML = `
+      <p class="active-slot-setup-prompt__title">No Basic Pokemon in hand</p>
+      <p class="active-slot-setup-prompt__copy">Return your opening hand to the deck, shuffle, and draw 7 new cards.</p>
+    `;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "primary active-slot-setup-prompt__button";
+    button.textContent = options.setupPromptAction.label || "Okay";
+    button.disabled = aiIsRunning;
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      submitAction(options.setupPromptAction);
+    });
+    prompt.appendChild(button);
+    copy.appendChild(prompt);
+  } else {
+    copy.appendChild(buildStackedStamp(["Active", "Empty"], "bench-empty-stamp active-slot-empty-stamp"));
+  }
   element.appendChild(copy);
-  if (options.clickable && options.targetRef) {
+  if (!options.setupPromptAction && options.clickable && options.targetRef) {
     element.addEventListener("click", () => toggleSelectedBoardTarget(options.targetRef));
   }
   return element;
@@ -1525,6 +1710,7 @@ function renderLobbyBoard(state) {
   debugActions.appendChild(buildPlaceholder("Start a new game to inspect legal actions."));
 
   renderPlayerEndTurnButtonLobby();
+  renderSelectedCardPreview(null);
   previousState = null;
 }
 
@@ -1603,11 +1789,11 @@ function renderPlayerEndTurnButton(state) {
     return;
   }
 
-  const endTurnAction =
-    state.legal_actions.find((actionView) => actionView.type === "end_turn") || null;
-  button.disabled = aiIsRunning || !endTurnAction;
-  button.classList.toggle("is-ready", !!endTurnAction && !aiIsRunning);
-  button.onclick = endTurnAction ? () => submitAction(endTurnAction) : null;
+  const primaryAction = findPrimaryTurnAction(state);
+  button.disabled = aiIsRunning || !primaryAction;
+  button.classList.toggle("is-ready", !!primaryAction && !aiIsRunning);
+  setPrimaryTurnButtonLabel(button, primaryAction);
+  button.onclick = primaryAction ? () => submitAction(primaryAction) : null;
 }
 
 function renderPlayerEndTurnButtonLobby() {
@@ -1619,6 +1805,30 @@ function renderPlayerEndTurnButtonLobby() {
   button.disabled = true;
   button.classList.remove("is-ready");
   button.onclick = null;
+  setPrimaryTurnButtonLabel(button, null);
+}
+
+function findPrimaryTurnAction(state) {
+  if (!state?.legal_actions?.length) {
+    return null;
+  }
+  return (
+    state.legal_actions.find((actionView) => actionView.type === "end_setup") ||
+    state.legal_actions.find((actionView) => actionView.type === "end_turn") ||
+    null
+  );
+}
+
+function setPrimaryTurnButtonLabel(button, actionView) {
+  const labelElement = button.querySelector(".end-turn-button__label");
+  if (!labelElement) {
+    return;
+  }
+  if (actionView?.type === "end_setup") {
+    labelElement.innerHTML = "END<br />SETUP";
+    return;
+  }
+  labelElement.innerHTML = "END<br />TURN";
 }
 
 function buildActionButton(actionView, options = {}) {
@@ -1640,11 +1850,18 @@ function buildActionButton(actionView, options = {}) {
   return button;
 }
 
+function findOpeningMulliganAction(state) {
+  if (!state || state.game_mode !== "standard") {
+    return null;
+  }
+  return state.legal_actions.find((actionView) => actionView.type === "mulligan") || null;
+}
+
 function classifyAction(actionView) {
   if (actionView.type === "attack") {
     return "is-attack";
   }
-  if (actionView.type === "end_turn" || actionView.type === "promote") {
+  if (actionView.type === "end_turn" || actionView.type === "end_setup" || actionView.type === "promote") {
     return "is-primary";
   }
   return "is-support";
@@ -1654,10 +1871,12 @@ function describeActionType(actionType) {
   const labels = {
     attack: "Attack",
     bench_basic: "Bench play",
+    end_setup: "Setup",
     end_turn: "Turn action",
     evolve: "Evolution",
     play_energy: "Energy attach",
     play_potion: "Support effect",
+    play_supporter: "Supporter",
     play_switch: "Switch",
     promote: "Required choice",
   };
@@ -1724,6 +1943,12 @@ function makePhaseLabel(state) {
   if (state.winner !== null) {
     return "Match over";
   }
+  if (state.game_mode === "standard" && state.setup_phase === "choose_active") {
+    return "Choose active";
+  }
+  if (state.game_mode === "standard" && state.setup_phase === "awaiting_end_setup") {
+    return "End setup";
+  }
   if (state.pending_promotion_for === 0) {
     return "Choose promotion";
   }
@@ -1786,6 +2011,13 @@ function findBenchPlayAction(state) {
   return findBenchPlayActionForSelection(state, uiState.selectedCardId, aiIsRunning);
 }
 
+function findBackgroundPlayAction(state) {
+  if (!state) {
+    return null;
+  }
+  return findBackgroundPlayActionForSelection(state, uiState.selectedCardId, aiIsRunning);
+}
+
 function syncBenchZoneState(element, state) {
   if (!element) {
     return;
@@ -1827,6 +2059,9 @@ function findBoardTargetLabel(player, ref) {
 
 function makeStatusMessage(state, context) {
   const battleLabel = `${state.players[0].deck_name} vs ${state.ai_trainer?.name || state.players[1].deck_name}`;
+  const mulliganAction = findOpeningMulliganAction(state);
+  const chooseActiveAction =
+    state?.legal_actions?.find((actionView) => actionView.type === "play_basic_to_active") || null;
   if (state.winner === 0) {
     return `${battleLabel} • Game over: you won.`;
   }
@@ -1838,6 +2073,23 @@ function makeStatusMessage(state, context) {
   }
   if (state.pending_promotion_for === 0) {
     return `${battleLabel} • Promotion required. ${context.instructions}`;
+  }
+  if (mulliganAction) {
+    return `${battleLabel} • No Basic Pokemon in hand.`;
+  }
+  if (state.game_mode === "standard" && state.setup_phase === "choose_active" && chooseActiveAction) {
+    return `${battleLabel} • Choose your Active Pokemon.`;
+  }
+  if (
+    state.game_mode === "standard" &&
+    state.setup_phase === "choose_active" &&
+    !state.players[0].active &&
+    !state.legal_actions.length
+  ) {
+    return `${battleLabel} • Opening hands are drawn.`;
+  }
+  if (state.game_mode === "standard" && state.setup_phase === "awaiting_end_setup") {
+    return `${battleLabel} • Setup is ready. End setup to begin Turn 1.`;
   }
   if (state.current_player === 0) {
     return `${battleLabel} • Your turn.`;
@@ -1868,6 +2120,19 @@ function handleBoardBackgroundClick(event) {
   );
   if (clickedInteractiveElement) {
     return;
+  }
+
+  const clickedBoardPlayArea = !event.target.closest(
+    "#player-bench-zone, .hand-tray, .player-side-pocket",
+  );
+  if (clickedBoardPlayArea) {
+    const backgroundPlayAction = findBackgroundPlayAction(currentState);
+    if (backgroundPlayAction) {
+      event.preventDefault();
+      event.stopPropagation();
+      submitAction(backgroundPlayAction);
+      return;
+    }
   }
 
   if (!uiState.selectedCardId && !uiState.selectedBoardTarget) {

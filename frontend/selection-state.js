@@ -256,6 +256,22 @@
     return matchingActions.length === 1 ? matchingActions[0] : null;
   }
 
+  function findBackgroundPlayActionForSelection(state, selectedCardId, aiIsRunning) {
+    if (!state || !selectedCardId || aiIsRunning) {
+      return null;
+    }
+
+    const matchingActions = state.legal_actions.filter(
+      (action) =>
+        action.type === "play_supporter" &&
+        action.source?.zone === "hand" &&
+        action.source.instance_id === selectedCardId &&
+        !action.target,
+    );
+
+    return matchingActions.length === 1 ? matchingActions[0] : null;
+  }
+
   function isBoardRefClickable({ state, uiState, context, aiIsRunning, ref }) {
     if (!ref || aiIsRunning) {
       return false;
@@ -410,6 +426,7 @@
   const api = {
     boardTargetExists,
     deriveInteractionContext,
+    findBackgroundPlayActionForSelection,
     findBenchPlayActionForSelection,
     findBoardTargetLabelForPlayer,
     isBoardRefClickable,

@@ -201,9 +201,8 @@ h3 {
   background: linear-gradient(135deg, #d6a14a, #bc6b42);
 }
 
-.game-mode-pill:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
+.game-mode-pill.is-unavailable:not(.is-selected) {
+  opacity: 0.62;
 }
 
 .game-mode-meta {
@@ -762,9 +761,40 @@ h3 {
   display: grid;
   gap: 4px;
   align-content: start;
+  position: relative;
   grid-area: auto;
   grid-column: 1;
   grid-row: 1;
+}
+
+.floating-card-preview {
+  position: absolute;
+  top: calc(100% + 14px);
+  left: 0;
+  z-index: 5;
+  width: min(228px, calc(100vw - 440px));
+  min-width: 0;
+  pointer-events: none;
+}
+
+.floating-card-preview__card {
+  width: 100%;
+  border-radius: 20px;
+  overflow: hidden;
+  border: 1px solid rgba(255, 255, 255, 0.58);
+  background: linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(244, 247, 251, 0.94));
+  box-shadow:
+    0 26px 52px rgba(16, 24, 36, 0.18),
+    0 0 0 1px rgba(18, 29, 44, 0.05);
+}
+
+.floating-card-preview__card img {
+  display: block;
+  width: 100%;
+  height: auto;
+  aspect-ratio: 5 / 7;
+  object-fit: contain;
+  background: linear-gradient(180deg, #eef2f7, #dce4ed);
 }
 
 .opponent-title-block {
@@ -1464,6 +1494,32 @@ h3 {
   color: rgba(18, 29, 44, 0.22);
 }
 
+.active-slot-setup-prompt {
+  display: grid;
+  gap: 14px;
+  justify-items: center;
+  max-width: 260px;
+  text-align: center;
+}
+
+.active-slot-setup-prompt__title {
+  margin: 0;
+  font-size: 1rem;
+  font-weight: 800;
+  line-height: 1.35;
+  color: var(--ink);
+}
+
+.active-slot-setup-prompt__copy {
+  margin: 0;
+  color: var(--ink-soft);
+  line-height: 1.5;
+}
+
+.active-slot-setup-prompt__button {
+  min-width: 132px;
+}
+
 .opponent-panel .active-slot {
   justify-content: stretch;
 }
@@ -1941,23 +1997,29 @@ h3 {
   max-width: 108px;
 }
 
-.prize-card {
+.prize-card,
+.prize-pile-card {
   width: 72px;
   border-radius: 16px;
 }
 
-.prize-card.prize-card-coin {
+.prize-card.prize-card-coin,
+.prize-pile-card.prize-pile-card-coin {
   border-radius: 999px;
   border-color: transparent;
   background: transparent;
   box-shadow: none;
 }
 
-.prize-card.prize-card-coin::before {
+.prize-card.prize-card-coin::before,
+.prize-card.prize-card-coin::after,
+.prize-pile-card.prize-pile-card-coin::before,
+.prize-pile-card.prize-pile-card-coin::after {
   display: none;
 }
 
-.prize-card.prize-card-coin img {
+.prize-card.prize-card-coin img,
+.prize-pile-card.prize-pile-card-coin img {
   aspect-ratio: 1 / 1;
   object-fit: contain;
   background: transparent;
@@ -2300,6 +2362,12 @@ h3 {
 
   .session-row {
     grid-template-columns: 1fr 1fr;
+  }
+
+  .floating-card-preview {
+    top: calc(100% + 10px);
+    width: min(228px, calc(100vw - 96px));
+    min-width: 0;
   }
 }
 

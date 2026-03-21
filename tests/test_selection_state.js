@@ -3,6 +3,7 @@ const assert = require("node:assert/strict");
 
 const {
   deriveInteractionContext,
+  findBackgroundPlayActionForSelection,
   findBenchPlayActionForSelection,
   isBoardRefClickable,
   refsMatch,
@@ -182,6 +183,33 @@ test("isBoardRefClickable allows the energy pile when it is a highlighted hand-c
   });
 
   assert.equal(clickable, true);
+});
+
+test("findBackgroundPlayActionForSelection returns a direct supporter play action", () => {
+  const state = makeState();
+  const action = {
+    type: "play_supporter",
+    source: { zone: "hand", instance_id: "hand-potion" },
+  };
+  state.legal_actions = [action];
+
+  const selectedAction = findBackgroundPlayActionForSelection(state, "hand-potion", false);
+
+  assert.equal(selectedAction, action);
+});
+
+test("findBackgroundPlayActionForSelection ignores non-supporter hand actions", () => {
+  const state = makeState();
+  state.legal_actions = [
+    {
+      type: "bench_basic",
+      source: { zone: "hand", instance_id: "hand-basic" },
+    },
+  ];
+
+  const selectedAction = findBackgroundPlayActionForSelection(state, "hand-basic", false);
+
+  assert.equal(selectedAction, null);
 });
 
 test("resolveSelectedBoardTargetClick auto-submits a hand-targeted action", () => {
