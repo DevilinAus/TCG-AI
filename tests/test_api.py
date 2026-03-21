@@ -30,11 +30,19 @@ class ApiTests(unittest.TestCase):
 
         self.assertIsInstance(state["session_id"], str)
         self.assertEqual(state["game_mode"], "my_first_battle")
-        self.assertEqual(state["shared_assets"]["face_down_card_image_url"], "/assets/cards/shared/card-back.svg")
+        self.assertEqual(state["shared_assets"]["face_down_card_image_url"], "/assets/cards/shared/card-back.png")
         self.assertEqual(state["current_player"], 0)
         self.assertEqual(state["players"][0]["active"]["card_id"], "charmander")
         self.assertEqual(state["players"][0]["deck_pile"]["count"], state["players"][0]["deck_count"])
         self.assertEqual(state["players"][0]["prize_pile"]["count"], 3)
+        self.assertEqual(
+            state["players"][0]["prize_pile"]["image_url"],
+            "/assets/coins/my-first-battle/charmander-prize-coin.png",
+        )
+        self.assertEqual(
+            state["players"][1]["prize_pile"]["image_url"],
+            "/assets/coins/my-first-battle/squirtle-prize-coin.png",
+        )
         self.assertEqual(state["players"][0]["energy_count"], 0)
         self.assertTrue(state["players"][0]["hand"][0]["image_url"].startswith("/assets/cards/"))
         self.assertEqual(state["ai_learning"]["games_played"], 0)
@@ -69,6 +77,10 @@ class ApiTests(unittest.TestCase):
         )
         selected_deck = next(deck for deck in lobby["available_decks"] if deck["selected"])
         self.assertEqual(selected_deck["id"], "charmander")
+        self.assertEqual(
+            selected_deck["prize_coin_image_url"],
+            "/assets/coins/my-first-battle/charmander-prize-coin.png",
+        )
 
     def test_new_game_rejects_an_unavailable_game_mode(self) -> None:
         with self.assertRaises(ApiError) as context:
@@ -90,6 +102,10 @@ class ApiTests(unittest.TestCase):
         selected_deck = next(deck for deck in state["available_decks"] if deck["id"] == "bulbasaur")
         self.assertTrue(selected_deck["selected"])
         self.assertEqual(selected_deck["paired_deck_id"], "pikachu")
+        self.assertEqual(
+            selected_deck["prize_coin_image_url"],
+            "/assets/coins/my-first-battle/bulbasaur-prize-coin.png",
+        )
 
     def test_new_game_rejects_an_unknown_human_deck(self) -> None:
         with self.assertRaises(ApiError) as context:

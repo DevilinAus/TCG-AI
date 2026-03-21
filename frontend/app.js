@@ -76,6 +76,7 @@ function syncAdaptiveActiveCardLayout() {
   }
 
   const activeCards = document.querySelectorAll(".active-slot .board-card:not(.is-compact):not(.active-slot-placeholder)");
+  let anyCardNeedsWideLayout = false;
   for (const card of activeCards) {
     card.classList.remove("is-wide-layout");
     const attackToplines = card.querySelectorAll(".attack-topline");
@@ -90,9 +91,22 @@ function syncAdaptiveActiveCardLayout() {
       continue;
     }
 
+    anyCardNeedsWideLayout = true;
     card.classList.add("is-wide-layout");
-    card.closest(".player-active-pocket, .opponent-active-pocket")?.classList.add("has-wide-active-card");
   }
+
+  if (anyCardNeedsWideLayout) {
+    for (const pocket of activePockets) {
+      pocket.classList.add("has-wide-active-card");
+    }
+  }
+
+  const measuredWidths = [...activeCards]
+    .map((card) => Math.ceil(card.getBoundingClientRect().width))
+    .filter((width) => width > 0);
+  const fallbackWidth = anyCardNeedsWideLayout ? 540 : 480;
+  const resolvedWidth = measuredWidths.length ? Math.max(...measuredWidths) : fallbackWidth;
+  document.documentElement.style.setProperty("--active-card-runtime-width", `${resolvedWidth}px`);
 }
 
 function syncCursorForPointerPosition() {
@@ -543,9 +557,6 @@ function render(state) {
   if (selectionSummaryElement) {
     selectionSummaryElement.textContent = describeSelection(state, context);
   }
-  renderPlayerSummary(document.getElementById("player-summary"), human);
-  renderPlayerSummary(document.getElementById("opponent-summary"), ai);
-
   setSharedEnergyVisibility(sharedEnergyEnabled);
   renderDeckPile(document.getElementById("player-deck"), human.deck_pile, {
     imageUrl: faceDownCardImageUrl,
@@ -671,6 +682,8 @@ function renderLobby(state) {
   renderDeckPicker(state);
   renderOpponentIdentity(state);
   renderLobbyBoard(state);
+  syncAdaptiveActiveCardLayout();
+  syncCursorForPointerPosition();
   updateStatus("Choose your deck and gym leader, then start a new game.");
 }
 
@@ -693,6 +706,15 @@ function renderDeckPile(element, deckPile, options) {
   }
   element.innerHTML = "";
   const count = Number(deckPile?.count ?? 0);
+  if (count <= 0) {
+    element.appendChild(
+      buildPileEmptyCard({
+        kind: "deck",
+        label: "Deck",
+      }),
+    );
+    return;
+  }
   const deckCard = buildFaceDownPileCard({
     imageUrl: options.imageUrl,
     title: "Deck pile",
@@ -732,6 +754,8 @@ function renderPrizePile(element, prizePile, options) {
   }
   element.innerHTML = "";
   const count = Number(prizePile?.count ?? 0);
+  const imageUrl = prizePile?.image_url || options.imageUrl;
+  const usesCoinArtwork = !!prizePile?.image_url;
   element.classList.toggle("is-empty", count === 0);
   if (count <= 0) {
     element.appendChild(buildPrizeEmptyStamp());
@@ -740,12 +764,15 @@ function renderPrizePile(element, prizePile, options) {
 
   for (let index = 0; index < count; index += 1) {
     const prizeCard = buildFaceDownPileCard({
-      imageUrl: options.imageUrl,
-      title: `Prize card ${index + 1}`,
-      description: `Prize card ${index + 1} of ${count}`,
+      imageUrl,
+      title: usesCoinArtwork ? `Prize coin ${index + 1}` : `Prize card ${index + 1}`,
+      description: usesCoinArtwork
+        ? `Prize coin ${index + 1} of ${count}`
+        : `Prize card ${index + 1} of ${count}`,
       kind: "prize",
     });
     prizeCard.classList.add("prize-card");
+    prizeCard.classList.toggle("prize-card-coin", usesCoinArtwork);
     prizeCard.setAttribute("aria-hidden", "true");
     element.appendChild(prizeCard);
   }
@@ -753,8 +780,13 @@ function renderPrizePile(element, prizePile, options) {
 
 function renderDiscard(element, discardTop, discardCount) {
   element.innerHTML = "";
-  if (!discardTop) {
-    element.appendChild(buildPlaceholder("Empty."));
+  if (!discardTop || discardCount <= 0) {
+    element.appendChild(
+      buildPileEmptyCard({
+        kind: "discard",
+        label: "Discard",
+      }),
+    );
     return;
   }
 
@@ -800,9 +832,21 @@ function renderPokemonList(element, pokemonList, options) {
 }
 
 function buildBenchEmptyStamp() {
+  return buildEmptyStamp("Bench", "bench-empty-stamp");
+}
+
+function buildEmptyStamp(label, className = "bench-empty-stamp") {
+  return buildStackedStamp([label, "Empty"], className);
+}
+
+function buildStackedStamp(lines, className) {
   const element = document.createElement("div");
-  element.className = "bench-empty-stamp";
-  element.textContent = "Bench Empty";
+  element.className = className;
+  for (const line of lines) {
+    const lineElement = document.createElement("span");
+    lineElement.textContent = line;
+    element.appendChild(lineElement);
+  }
   return element;
 }
 
@@ -838,21 +882,18 @@ function buildSharedEnergyHolderCard(options = {}) {
         ${buildCardImageMarkup(options.energyCard.image_url, options.energyCard.name)}
       </div>
     `
-    : `
-      <div class="shared-energy-spot__well" aria-hidden="true">
-        <span class="shared-energy-spot__core">+</span>
-      </div>
-    `;
-  element.innerHTML = `
-    <div class="shared-energy-spot__media">
-      ${mediaMarkup}
-    </div>
-    <div class="shared-energy-spot__copy">
-      <p class="shared-energy-spot__hint">${options.count > 0 ? "Shared pool" : "Play here"}</p>
-    </div>
-  `;
-  if (options.count > 1) {
-    element.appendChild(buildPileCountBadge(options.count));
+    : "";
+  element.innerHTML = `<div class="shared-energy-spot__media">${mediaMarkup}</div>`;
+  if (!options.energyCard) {
+    const well = document.createElement("div");
+    well.className = "shared-energy-spot__well";
+    well.appendChild(buildStackedStamp(["Shared", "Energy", "Pool"], "shared-energy-stamp"));
+    element.querySelector(".shared-energy-spot__media")?.appendChild(well);
+  }
+  if (options.count > 0) {
+    const badge = buildPileCountBadge(options.count);
+    badge.classList.add("shared-energy-count-badge");
+    element.appendChild(badge);
   }
   return element;
 }
@@ -869,6 +910,7 @@ function renderHand(element, hand, context, previousHand) {
     const miniCard = buildMiniCard(card, {
       clickable: true,
       playable: card.playable,
+      hideCopy: true,
       selected: uiState.selectedCardId === card.instance_id,
       targetable: context.highlightedHandIds.has(card.instance_id),
       animationClass: previousIds.has(card.instance_id) ? "" : "card-anim-draw",
@@ -1073,12 +1115,11 @@ function buildActiveSlotPlaceholder(options = {}) {
     classNames.push("is-targetable");
   }
   element.className = classNames.join(" ");
-  element.setAttribute("aria-label", "Active Spot");
-  element.innerHTML = `
-    <div class="active-slot-placeholder-copy">
-      <span class="active-slot-placeholder-label">Active Spot</span>
-    </div>
-  `;
+  element.setAttribute("aria-label", "Active empty");
+  const copy = document.createElement("div");
+  copy.className = "active-slot-placeholder-copy";
+  copy.appendChild(buildStackedStamp(["Active", "Empty"], "bench-empty-stamp active-slot-empty-stamp"));
+  element.appendChild(copy);
   if (options.clickable && options.targetRef) {
     element.addEventListener("click", () => toggleSelectedBoardTarget(options.targetRef));
   }
@@ -1169,6 +1210,20 @@ function buildFaceDownPileCard(options = {}) {
   if (options.badgeText !== undefined && options.badgeText !== null) {
     element.appendChild(buildPileCountBadge(options.badgeText));
   }
+  return element;
+}
+
+function buildPileEmptyCard(options = {}) {
+  const element = document.createElement("article");
+  const classNames = ["mini-card", "pile-card", "pile-card-empty"];
+  if (options.kind) {
+    classNames.push(`pile-card-empty-${options.kind}`);
+  }
+  element.className = classNames.join(" ");
+  element.dataset.kind = options.kind || "pile";
+  element.title = `${options.label || "Pile"} pile empty`;
+  element.setAttribute("aria-label", element.title);
+  element.appendChild(buildEmptyStamp(options.label || "Pile", "bench-empty-stamp pile-empty-stamp"));
   return element;
 }
 
@@ -1434,15 +1489,21 @@ function renderLobbyBoard(state) {
     },
     null,
   );
-  renderPlayerSummaryPlaceholder(document.getElementById("player-summary"));
-  renderPlayerSummaryPlaceholder(document.getElementById("opponent-summary"));
   setSharedEnergyVisibility(sharedEnergyEnabled);
   renderDeckPlaceholder(document.getElementById("player-deck"), faceDownCardImageUrl);
   renderDeckPlaceholder(document.getElementById("opponent-deck"), faceDownCardImageUrl);
   renderSharedEnergyPlaceholder(document.getElementById("player-shared-energy"), 0);
   renderSharedEnergyPlaceholder(document.getElementById("opponent-shared-energy"), 0);
-  renderPrizePlaceholder(document.getElementById("player-prizes"), 3, faceDownCardImageUrl);
-  renderPrizePlaceholder(document.getElementById("opponent-prizes"), 3, faceDownCardImageUrl);
+  renderPrizePlaceholder(
+    document.getElementById("player-prizes"),
+    3,
+    humanDeck?.prize_coin_image_url || faceDownCardImageUrl,
+  );
+  renderPrizePlaceholder(
+    document.getElementById("opponent-prizes"),
+    3,
+    aiDeck?.prize_coin_image_url || faceDownCardImageUrl,
+  );
   renderDiscard(document.getElementById("player-discard"), null, 0);
   renderDiscard(document.getElementById("opponent-discard"), null, 0);
   renderPokemonZone(document.getElementById("player-active"), null, {});
@@ -1490,36 +1551,6 @@ function applyBoardTurnState(elements, activePlayerIndex) {
   }
 }
 
-function renderPlayerSummary(element, player) {
-  element.innerHTML = [
-    buildMetricPill("Prize", player.prize_tokens_remaining),
-    buildMetricPill("Deck", player.deck_count),
-    buildMetricPill("Discard", player.discard_count),
-    buildMetricPill("Energy", player.energy_count),
-  ].join("");
-}
-
-function buildMetricPill(label, value) {
-  return `
-    <div class="metric-pill">
-      <span class="metric-pill-label">${escapeHtml(label)}</span>
-      <span class="metric-pill-value">${escapeHtml(value)}</span>
-    </div>
-  `;
-}
-
-function renderPlayerSummaryPlaceholder(element) {
-  if (!element) {
-    return;
-  }
-  element.innerHTML = [
-    buildMetricPill("Prize", "-"),
-    buildMetricPill("Deck", "-"),
-    buildMetricPill("Discard", "-"),
-    buildMetricPill("Energy", "-"),
-  ].join("");
-}
-
 function renderDeckPlaceholder(element, imageUrl) {
   if (!element) {
     return;
@@ -1558,6 +1589,7 @@ function renderPrizePlaceholder(element, count, imageUrl) {
     element,
     {
       count,
+      image_url: imageUrl,
     },
     {
       imageUrl,

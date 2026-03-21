@@ -81,7 +81,7 @@
               <div class="opponent-layout">
                 <aside class="prize-pocket prize-pocket-opponent">
                   <section class="resource-panel resource-panel-prize">
-                    <div class="section-header section-header-center">
+                    <div class="section-header">
                       <h3>Prize</h3>
                     </div>
                     <div id="opponent-prizes" class="prize-stack"></div>
@@ -122,22 +122,19 @@
                   <div class="resource-strip resource-strip-opponent resource-strip-floating">
                     <section class="resource-panel">
                       <div class="section-header">
-                        <h3>Deck</h3>
-                      </div>
-                      <div id="opponent-deck" class="mini-card-row deck-slot-row"></div>
-                    </section>
-
-                    <section class="resource-panel">
-                      <div class="section-header">
                         <h3>Discard</h3>
                       </div>
                       <div id="opponent-discard" class="mini-card-row"></div>
                     </section>
+
+                    <section class="resource-panel">
+                      <div class="section-header">
+                        <h3>Deck</h3>
+                      </div>
+                      <div id="opponent-deck" class="mini-card-row"></div>
+                    </section>
                   </div>
 
-                  <div class="opponent-summary-pocket">
-                    <div id="opponent-summary" class="player-summary"></div>
-                  </div>
                 </div>
               </div>
             </article>
@@ -150,7 +147,7 @@
               <div class="player-layout">
                 <aside class="prize-pocket prize-pocket-player">
                   <section class="resource-panel resource-panel-prize">
-                    <div class="section-header section-header-center">
+                    <div class="section-header">
                       <h3>Prize</h3>
                     </div>
                     <div id="player-prizes" class="prize-stack"></div>
@@ -195,14 +192,12 @@
                 </div>
 
                 <div class="player-side-pocket">
-                  <div id="player-summary" class="player-summary"></div>
-
                   <div class="resource-strip resource-strip-player resource-strip-floating">
                     <section class="resource-panel">
                       <div class="section-header">
                         <h3>Deck</h3>
                       </div>
-                      <div id="player-deck" class="mini-card-row deck-slot-row"></div>
+                      <div id="player-deck" class="mini-card-row"></div>
                     </section>
 
                     <section class="resource-panel">
@@ -214,8 +209,7 @@
                   </div>
 
                   <button id="player-end-turn-button" class="end-turn-button" type="button">
-                    <span class="end-turn-button__label">End Turn</span>
-                    <span class="end-turn-button__meta">Turn action</span>
+                    <span class="end-turn-button__label">END<br />TURN</span>
                   </button>
                 </div>
               </div>

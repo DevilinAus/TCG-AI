@@ -4,6 +4,8 @@ from dataclasses import dataclass
 
 from .models import AttackDefinition, CardDefinition
 
+PRIZE_COIN_ASSET_BASE_URL = "/assets/coins/my-first-battle"
+
 
 def attack(name: str, cost: int, damage: int, effect: str = "none") -> AttackDefinition:
     return AttackDefinition(name=name, cost=cost, damage=damage, effect=effect)
@@ -294,6 +296,7 @@ class DeckDefinition:
     element: str
     starter_pokemon: str
     starting_energy: str
+    prize_coin_filename: str
     entries: tuple[tuple[str, int], ...]
 
 
@@ -304,6 +307,7 @@ DECK_DEFINITIONS: dict[str, DeckDefinition] = {
         element="grass",
         starter_pokemon="bulbasaur",
         starting_energy="grass_energy",
+        prize_coin_filename="bulbasaur-prize-coin.png",
         entries=(
             ("bulbasaur", 2),
             ("ivysaur", 2),
@@ -323,6 +327,7 @@ DECK_DEFINITIONS: dict[str, DeckDefinition] = {
         element="fire",
         starter_pokemon="charmander",
         starting_energy="fire_energy",
+        prize_coin_filename="charmander-prize-coin.png",
         entries=(
             ("charmander", 2),
             ("charmeleon", 2),
@@ -342,6 +347,7 @@ DECK_DEFINITIONS: dict[str, DeckDefinition] = {
         element="water",
         starter_pokemon="squirtle",
         starting_energy="water_energy",
+        prize_coin_filename="squirtle-prize-coin.png",
         entries=(
             ("squirtle", 2),
             ("wartortle", 2),
@@ -361,6 +367,7 @@ DECK_DEFINITIONS: dict[str, DeckDefinition] = {
         element="lightning",
         starter_pokemon="pikachu",
         starting_energy="lightning_energy",
+        prize_coin_filename="pikachu-prize-coin.png",
         entries=(
             ("pikachu", 2),
             ("raichu", 2),
@@ -390,6 +397,18 @@ def paired_deck_id_for(deck_id: str) -> str:
     return PAIRED_DECK_IDS[deck_id]
 
 
+def deck_id_for_name(deck_name: str) -> str | None:
+    for deck_id, deck in DECK_DEFINITIONS.items():
+        if deck.name == deck_name:
+            return deck_id
+    return None
+
+
+def prize_coin_image_url_for_deck(deck_id: str) -> str:
+    deck = DECK_DEFINITIONS[deck_id]
+    return f"{PRIZE_COIN_ASSET_BASE_URL}/{deck.prize_coin_filename}"
+
+
 def available_deck_snapshots(selected_id: str | None = None) -> list[dict[str, object]]:
     snapshots = []
     for deck_id, deck in DECK_DEFINITIONS.items():
@@ -401,6 +420,7 @@ def available_deck_snapshots(selected_id: str | None = None) -> list[dict[str, o
                 "element": deck.element,
                 "paired_deck_id": paired_id,
                 "paired_deck_name": DECK_DEFINITIONS[paired_id].name,
+                "prize_coin_image_url": prize_coin_image_url_for_deck(deck_id),
                 "selected": deck_id == selected_id,
             }
         )

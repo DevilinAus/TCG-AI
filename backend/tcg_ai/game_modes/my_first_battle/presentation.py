@@ -5,6 +5,7 @@ import json
 from pathlib import Path
 from typing import Any
 
+from .cards import deck_id_for_name, prize_coin_image_url_for_deck
 from .engine import card_definition, get_top_card_definition, list_legal_actions
 from .models import GameState, PlayerState, PokemonInPlay
 
@@ -70,6 +71,7 @@ def _serialize_player_state(
     action_views: list[dict[str, Any]],
 ) -> dict[str, Any]:
     player = state.players[player_index]
+    deck_id = deck_id_for_name(player.deck_name)
     hand = [
         _serialize_hand_card(state, player_index, instance_id, action_views)
         for instance_id in player.hand
@@ -95,6 +97,7 @@ def _serialize_player_state(
         "prize_pile": {
             "count": player.prize_tokens_remaining,
             "face_down": True,
+            "image_url": prize_coin_image_url_for_deck(deck_id) if deck_id else None,
         },
         "requires_promotion": state.pending_promotion_for == player_index,
         "active": _serialize_pokemon(
