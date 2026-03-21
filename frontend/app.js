@@ -14,6 +14,7 @@ const uiState = {
   selectedCardId: null,
   selectedBoardTarget: null,
   availableContextActions: [],
+  selectedGameModeId: null,
   selectedTrainerId: null,
   selectedHumanDeckId: null,
 };
@@ -125,6 +126,7 @@ async function refreshGame() {
     currentState = await requestJson(`/api/game?session_id=${encodeURIComponent(sessionId)}`);
     lobbyState = null;
     aiAutoRunPaused = false;
+    uiState.selectedGameModeId = uiState.selectedGameModeId || currentState.game_mode || null;
     uiState.selectedTrainerId = uiState.selectedTrainerId || currentState.ai_trainer?.id || null;
     uiState.selectedHumanDeckId = uiState.selectedHumanDeckId || currentState.human_deck_id || null;
     sanitizeSelections(currentState);
@@ -150,6 +152,7 @@ async function loadLobby() {
     previousState = null;
     aiAutoRunPaused = false;
     resetSelections();
+    uiState.selectedGameModeId = uiState.selectedGameModeId || lobbyState.game_mode || null;
     uiState.selectedTrainerId = uiState.selectedTrainerId || lobbyState.ai_trainer?.id || null;
     uiState.selectedHumanDeckId = uiState.selectedHumanDeckId || lobbyState.human_deck_id || null;
     renderLobby(lobbyState);
@@ -162,6 +165,10 @@ async function newGame() {
   try {
     const payloadBody = {};
     const selectionState = currentState || lobbyState;
+    const gameMode = resolveGameMode(selectionState);
+    if (gameMode) {
+      payloadBody.game_mode = gameMode;
+    }
     const trainerId = resolveTrainerSelection(selectionState);
     if (trainerId) {
       payloadBody.trainer_id = trainerId;
@@ -178,6 +185,7 @@ async function newGame() {
     lobbyState = null;
     previousState = null;
     aiAutoRunPaused = false;
+    uiState.selectedGameModeId = payload.game_mode || uiState.selectedGameModeId;
     uiState.selectedTrainerId = payload.ai_trainer?.id || uiState.selectedTrainerId;
     uiState.selectedHumanDeckId = payload.human_deck_id || uiState.selectedHumanDeckId;
     resetSelections();
@@ -317,6 +325,57 @@ function resolveHumanDeckSelection(state) {
   );
 }
 
+function resolveGameMode(state) {
+  return (
+    uiState.selectedGameModeId ||
+    state?.game_mode ||
+    state?.available_game_modes?.find((mode) => mode.selected)?.id ||
+    "my_first_battle"
+  );
+}
+
+function resolveGameModeMetadata(state) {
+  const gameMode = resolveGameMode(state);
+  return (
+    state?.available_game_modes?.find((mode) => mode.id === gameMode) ||
+    state?.available_game_modes?.find((mode) => mode.selected) ||
+    null
+  );
+}
+
+function renderAppIdentity(state) {
+  const appTitle = document.getElementById("app-title");
+  const gameModeMeta = document.getElementById("game-mode-meta");
+  if (!appTitle || !gameModeMeta) {
+    return;
+  }
+
+  const modes = state.available_game_modes || [];
+  const selectedModeId = resolveGameMode(state);
+  appTitle.innerHTML = modes
+    .map((mode) => `
+      <button
+        type="button"
+        class="game-mode-pill${mode.id === selectedModeId ? " is-selected" : ""}"
+        data-game-mode="${escapeHtml(mode.id)}"
+        ${mode.available ? "" : "disabled"}
+      >
+        ${escapeHtml(mode.name)}
+      </button>
+    `)
+    .join("");
+
+  const selectedMode =
+    modes.find((mode) => mode.id === selectedModeId) ||
+    modes.find((mode) => mode.selected) ||
+    null;
+  gameModeMeta.textContent = selectedMode?.description || "Choose the game board for your next battle.";
+
+  for (const button of appTitle.querySelectorAll("[data-game-mode]")) {
+    button.addEventListener("click", () => handleGameModeChange(button.dataset.gameMode || null));
+  }
+}
+
 function buildTrainerLabel(trainer) {
   return `${trainer.name} • Lv. ${trainer.level}`;
 }
@@ -350,6 +409,15 @@ function handleTrainerChange(event) {
 
 function handleDeckChange(event) {
   uiState.selectedHumanDeckId = event.target.value || null;
+  if (currentState) {
+    render(currentState);
+  } else if (lobbyState) {
+    renderLobby(lobbyState);
+  }
+}
+
+function handleGameModeChange(gameModeId) {
+  uiState.selectedGameModeId = gameModeId || null;
   if (currentState) {
     render(currentState);
   } else if (lobbyState) {
@@ -431,6 +499,7 @@ function render(state) {
   };
   uiState.availableContextActions = context.actions;
 
+  renderAppIdentity(state);
   renderMatchMeta(state);
   renderTrainerPicker(state);
   renderDeckPicker(state);
@@ -549,6 +618,7 @@ function render(state) {
 }
 
 function renderLobby(state) {
+  renderAppIdentity(state);
   renderLobbyMatchMeta();
   renderTrainerPicker(state);
   renderDeckPicker(state);

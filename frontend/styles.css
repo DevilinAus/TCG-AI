@@ -165,6 +165,50 @@ h3 {
   gap: 10px;
 }
 
+.game-mode-picker {
+  display: grid;
+  gap: 10px;
+}
+
+.game-mode-switch {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+  padding: 6px;
+  border-radius: 22px;
+  background: rgba(18, 29, 44, 0.06);
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.48);
+}
+
+.game-mode-pill {
+  padding: 14px 12px;
+  border-radius: 16px;
+  border: 1px solid rgba(18, 29, 44, 0.08);
+  background: rgba(255, 255, 255, 0.82);
+  color: var(--ink-soft);
+  font-size: 0.95rem;
+  font-weight: 800;
+  box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.66);
+}
+
+.game-mode-pill.is-selected {
+  color: #fffaf4;
+  border-color: rgba(188, 107, 66, 0.22);
+  background: linear-gradient(135deg, #d6a14a, #bc6b42);
+}
+
+.game-mode-pill:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.game-mode-meta {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+
 .trainer-picker-label {
   color: var(--ink-soft);
   font-size: 0.82rem;
