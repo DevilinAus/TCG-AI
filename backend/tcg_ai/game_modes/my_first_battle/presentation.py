@@ -13,7 +13,7 @@ CARD_MANIFEST_PATH = (
     PROJECT_ROOT / "frontend" / "assets" / "cards" / "my-first-battle" / "manifest.json"
 )
 CARD_ASSET_BASE_URL = "/assets/cards/my-first-battle"
-FACEDOWN_CARD_ASSET_URL = "/assets/cards/shared/card-back.svg"
+FACEDOWN_CARD_ASSET_URL = "/assets/cards/shared/card-back.png"
 
 
 @lru_cache(maxsize=1)

@@ -2,7 +2,7 @@ const SESSION_STORAGE_KEY = "tcg_ai_session_id";
 const AI_HUMAN_DELAY_MIN_MS = 5000;
 const AI_HUMAN_DELAY_MAX_MS = 8000;
 const FALLBACK_AI_STEP_DELAY_MS = 6500;
-const FACE_DOWN_CARD_IMAGE_URL = "/assets/cards/shared/card-back.svg";
+const FACE_DOWN_CARD_IMAGE_URL = "/assets/cards/shared/card-back.png";
 
 let currentState = null;
 let lobbyState = null;
