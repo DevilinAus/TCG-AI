@@ -5,7 +5,7 @@ from functools import lru_cache
 import json
 from pathlib import Path
 
-from .models import AttackDefinition, EffectSpec
+from .models import AttackDefinition, AttackEffectSpec, EffectSpec
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 DATA_ROOT = PROJECT_ROOT / "backend" / "tcg_ai" / "game_modes" / "standard" / "data"
@@ -50,6 +50,7 @@ class DeckCardDefinition:
     element: str | None
     stage: str | None
     is_basic: bool
+    evolves_from: str | None
     hp: int | None
     attacks: tuple[AttackDefinition, ...]
     image_url: str | None
@@ -66,6 +67,14 @@ TRAINER_TAGS_BY_SUBTYPE = {
 }
 
 TRAINER_EFFECT_SPECS: dict[str, tuple[EffectSpec, ...]] = {
+    "sv1-188": (
+        EffectSpec(
+            effect_type="heal_damage",
+            count=30,
+            target_player="self",
+            selection_count=1,
+        ),
+    ),
     "sv1-180": (
         EffectSpec(
             effect_type="draw",
@@ -91,6 +100,168 @@ TRAINER_EFFECT_SPECS: dict[str, tuple[EffectSpec, ...]] = {
             source_zone="deck",
             destination_zone="hand",
             changes_hidden_information=True,
+        ),
+    ),
+    "sv1-194": (
+        EffectSpec(
+            effect_type="switch_active_with_bench",
+            target_player="self",
+            selection_count=1,
+        ),
+    ),
+}
+
+ATTACK_EFFECT_SPECS: dict[tuple[str, str], tuple[AttackEffectSpec, ...]] = {
+    ("svp-17", "Aura Sphere"): (
+        AttackEffectSpec(
+            effect_type="damage_target",
+            amount=50,
+            target_player="opponent",
+            target_zone="bench",
+            selection_count=1,
+        ),
+    ),
+    ("sv1-77", "Collect"): (
+        AttackEffectSpec(
+            effect_type="draw_cards",
+            amount=1,
+        ),
+    ),
+    ("sv1-155", "Collect"): (
+        AttackEffectSpec(
+            effect_type="draw_cards",
+            amount=1,
+        ),
+    ),
+    ("sv1-109", "Rage Fist"): (
+        AttackEffectSpec(
+            effect_type="damage_per_opponent_prizes_taken",
+            amount=70,
+            target_player="opponent",
+            target_zone="active",
+        ),
+    ),
+    ("sv1-109", "Dynamite Punch"): (
+        AttackEffectSpec(
+            effect_type="damage_target",
+            amount=50,
+            target_player="self",
+            target_zone="active",
+        ),
+    ),
+    ("sv1-79", "Skill Dive"): (
+        AttackEffectSpec(
+            effect_type="damage_target",
+            amount=50,
+            target_player="opponent",
+            target_zone="any",
+            selection_count=1,
+        ),
+    ),
+    ("sv1-79", "Thunder Blast"): (
+        AttackEffectSpec(
+            effect_type="discard_attached_energy",
+            amount=1,
+            target_player="self",
+            target_zone="active",
+            energy_type="lightning",
+        ),
+    ),
+    ("sv1-80", "Lightning Laser"): (
+        AttackEffectSpec(
+            effect_type="damage_target",
+            amount=30,
+            target_player="opponent",
+            target_zone="bench",
+            selection_count=1,
+        ),
+    ),
+    ("sv1-150", "Tailspin Away"): (
+        AttackEffectSpec(
+            effect_type="apply_protection",
+            target_player="self",
+            target_zone="active",
+            condition="basic_pokemon_attack_damage",
+            duration="until_end_of_opponents_next_turn",
+        ),
+    ),
+    ("sv1-150", "Power Blast"): (
+        AttackEffectSpec(
+            effect_type="discard_attached_energy",
+            amount=1,
+            target_player="self",
+            target_zone="active",
+        ),
+    ),
+    ("sv1-69", "Linear Attack"): (
+        AttackEffectSpec(
+            effect_type="damage_target",
+            amount=20,
+            target_player="opponent",
+            target_zone="any",
+            selection_count=1,
+        ),
+    ),
+    ("sv1-108", "Raging Punch"): (
+        AttackEffectSpec(
+            effect_type="damage_target",
+            amount=20,
+            target_player="self",
+            target_zone="active",
+        ),
+    ),
+    ("sv1-107", "Monkey Beatdown"): (
+        AttackEffectSpec(
+            effect_type="damage_target",
+            amount=10,
+            target_player="self",
+            target_zone="active",
+        ),
+    ),
+    ("sv1-111", "Kick Shot"): (
+        AttackEffectSpec(
+            effect_type="coin_flip_damage_on_heads_only",
+            condition="heads_required",
+        ),
+    ),
+    ("sv1-124", "Rampaging Fang"): (
+        AttackEffectSpec(
+            effect_type="discard_attached_energy",
+            amount=3,
+            target_player="self",
+            target_zone="active",
+        ),
+    ),
+    ("sv1-164", "Touring"): (
+        AttackEffectSpec(
+            effect_type="draw_cards",
+            amount=2,
+        ),
+    ),
+    ("sv1-165", "Nosedive"): (
+        AttackEffectSpec(
+            effect_type="damage_target",
+            amount=20,
+            target_player="self",
+            target_zone="active",
+        ),
+    ),
+    ("svp-16", "Thunderstrike Tail"): (
+        AttackEffectSpec(
+            effect_type="optional_discard_attached_energy_for_bonus_damage",
+            amount=2,
+            target_player="self",
+            target_zone="active",
+            optional=True,
+            bonus_damage=100,
+        ),
+    ),
+    ("svp-15", "Extreme Current"): (
+        AttackEffectSpec(
+            effect_type="discard_attached_energy",
+            amount=1,
+            target_player="self",
+            target_zone="active",
         ),
     ),
 }
@@ -209,6 +380,18 @@ def _catalog_hp(card_id: str, kind: str) -> int | None:
     return int(hp)
 
 
+def _catalog_evolves_from(card_id: str, kind: str) -> str | None:
+    if kind != "pokemon":
+        return None
+
+    card = _load_card_catalog().get(card_id)
+    if card is None:
+        raise ValueError(f"Missing Standard catalog data for card '{card_id}'.")
+
+    evolves_from = card.get("evolves_from")
+    return evolves_from if isinstance(evolves_from, str) and evolves_from else None
+
+
 def _catalog_attacks(card_id: str, kind: str) -> tuple[AttackDefinition, ...]:
     if kind != "pokemon":
         return ()
@@ -235,6 +418,8 @@ def _catalog_attacks(card_id: str, kind: str) -> tuple[AttackDefinition, ...]:
                 name=name,
                 cost=converted_cost,
                 damage=str(damage or ""),
+                text=str(attack.get("text", "") or ""),
+                effect_specs=ATTACK_EFFECT_SPECS.get((card_id, name), ()),
             )
         )
     return tuple(definitions)
@@ -333,6 +518,7 @@ def load_deck_cards(deck_id: str) -> tuple[DeckCardDefinition, ...]:
                 element=_card_element(category, detail),
                 stage=stage,
                 is_basic=is_basic,
+                evolves_from=_catalog_evolves_from(card_id, kind),
                 hp=_catalog_hp(card_id, kind),
                 attacks=_catalog_attacks(card_id, kind),
                 image_url=image_url if isinstance(image_url, str) and image_url else None,

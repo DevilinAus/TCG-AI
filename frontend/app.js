@@ -14,6 +14,7 @@ let aiAutoRunPaused = false;
 const uiState = {
   selectedCardId: null,
   selectedBoardTarget: null,
+  pendingAttackActionIds: [],
   availableContextActions: [],
   selectedGameModeId: null,
   selectedTrainerId: null,
@@ -137,12 +138,14 @@ function handlePointerMove(event) {
   pointerState.clientX = event.clientX;
   pointerState.clientY = event.clientY;
   syncCursorForPointerPosition();
+  syncAttackDragIndicatorPosition();
 }
 
 function handlePointerLeaveWindow() {
   pointerState.clientX = null;
   pointerState.clientY = null;
   document.body.style.cursor = "";
+  syncAttackDragIndicatorPosition();
 }
 
 function getStoredSessionId() {
@@ -520,6 +523,7 @@ function queueAiTurn() {
 function resetSelections() {
   uiState.selectedCardId = null;
   uiState.selectedBoardTarget = null;
+  uiState.pendingAttackActionIds = [];
   uiState.availableContextActions = [];
 }
 
@@ -527,6 +531,13 @@ function sanitizeSelections(state) {
   const sanitized = sanitizeSelectionState(uiState, state);
   uiState.selectedCardId = sanitized.selectedCardId;
   uiState.selectedBoardTarget = sanitized.selectedBoardTarget;
+  uiState.pendingAttackActionIds = (uiState.pendingAttackActionIds || []).filter((actionId) =>
+    state.legal_actions.some(
+      (actionView) =>
+        actionView.action_id === actionId &&
+        refsMatch(actionView.source, uiState.selectedBoardTarget),
+    ),
+  );
 }
 
 function render(state) {
@@ -632,8 +643,14 @@ function render(state) {
     document.getElementById("opponent-active"),
     ai.active,
     {
-      clickable: false,
-      selectedTarget: null,
+      clickable: isBoardRefClickable({
+        state,
+        uiState,
+        context,
+        aiIsRunning,
+        ref: opponentActiveTargetRef,
+      }),
+      selectedTarget: uiState.selectedBoardTarget,
       context,
       targetRef: opponentActiveTargetRef,
       previousPokemon: previousSnapshot?.players?.[1]?.active || null,
@@ -661,8 +678,14 @@ function render(state) {
     document.getElementById("opponent-bench"),
     ai.bench,
     {
-      clickable: false,
-      selectedTarget: null,
+      isRefClickable: (ref) => isBoardRefClickable({
+        state,
+        uiState,
+        context,
+        aiIsRunning,
+        ref,
+      }),
+      selectedTarget: uiState.selectedBoardTarget,
       context,
       previousBench: previousSnapshot?.players?.[1]?.bench || [],
     },
@@ -670,6 +693,7 @@ function render(state) {
 
   renderHand(document.getElementById("player-hand"), human.hand, context, previousSnapshot?.players?.[0]?.hand || []);
   renderSelectedCardPreview(state);
+  renderAttackDragIndicator(state);
   const contextActionsElement = document.getElementById("context-actions");
   if (contextActionsElement) {
     renderContextActions(contextActionsElement, context.actions);
@@ -993,6 +1017,39 @@ function renderSelectedCardPreview(state) {
   previewElement.appendChild(card);
 }
 
+function renderAttackDragIndicator(state) {
+  const indicator = document.getElementById("attack-drag-indicator");
+  if (!indicator) {
+    return;
+  }
+
+  const info = resolvePendingAttackTargetingInfo(state);
+  if (!info || pointerState.clientX === null || pointerState.clientY === null) {
+    indicator.hidden = true;
+    indicator.innerHTML = "";
+    return;
+  }
+
+  indicator.hidden = false;
+  indicator.innerHTML = `
+    <div class="attack-drag-indicator__damage">${escapeHtml(info.damageLabel)}</div>
+    <div class="attack-drag-indicator__label">${escapeHtml(info.attackName)}</div>
+  `;
+  syncAttackDragIndicatorPosition();
+}
+
+function syncAttackDragIndicatorPosition() {
+  const indicator = document.getElementById("attack-drag-indicator");
+  if (!indicator) {
+    return;
+  }
+  if (indicator.hidden || pointerState.clientX === null || pointerState.clientY === null) {
+    indicator.style.transform = "";
+    return;
+  }
+  indicator.style.transform = `translate(${pointerState.clientX + 18}px, ${pointerState.clientY + 18}px)`;
+}
+
 function resolveSelectedPreview(state) {
   const player = state?.players?.[0];
   if (!player) {
@@ -1138,6 +1195,9 @@ function buildPokemonCard(pokemon, options) {
   if (isBenchCard) {
     classNames.push("is-bench-card");
   }
+  if (pokemon.attached_energy?.length) {
+    classNames.push("has-attached-energy");
+  }
   if (options.selectedTarget && refsMatch(options.selectedTarget, pokemon.ref)) {
     classNames.push("is-selected");
   }
@@ -1159,6 +1219,12 @@ function buildPokemonCard(pokemon, options) {
   }
 
   card.className = classNames.join(" ");
+  if (isBenchCard) {
+    const benchCardWidth = pokemon.ref?.player_index === 1 ? 108 : 124;
+    const attachedEnergyOverhang = (pokemon.attached_energy?.length || 0) * benchCardWidth * 0.1;
+    card.style.setProperty("--bench-card-width", `${benchCardWidth}px`);
+    card.style.setProperty("--attached-energy-overhang", `${attachedEnergyOverhang}px`);
+  }
   card.dataset.element = pokemon.element || "";
   card.dataset.kind = pokemon.kind || "";
   card.title = pokemon.name;
@@ -1222,10 +1288,7 @@ function buildPokemonCard(pokemon, options) {
     attackButton.addEventListener("click", (event) => {
       event.stopPropagation();
       const attackIndex = Number(attackButton.dataset.attackIndex);
-      const attackAction = findAttackActionForPokemon(pokemon, attackIndex);
-      if (attackAction) {
-        submitAction(attackAction);
-      }
+      handleAttackButtonClick(pokemon, attackIndex);
     });
   }
 
@@ -1433,7 +1496,33 @@ function buildCardImageMarkup(imageUrl, altText) {
   return `<img src="${escapeHtml(imageUrl)}" alt="${escapeHtml(altText)}" loading="lazy" draggable="false" />`;
 }
 
+function buildAttachedEnergyMarkup(attachedEnergy) {
+  if (!Array.isArray(attachedEnergy) || !attachedEnergy.length) {
+    return "";
+  }
+
+  return `
+    <div class="attached-energy-stack" aria-hidden="true">
+      ${attachedEnergy
+        .map(
+          (energyCard, index) => `
+            <div class="attached-energy-card" style="--attached-energy-index: ${index + 1}; --attached-energy-z: ${attachedEnergy.length - index};">
+              ${buildCardImageMarkup(energyCard.image_url, energyCard.name)}
+            </div>
+          `,
+        )
+        .join("")}
+    </div>
+  `;
+}
+
 function buildPokemonImageMarkup(pokemon) {
+  const attachedEnergy = Array.isArray(pokemon.attached_energy) ? pokemon.attached_energy : [];
+  const attachedEnergyMarkup = buildAttachedEnergyMarkup(attachedEnergy);
+  const classNames = ["card-visual"];
+  if (attachedEnergy.length) {
+    classNames.push("has-attached-energy");
+  }
   const overlay =
     pokemon.remaining_hp !== pokemon.hp
       ? `
@@ -1445,23 +1534,29 @@ function buildPokemonImageMarkup(pokemon) {
 
   if (!pokemon.image_url) {
     return `
-      <div class="card-visual card-visual-fallback">
-        <div class="placeholder-card">${escapeHtml(pokemon.name)}</div>
-        ${overlay}
+      <div class="${classNames.join(" ")} card-visual-fallback">
+        ${attachedEnergyMarkup}
+        <div class="pokemon-visual-card">
+          <div class="placeholder-card">${escapeHtml(pokemon.name)}</div>
+          ${overlay}
+        </div>
       </div>
     `;
   }
 
   return `
-    <div class="card-visual">
-      <img src="${escapeHtml(pokemon.image_url)}" alt="${escapeHtml(pokemon.name)}" loading="lazy" />
-      ${overlay}
+    <div class="${classNames.join(" ")}">
+      ${attachedEnergyMarkup}
+      <div class="pokemon-visual-card">
+        <img src="${escapeHtml(pokemon.image_url)}" alt="${escapeHtml(pokemon.name)}" loading="lazy" />
+        ${overlay}
+      </div>
     </div>
   `;
 }
 
 function renderAttackChip(pokemon, attack, attackIndex, options) {
-  const attackAction = findAttackActionForPokemon(pokemon, attackIndex);
+  const attackActions = findAttackActionsForPokemon(pokemon, attackIndex);
   const isPlayersActivePokemon =
     options.clickable &&
     pokemon.ref?.player_index === 0 &&
@@ -1470,7 +1565,7 @@ function renderAttackChip(pokemon, attack, attackIndex, options) {
   const classes = ["attack-chip"];
   if (isPlayersActivePokemon) {
     classes.push("attack-chip-button");
-    if (attackAction) {
+    if (attackActions.length) {
       classes.push("is-ready");
     }
   }
@@ -1484,7 +1579,7 @@ function renderAttackChip(pokemon, attack, attackIndex, options) {
   ];
   if (tagName === "button") {
     tagAttributes.push('type="button"');
-    if (!attackAction || aiIsRunning) {
+    if (!attackActions.length || aiIsRunning) {
       tagAttributes.push("disabled");
     }
   }
@@ -1499,19 +1594,57 @@ function renderAttackChip(pokemon, attack, attackIndex, options) {
   `;
 }
 
-function findAttackActionForPokemon(pokemon, attackIndex) {
+function findAttackActionsForPokemon(pokemon, attackIndex) {
   if (!currentState || !pokemon?.ref) {
-    return null;
+    return [];
   }
 
+  return currentState.legal_actions.filter(
+    (actionView) =>
+      actionView.type === "attack" &&
+      actionView.source?.zone === pokemon.ref.zone &&
+      actionView.source?.player_index === pokemon.ref.player_index &&
+      actionView.source?.instance_id === pokemon.ref.instance_id &&
+      actionView.action?.attack_index === attackIndex,
+  );
+}
+
+function handleAttackButtonClick(pokemon, attackIndex) {
+  const attackActions = findAttackActionsForPokemon(pokemon, attackIndex);
+  if (!attackActions.length) {
+    return;
+  }
+
+  if (attackActions.length === 1) {
+    uiState.pendingAttackActionIds = [];
+    submitAction(attackActions[0]);
+    return;
+  }
+
+  const targetedActions = attackActions.filter(
+    (actionView) =>
+      actionView.target &&
+      !refsMatch(actionView.target, actionView.source),
+  );
+
+  if (targetedActions.length) {
+    uiState.selectedCardId = null;
+    uiState.selectedBoardTarget = pokemon.ref ? { ...pokemon.ref } : null;
+    uiState.pendingAttackActionIds = targetedActions.map((actionView) => actionView.action_id);
+    render(currentState);
+    return;
+  }
+
+  uiState.pendingAttackActionIds = [];
+  submitAction(attackActions[0]);
+}
+
+function findAttackActionForPokemon(pokemon, attackIndex) {
   return (
-    currentState.legal_actions.find(
+    findAttackActionsForPokemon(pokemon, attackIndex).find(
       (actionView) =>
-        actionView.type === "attack" &&
-        actionView.source?.zone === pokemon.ref.zone &&
-        actionView.source?.player_index === pokemon.ref.player_index &&
-        actionView.source?.instance_id === pokemon.ref.instance_id &&
-        actionView.action?.attack_index === attackIndex,
+        !actionView.target ||
+        refsMatch(actionView.target, actionView.source),
     ) || null
   );
 }
@@ -1875,6 +2008,7 @@ function describeActionType(actionType) {
     end_turn: "Turn action",
     evolve: "Evolution",
     play_energy: "Energy attach",
+    play_item: "Item",
     play_potion: "Support effect",
     play_supporter: "Supporter",
     play_switch: "Switch",
@@ -1970,10 +2104,12 @@ function toggleSelectedCard(instanceId) {
 
   uiState.selectedCardId = result.nextUiState.selectedCardId;
   uiState.selectedBoardTarget = result.nextUiState.selectedBoardTarget;
+  uiState.pendingAttackActionIds = [];
   render(currentState);
 }
 
 function toggleSelectedBoardTarget(targetRef) {
+  const previousSelectedBoardTarget = uiState.selectedBoardTarget;
   const result = resolveSelectedBoardTargetClick({
     state: currentState,
     uiState,
@@ -1988,6 +2124,12 @@ function toggleSelectedBoardTarget(targetRef) {
 
   uiState.selectedCardId = result.nextUiState.selectedCardId;
   uiState.selectedBoardTarget = result.nextUiState.selectedBoardTarget;
+  uiState.pendingAttackActionIds =
+    previousSelectedBoardTarget &&
+    result.nextUiState.selectedBoardTarget &&
+    refsMatch(previousSelectedBoardTarget, result.nextUiState.selectedBoardTarget)
+      ? uiState.pendingAttackActionIds
+      : [];
   render(currentState);
 }
 
@@ -2032,6 +2174,10 @@ function deriveContext(state) {
 
 function describeSelection(state, context) {
   const fragments = [];
+  const pendingAttackInfo = resolvePendingAttackTargetingInfo(state);
+  if (pendingAttackInfo) {
+    fragments.push(`Attack: ${pendingAttackInfo.attackName}`);
+  }
   if (uiState.selectedCardId) {
     const card = state.players[0].hand.find((item) => item.instance_id === uiState.selectedCardId);
     if (card) {
@@ -2053,8 +2199,70 @@ function describeSelection(state, context) {
   return fragments.join(" • ");
 }
 
+function resolvePendingAttackTargetingInfo(state) {
+  if (!state || !uiState.pendingAttackActionIds.length || !uiState.selectedBoardTarget) {
+    return null;
+  }
+
+  const pendingActions = state.legal_actions.filter((actionView) =>
+    uiState.pendingAttackActionIds.includes(actionView.action_id),
+  );
+  if (!pendingActions.length) {
+    return null;
+  }
+
+  const actionView = pendingActions[0];
+  const sourceRef = actionView.source;
+  if (!sourceRef) {
+    return null;
+  }
+
+  const player = state.players?.[sourceRef.player_index];
+  if (!player) {
+    return null;
+  }
+
+  const pokemon =
+    sourceRef.zone === "active"
+      ? player.active
+      : sourceRef.zone === "bench"
+        ? player.bench[sourceRef.bench_index]
+        : null;
+  const attackIndex = actionView.action?.attack_index;
+  const attack = Number.isInteger(attackIndex) ? pokemon?.attacks?.[attackIndex] : null;
+  if (!attack) {
+    return null;
+  }
+
+  const targetedEffect = (attack.effect_specs || []).find(
+    (effectSpec) =>
+      effectSpec.effect_type === "damage_target" &&
+      effectSpec.target_player === "opponent" &&
+      Number(effectSpec.selection_count || 0) === 1,
+  );
+  const damageAmount = targetedEffect?.amount ?? attack.damage ?? "";
+  const damageLabel = String(damageAmount || "?");
+  return {
+    attackName: attack.name,
+    damageLabel: `${damageLabel} DMG`,
+  };
+}
+
 function findBoardTargetLabel(player, ref) {
-  return findBoardTargetLabelForPlayer(player, ref);
+  if (!currentState || !ref) {
+    return null;
+  }
+
+  const targetPlayer = currentState.players?.[ref.player_index];
+  if (!targetPlayer) {
+    return null;
+  }
+
+  const label = findBoardTargetLabelForPlayer(targetPlayer, ref);
+  if (!label) {
+    return null;
+  }
+  return ref.player_index === 0 ? label : `Opponent ${label}`;
 }
 
 function makeStatusMessage(state, context) {

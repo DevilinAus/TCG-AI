@@ -18,6 +18,7 @@ function makeRefs() {
     playerBench: { player_index: 0, zone: "bench", bench_index: 0, instance_id: "bench-1" },
     playerEnergy: { player_index: 0, zone: "energy", bench_index: null, instance_id: null },
     opponentActive: { player_index: 1, zone: "active", bench_index: null, instance_id: "opp-active-1" },
+    opponentBench: { player_index: 1, zone: "bench", bench_index: 0, instance_id: "opp-bench-1" },
   };
 }
 
@@ -41,7 +42,7 @@ function makeState() {
       {
         hand: [],
         active: { name: "Squirtle", ref: refs.opponentActive },
-        bench: [],
+        bench: [{ name: "Pidgey", ref: refs.opponentBench }],
         energy_zone: [],
       },
     ],
@@ -96,6 +97,21 @@ test("sanitizeSelectionState keeps the energy target selected for a matching han
   );
 
   assert.ok(refsMatch(sanitized.selectedBoardTarget, refs.playerEnergy));
+});
+
+test("sanitizeSelectionState keeps a selected opponent target when it still exists", () => {
+  const state = makeState();
+  const refs = makeRefs();
+
+  const sanitized = sanitizeSelectionState(
+    {
+      selectedCardId: null,
+      selectedBoardTarget: refs.opponentBench,
+    },
+    state,
+  );
+
+  assert.ok(refsMatch(sanitized.selectedBoardTarget, refs.opponentBench));
 });
 
 test("sanitizeSelectionState keeps an empty active spot selected", () => {
@@ -185,6 +201,110 @@ test("isBoardRefClickable allows the energy pile when it is a highlighted hand-c
   assert.equal(clickable, true);
 });
 
+test("isBoardRefClickable keeps opponent pokemon inert when they are not highlighted", () => {
+  const state = makeState();
+  const refs = makeRefs();
+
+  const clickable = isBoardRefClickable({
+    state,
+    uiState: {
+      selectedCardId: null,
+      selectedBoardTarget: null,
+    },
+    context: {
+      highlightedTargets: [],
+    },
+    aiIsRunning: false,
+    ref: refs.opponentActive,
+  });
+
+  assert.equal(clickable, false);
+});
+
+test("deriveInteractionContext highlights opponent targets for a selected attacking pokemon", () => {
+  const state = makeState();
+  const refs = makeRefs();
+  state.legal_actions = [
+    {
+      action_id: "attack:0:p1:active",
+      type: "attack",
+      source: refs.playerActive,
+      target: refs.opponentActive,
+      action: { attack_index: 0 },
+    },
+    {
+      action_id: "attack:0:p1:bench:0",
+      type: "attack",
+      source: refs.playerActive,
+      target: refs.opponentBench,
+      action: { attack_index: 0 },
+    },
+  ];
+
+  const context = deriveInteractionContext(state, {
+    selectedCardId: null,
+    selectedBoardTarget: refs.playerActive,
+  });
+
+  assert.equal(context.actions.length, 0);
+  assert.match(context.instructions, /highlighted targets/);
+  assert.equal(context.highlightedTargets.length, 2);
+  assert.ok(context.highlightedTargets.some((target) => refsMatch(target, refs.opponentActive)));
+  assert.ok(context.highlightedTargets.some((target) => refsMatch(target, refs.opponentBench)));
+});
+
+test("deriveInteractionContext limits highlighted targets to the armed targeted attack", () => {
+  const state = makeState();
+  const refs = makeRefs();
+  state.legal_actions = [
+    {
+      action_id: "attack:0:p1:active",
+      type: "attack",
+      source: refs.playerActive,
+      target: refs.opponentActive,
+      action: { attack_index: 0 },
+    },
+    {
+      action_id: "attack:1:p1:bench:0",
+      type: "attack",
+      source: refs.playerActive,
+      target: refs.opponentBench,
+      action: { attack_index: 1 },
+    },
+  ];
+
+  const context = deriveInteractionContext(state, {
+    selectedCardId: null,
+    selectedBoardTarget: refs.playerActive,
+    pendingAttackActionIds: ["attack:1:p1:bench:0"],
+  });
+
+  assert.equal(context.actions.length, 0);
+  assert.equal(context.highlightedTargets.length, 1);
+  assert.ok(refsMatch(context.highlightedTargets[0], refs.opponentBench));
+});
+
+test("isBoardRefClickable allows highlighted opponent attack targets", () => {
+  const state = makeState();
+  const refs = makeRefs();
+  const context = {
+    highlightedTargets: [refs.opponentBench],
+  };
+
+  const clickable = isBoardRefClickable({
+    state,
+    uiState: {
+      selectedCardId: null,
+      selectedBoardTarget: refs.playerActive,
+    },
+    context,
+    aiIsRunning: false,
+    ref: refs.opponentBench,
+  });
+
+  assert.equal(clickable, true);
+});
+
 test("findBackgroundPlayActionForSelection returns a direct supporter play action", () => {
   const state = makeState();
   const action = {
@@ -233,6 +353,66 @@ test("resolveSelectedBoardTargetClick auto-submits a hand-targeted action", () =
   });
 
   assert.equal(result.autoAction, action);
+  assert.equal(result.nextUiState, null);
+});
+
+test("resolveSelectedBoardTargetClick auto-submits a board-targeted attack action", () => {
+  const state = makeState();
+  const refs = makeRefs();
+  const action = {
+    action_id: "attack:0:p1:bench:0",
+    type: "attack",
+    source: refs.playerActive,
+    target: refs.opponentBench,
+    action: { attack_index: 0 },
+  };
+  state.legal_actions = [action];
+
+  const result = resolveSelectedBoardTargetClick({
+    state,
+    uiState: {
+      selectedCardId: null,
+      selectedBoardTarget: refs.playerActive,
+    },
+    targetRef: refs.opponentBench,
+    aiIsRunning: false,
+  });
+
+  assert.equal(result.autoAction, action);
+  assert.equal(result.nextUiState, null);
+});
+
+test("resolveSelectedBoardTargetClick respects the armed targeted attack ids", () => {
+  const state = makeState();
+  const refs = makeRefs();
+  const activeAction = {
+    action_id: "attack:0:p1:active",
+    type: "attack",
+    source: refs.playerActive,
+    target: refs.opponentActive,
+    action: { attack_index: 0 },
+  };
+  const benchAction = {
+    action_id: "attack:1:p1:bench:0",
+    type: "attack",
+    source: refs.playerActive,
+    target: refs.opponentBench,
+    action: { attack_index: 1 },
+  };
+  state.legal_actions = [activeAction, benchAction];
+
+  const result = resolveSelectedBoardTargetClick({
+    state,
+    uiState: {
+      selectedCardId: null,
+      selectedBoardTarget: refs.playerActive,
+      pendingAttackActionIds: ["attack:1:p1:bench:0"],
+    },
+    targetRef: refs.opponentBench,
+    aiIsRunning: false,
+  });
+
+  assert.equal(result.autoAction, benchAction);
   assert.equal(result.nextUiState, null);
 });
 
@@ -412,7 +592,7 @@ test("findBenchPlayActionForSelection finds the matching bench action", () => {
   );
 });
 
-test("deriveInteractionContext treats opponent-only targets as direct actions", () => {
+test("deriveInteractionContext highlights opponent-only targets instead of treating them as direct actions", () => {
   const state = makeState();
   const refs = makeRefs();
   const action = {
@@ -427,9 +607,10 @@ test("deriveInteractionContext treats opponent-only targets as direct actions", 
     selectedBoardTarget: refs.playerActive,
   });
 
-  assert.deepEqual(context.actions, [action]);
-  assert.equal(context.highlightedTargets.length, 0);
-  assert.doesNotMatch(context.instructions, /highlighted board targets/);
+  assert.deepEqual(context.actions, []);
+  assert.equal(context.highlightedTargets.length, 1);
+  assert.ok(refsMatch(context.highlightedTargets[0], refs.opponentActive));
+  assert.match(context.instructions, /highlighted targets/);
 });
 
 test("deriveInteractionContext highlights the empty active spot during promotion", () => {

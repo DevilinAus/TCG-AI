@@ -228,12 +228,21 @@ def _serialize_pokemon(
         "attached_energy": [
             _serialize_card_instance(state, instance_id) for instance_id in pokemon.attached_energy
         ],
+        "lingering_effects": [
+            _serialize_attack_effect_state(effect)
+            for effect in pokemon.lingering_effects
+        ],
         "attacks": [
             {
                 "name": attack.name,
                 "cost": attack.cost,
                 "damage": attack.damage,
                 "effect": attack.effect,
+                "text": attack.text,
+                "effect_specs": [
+                    _serialize_attack_effect_spec(effect_spec)
+                    for effect_spec in attack.effect_specs
+                ],
             }
             for attack in top_card.attacks
         ],
@@ -274,7 +283,7 @@ def _serialize_action(state: GameState, action: dict[str, Any]) -> dict[str, Any
         view["source"] = source
     if target is not None:
         view["target"] = target
-    if action["type"] == "play_supporter" and isinstance(action.get("hand_card_id"), str):
+    if action["type"] in {"play_supporter", "play_item"} and isinstance(action.get("hand_card_id"), str):
         card = card_definition(state, action["hand_card_id"])
         view["card_tags"] = list(card.card_tags)
         view["effect_specs"] = [_serialize_effect_spec(effect_spec) for effect_spec in card.effect_specs]
@@ -289,7 +298,14 @@ def _serialize_action_source(
     player_index: int,
     action: dict[str, Any],
 ) -> dict[str, Any] | None:
-    if action["type"] in {"play_basic_to_active", "bench_basic", "play_energy", "play_supporter"}:
+    if action["type"] in {
+        "play_basic_to_active",
+        "bench_basic",
+        "play_energy",
+        "evolve",
+        "play_supporter",
+        "play_item",
+    }:
         instance_id = action["hand_card_id"]
         card = _serialize_card_instance(state, instance_id)
         return {
@@ -302,6 +318,16 @@ def _serialize_action_source(
             "player_index": player_index,
             "zone": "system",
             "name": action["label"],
+        }
+    if action["type"] == "attack":
+        player = state.players[player_index]
+        instance_id = player.active.stack[-1] if player.active is not None and player.active.stack else None
+        return {
+            "player_index": player_index,
+            "zone": "active",
+            "instance_id": instance_id,
+            "bench_index": None,
+            "name": "Active Pokemon",
         }
     return None
 
@@ -319,7 +345,7 @@ def _serialize_action_target(
             "bench_index": None,
             "name": "Active Spot",
         }
-    if action["type"] == "play_energy":
+    if action["type"] in {"play_energy", "evolve", "play_supporter", "play_item"} and "target_zone" in action:
         player = state.players[player_index]
         if action["target_zone"] == "active":
             instance_id = player.active.stack[-1] if player.active is not None and player.active.stack else None
@@ -340,6 +366,8 @@ def _serialize_action_target(
                 "bench_index": bench_index,
                 "name": "Bench Pokemon",
             }
+    if action["type"] == "attack":
+        return _serialize_attack_target_ref(state, player_index, action)
     return None
 
 
@@ -369,6 +397,62 @@ def _serialize_effect_option(option: EffectOption) -> dict[str, Any]:
         "label": option.label,
         "effect_specs": [_serialize_effect_spec(effect_spec) for effect_spec in option.effect_specs],
     }
+
+
+def _serialize_attack_effect_spec(effect_spec: Any) -> dict[str, Any]:
+    return {
+        "effect_type": effect_spec.effect_type,
+        "amount": effect_spec.amount,
+        "target_player": effect_spec.target_player,
+        "target_zone": effect_spec.target_zone,
+        "selection_count": effect_spec.selection_count,
+        "energy_type": effect_spec.energy_type,
+        "optional": effect_spec.optional,
+        "bonus_damage": effect_spec.bonus_damage,
+        "condition": effect_spec.condition,
+        "duration": effect_spec.duration,
+    }
+
+
+def _serialize_attack_effect_state(effect: Any) -> dict[str, Any]:
+    return {
+        "effect_type": effect.effect_type,
+        "source_player": effect.source_player,
+        "expires_end_of_player_turn": effect.expires_end_of_player_turn,
+        "condition": effect.condition,
+    }
+
+
+def _serialize_attack_target_ref(
+    state: GameState,
+    player_index: int,
+    action: dict[str, Any],
+) -> dict[str, Any] | None:
+    target_player_index = int(action.get("target_player_index", 1 - player_index))
+    player = state.players[target_player_index]
+    target_zone = action.get("target_zone", "active")
+    if target_zone == "active":
+        instance_id = player.active.stack[-1] if player.active is not None and player.active.stack else None
+        return {
+            "player_index": target_player_index,
+            "zone": "active",
+            "instance_id": instance_id,
+            "bench_index": None,
+            "name": "Opposing Active Pokemon" if target_player_index != player_index else "Active Pokemon",
+        }
+    if target_zone == "bench":
+        bench_index = action.get("target_bench_index")
+        if not isinstance(bench_index, int):
+            return None
+        pokemon = player.bench[bench_index]
+        return {
+            "player_index": target_player_index,
+            "zone": "bench",
+            "instance_id": pokemon.stack[-1] if pokemon.stack else None,
+            "bench_index": bench_index,
+            "name": "Bench Pokemon",
+        }
+    return None
 
 
 def _serialize_log_entries(entries: list[str]) -> list[dict[str, str]]:

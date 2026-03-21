@@ -10,12 +10,27 @@ EffectCountMode = Literal["fixed", "all"]
 
 
 @dataclass(frozen=True)
+class AttackEffectSpec:
+    effect_type: str
+    amount: int | None = None
+    target_player: str = "self"
+    target_zone: str | None = None
+    selection_count: int | None = None
+    energy_type: str | None = None
+    optional: bool = False
+    bonus_damage: int | None = None
+    condition: str | None = None
+    duration: str | None = None
+
+
+@dataclass(frozen=True)
 class AttackDefinition:
     name: str
     cost: int
     damage: str
     effect: str = "none"
     text: str = ""
+    effect_specs: tuple[AttackEffectSpec, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -52,6 +67,7 @@ class CardDefinition:
     element: str | None = None
     stage: str | None = None
     is_basic: bool = False
+    evolves_from: str | None = None
     hp: int | None = None
     attacks: tuple[AttackDefinition, ...] = ()
     image_url: str | None = None
@@ -67,11 +83,21 @@ class CardInstance:
     owner: int
 
 
+@dataclass(frozen=True)
+class LingeringEffect:
+    effect_type: str
+    source_player: int
+    expires_end_of_player_turn: int | None = None
+    condition: str | None = None
+
+
 @dataclass
 class PokemonInPlay:
     stack: list[str] = field(default_factory=list)
     damage: int = 0
     attached_energy: list[str] = field(default_factory=list)
+    entered_play_turn: int = 0
+    lingering_effects: list[LingeringEffect] = field(default_factory=list)
 
 
 @dataclass
@@ -88,6 +114,7 @@ class PlayerState:
     mulligans_taken: int = 0
     supporter_played_this_turn: bool = False
     energy_attached_this_turn: bool = False
+    turns_taken: int = 0
 
 
 @dataclass
@@ -97,6 +124,7 @@ class GameState:
     players: list[PlayerState]
     current_player: int
     rng: random.Random = field(repr=False)
+    starting_player: int = 0
     turn_number: int = 1
     winner: int | None = None
     log: list[str] = field(default_factory=list)
