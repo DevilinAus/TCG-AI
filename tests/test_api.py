@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import tempfile
 import unittest
@@ -11,6 +12,7 @@ from backend.tcg_ai.server import (
     ApiError,
     TcgApplication,
 )
+from backend.tcg_ai.learning import RewardLearner
 from backend.tcg_ai.models import PokemonInPlay
 
 
@@ -27,8 +29,12 @@ class ApiTests(unittest.TestCase):
         state = self.app.new_game({"human_first": True})
 
         self.assertIsInstance(state["session_id"], str)
+        self.assertEqual(state["game_mode"], "my_first_battle")
+        self.assertEqual(state["shared_assets"]["face_down_card_image_url"], "/assets/cards/shared/card-back.svg")
         self.assertEqual(state["current_player"], 0)
         self.assertEqual(state["players"][0]["active"]["card_id"], "charmander")
+        self.assertEqual(state["players"][0]["deck_pile"]["count"], state["players"][0]["deck_count"])
+        self.assertEqual(state["players"][0]["prize_pile"]["count"], 3)
         self.assertEqual(state["players"][0]["energy_count"], 0)
         self.assertTrue(state["players"][0]["hand"][0]["image_url"].startswith("/assets/cards/"))
         self.assertEqual(state["ai_learning"]["games_played"], 0)
@@ -36,18 +42,39 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(state["ai_trainer"]["level"], 1)
         self.assertEqual(len(state["available_trainers"]), 8)
 
+    def test_play_energy_targets_the_shared_energy_space(self) -> None:
+        state = self.app.new_game({"human_first": True, "seed": 1})
+
+        play_energy_action = self._find_action(state, "play_energy")
+
+        self.assertEqual(play_energy_action["label"], "Play Fire Energy")
+        self.assertEqual(play_energy_action["target"]["name"], "Shared Energy")
+
     def test_lobby_exposes_available_trainers_and_decks_before_a_game_starts(self) -> None:
         lobby = self.app.lobby()
 
+        self.assertEqual(lobby["game_mode"], "my_first_battle")
         self.assertEqual(lobby["human_deck_id"], "charmander")
         self.assertEqual(lobby["ai_deck_id"], "squirtle")
         self.assertEqual(lobby["ai_trainer"]["id"], "brock")
+        self.assertEqual(
+            [mode["id"] for mode in lobby["available_game_modes"]],
+            ["my_first_battle", "standard"],
+        )
+        standard_mode = next(mode for mode in lobby["available_game_modes"] if mode["id"] == "standard")
+        self.assertFalse(standard_mode["available"])
         self.assertEqual(
             [deck["id"] for deck in lobby["available_decks"]],
             ["bulbasaur", "charmander", "squirtle", "pikachu"],
         )
         selected_deck = next(deck for deck in lobby["available_decks"] if deck["selected"])
         self.assertEqual(selected_deck["id"], "charmander")
+
+    def test_new_game_rejects_an_unavailable_game_mode(self) -> None:
+        with self.assertRaises(ApiError) as context:
+            self.app.new_game({"human_first": True, "game_mode": "standard"})
+
+        self.assertEqual(context.exception.code, "game_mode_unavailable")
 
     def test_new_game_can_select_a_human_deck_and_exposes_available_decks(self) -> None:
         state = self.app.new_game({"human_first": True, "human_deck_id": "bulbasaur"})
@@ -103,7 +130,9 @@ class ApiTests(unittest.TestCase):
         unchanged_second = self.app.get_game(second_state["session_id"])
 
         self.assertEqual(updated_first["current_player"], 1)
+        self.assertEqual(updated_first["game_mode"], "my_first_battle")
         self.assertEqual(unchanged_second["current_player"], 0)
+        self.assertEqual(unchanged_second["game_mode"], "my_first_battle")
         self.assertEqual(unchanged_second["players"][1]["active"]["damage"], 0)
 
     def test_unknown_session_id_raises_a_structured_error(self) -> None:
@@ -166,9 +195,12 @@ class ApiTests(unittest.TestCase):
 
         self.assertTrue(self.state_path.exists())
         saved_text = self.state_path.read_text(encoding="utf-8")
+        self.assertIn('"version": 2', saved_text)
         self.assertIn('"id": "brock"', saved_text)
+        self.assertIn('"my_first_battle"', saved_text)
         self.assertIn('"experience": 26', saved_text)
         self.assertIn('"feature_weights"', saved_text)
+        self.assertNotIn('"standard"', saved_text)
 
         reloaded_app = TcgApplication(trainer_state_path=self.state_path)
         reloaded_state = reloaded_app.new_game({"human_first": True, "trainer_id": "brock"})
@@ -176,6 +208,37 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(reloaded_state["ai_trainer"]["experience"], 26)
         self.assertEqual(reloaded_state["ai_learning"]["games_played"], 1)
         self.assertEqual(reloaded_state["ai_learning"]["wins"], 1)
+
+    def test_legacy_trainer_progress_migrates_into_my_first_battle_only(self) -> None:
+        learner = RewardLearner()
+        learner.record_step_reward(("action:attack", "card:wartortle"), "attack", 4.0)
+        legacy_payload = {
+            "version": 1,
+            "trainers": [
+                {
+                    "id": "brock",
+                    "name": "Brock",
+                    "specialty": "Rock",
+                    "experience": 125,
+                    "learner": learner.export_state(),
+                }
+            ],
+        }
+        self.state_path.write_text(json.dumps(legacy_payload), encoding="utf-8")
+
+        migrated_app = TcgApplication(trainer_state_path=self.state_path)
+        state = migrated_app.new_game({"human_first": True, "trainer_id": "brock"})
+        exported = migrated_app.trainers.export_state()
+        brock_state = next(trainer for trainer in exported["trainers"] if trainer["id"] == "brock")
+
+        self.assertEqual(state["game_mode"], "my_first_battle")
+        self.assertEqual(state["ai_trainer"]["experience"], 125)
+        self.assertEqual(state["ai_trainer"]["level"], 2)
+        self.assertEqual(exported["version"], 2)
+        self.assertIn("my_first_battle", brock_state["modes"])
+        self.assertNotIn("standard", brock_state["modes"])
+        self.assertEqual(brock_state["modes"]["my_first_battle"]["experience"], 125)
+        self.assertEqual(state["ai_learning"]["tracked_feature_count"], 2)
 
     def test_ai_turn_returns_replay_snapshots_for_each_action_in_the_turn(self) -> None:
         self.app.learner.exploration_rate = 0.0

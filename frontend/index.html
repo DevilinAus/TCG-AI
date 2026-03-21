@@ -79,6 +79,15 @@
           <section class="table-stage">
             <article id="opponent-board-panel" class="player-panel opponent-panel board-panel">
               <div class="opponent-layout">
+                <aside class="prize-pocket prize-pocket-opponent">
+                  <section class="resource-panel resource-panel-prize">
+                    <div class="section-header section-header-center">
+                      <h3>Prize</h3>
+                    </div>
+                    <div id="opponent-prizes" class="prize-stack"></div>
+                  </section>
+                </aside>
+
                 <div class="opponent-main-pocket">
                   <div class="board-zone board-zone-opponent">
                     <section id="opponent-bench-zone" class="board-row board-row-bench">
@@ -94,6 +103,14 @@
                       <div id="opponent-active" class="active-slot active-slot-floating"></div>
                     </section>
 
+                    <section
+                      id="opponent-shared-energy-pocket"
+                      class="topline-resource-pocket shared-energy-pocket"
+                      hidden
+                    >
+                      <div id="opponent-shared-energy" class="shared-energy-slot"></div>
+                    </section>
+
                     <div class="player-title-block opponent-title-block">
                       <h2 id="opponent-name">AI Board</h2>
                       <p id="opponent-kicker" class="panel-kicker">Opponent</p>
@@ -105,9 +122,9 @@
                   <div class="resource-strip resource-strip-opponent resource-strip-floating">
                     <section class="resource-panel">
                       <div class="section-header">
-                        <h3>Energy</h3>
+                        <h3>Deck</h3>
                       </div>
-                      <div id="opponent-energy" class="mini-card-row"></div>
+                      <div id="opponent-deck" class="mini-card-row deck-slot-row"></div>
                     </section>
 
                     <section class="resource-panel">
@@ -131,6 +148,15 @@
 
             <article id="player-board-panel" class="player-panel player-panel-human board-panel">
               <div class="player-layout">
+                <aside class="prize-pocket prize-pocket-player">
+                  <section class="resource-panel resource-panel-prize">
+                    <div class="section-header section-header-center">
+                      <h3>Prize</h3>
+                    </div>
+                    <div id="player-prizes" class="prize-stack"></div>
+                  </section>
+                </aside>
+
                 <div class="player-main-pocket">
                   <div class="player-topline">
                     <div class="player-title-block">
@@ -140,6 +166,14 @@
 
                     <section class="player-active-pocket">
                       <div id="player-active" class="active-slot active-slot-floating"></div>
+                    </section>
+
+                    <section
+                      id="player-shared-energy-pocket"
+                      class="topline-resource-pocket shared-energy-pocket"
+                      hidden
+                    >
+                      <div id="player-shared-energy" class="shared-energy-slot"></div>
                     </section>
                   </div>
 
@@ -166,9 +200,9 @@
                   <div class="resource-strip resource-strip-player resource-strip-floating">
                     <section class="resource-panel">
                       <div class="section-header">
-                        <h3>Energy</h3>
+                        <h3>Deck</h3>
                       </div>
-                      <div id="player-energy" class="mini-card-row"></div>
+                      <div id="player-deck" class="mini-card-row deck-slot-row"></div>
                     </section>
 
                     <section class="resource-panel">

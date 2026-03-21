@@ -1,0 +1,1 @@
+"""Standard game mode scaffold."""

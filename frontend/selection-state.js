@@ -402,7 +402,7 @@
       }
     }
     if (ref.zone === "energy") {
-      return "Energy Spot";
+      return "Shared Energy";
     }
     return null;
   }

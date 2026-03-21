@@ -1,0 +1,191 @@
+{
+  "sets": {
+    "sv1": {
+      "id": "sv1",
+      "images": {
+        "logo": "https://images.pokemontcg.io/sv1/logo.png",
+        "symbol": "https://images.pokemontcg.io/sv1/symbol.png"
+      },
+      "name": "Scarlet & Violet",
+      "release_date": "2023/03/31",
+      "series": "Scarlet & Violet",
+      "updated_at": "2023/03/31 15:45:00"
+    },
+    "sv2": {
+      "id": "sv2",
+      "images": {
+        "logo": "https://images.pokemontcg.io/sv2/logo.png",
+        "symbol": "https://images.pokemontcg.io/sv2/symbol.png"
+      },
+      "name": "Paldea Evolved",
+      "release_date": "2023/06/09",
+      "series": "Scarlet & Violet",
+      "updated_at": "2023/06/09 15:00:00"
+    },
+    "sv3": {
+      "id": "sv3",
+      "images": {
+        "logo": "https://images.pokemontcg.io/sv3/logo.png",
+        "symbol": "https://images.pokemontcg.io/sv3/symbol.png"
+      },
+      "name": "Obsidian Flames",
+      "release_date": "2023/08/11",
+      "series": "Scarlet & Violet",
+      "updated_at": "2023/08/11 15:00:00"
+    },
+    "sv3pt5": {
+      "id": "sv3pt5",
+      "images": {
+        "logo": "https://images.pokemontcg.io/sv3pt5/logo.png",
+        "symbol": "https://images.pokemontcg.io/sv3pt5/symbol.png"
+      },
+      "name": "151",
+      "release_date": "2023/09/22",
+      "series": "Scarlet & Violet",
+      "updated_at": "2023/09/22 15:00:00"
+    },
+    "sv4": {
+      "id": "sv4",
+      "images": {
+        "logo": "https://images.pokemontcg.io/sv4/logo.png",
+        "symbol": "https://images.pokemontcg.io/sv4/symbol.png"
+      },
+      "name": "Paradox Rift",
+      "release_date": "2023/11/03",
+      "series": "Scarlet & Violet",
+      "updated_at": "2023/11/03 15:00:00"
+    },
+    "sv4pt5": {
+      "id": "sv4pt5",
+      "images": {
+        "logo": "https://images.pokemontcg.io/sv4pt5/logo.png",
+        "symbol": "https://images.pokemontcg.io/sv4pt5/symbol.png"
+      },
+      "name": "Paldean Fates",
+      "release_date": "2024/01/26",
+      "series": "Scarlet & Violet",
+      "updated_at": "2024/01/25 15:00:00"
+    },
+    "sv5": {
+      "id": "sv5",
+      "images": {
+        "logo": "https://images.pokemontcg.io/sv5/logo.png",
+        "symbol": "https://images.pokemontcg.io/sv5/symbol.png"
+      },
+      "name": "Temporal Forces",
+      "release_date": "2024/03/22",
+      "series": "Scarlet & Violet",
+      "updated_at": "2024/03/22 15:00:00"
+    },
+    "sv6": {
+      "id": "sv6",
+      "images": {
+        "logo": "https://images.pokemontcg.io/sv6/logo.png",
+        "symbol": "https://images.pokemontcg.io/sv6/symbol.png"
+      },
+      "name": "Twilight Masquerade",
+      "release_date": "2024/05/24",
+      "series": "Scarlet & Violet",
+      "updated_at": "2024/05/24 15:00:00"
+    },
+    "sve": {
+      "id": "sve",
+      "images": {
+        "logo": "https://images.pokemontcg.io/sve/logo.png",
+        "symbol": "https://images.pokemontcg.io/sve/symbol.png"
+      },
+      "name": "Scarlet & Violet Energies",
+      "release_date": "2023/03/31",
+      "series": "Scarlet & Violet",
+      "updated_at": "2023/07/20 15:45:00"
+    },
+    "svp": {
+      "id": "svp",
+      "images": {
+        "logo": "https://images.pokemontcg.io/svp/logo.png",
+        "symbol": "https://images.pokemontcg.io/svp/symbol.png"
+      },
+      "name": "Scarlet & Violet Black Star Promos",
+      "release_date": "2023/01/01",
+      "series": "Scarlet & Violet",
+      "updated_at": "2024/11/07 22:00:00"
+    },
+    "swsh10": {
+      "id": "swsh10",
+      "images": {
+        "logo": "https://images.pokemontcg.io/swsh10/logo.png",
+        "symbol": "https://images.pokemontcg.io/swsh10/symbol.png"
+      },
+      "name": "Astral Radiance",
+      "release_date": "2022/05/27",
+      "series": "Sword & Shield",
+      "updated_at": "2022/05/27 09:45:00"
+    },
+    "swsh11": {
+      "id": "swsh11",
+      "images": {
+        "logo": "https://images.pokemontcg.io/swsh11/logo.png",
+        "symbol": "https://images.pokemontcg.io/swsh11/symbol.png"
+      },
+      "name": "Lost Origin",
+      "release_date": "2022/09/09",
+      "series": "Sword & Shield",
+      "updated_at": "2022/09/09 13:45:00"
+    },
+    "swsh12": {
+      "id": "swsh12",
+      "images": {
+        "logo": "https://images.pokemontcg.io/swsh12/logo.png",
+        "symbol": "https://images.pokemontcg.io/swsh12/symbol.png"
+      },
+      "name": "Silver Tempest",
+      "release_date": "2022/11/11",
+      "series": "Sword & Shield",
+      "updated_at": "2022/09/09 11:45:00"
+    },
+    "swsh45": {
+      "id": "swsh45",
+      "images": {
+        "logo": "https://images.pokemontcg.io/swsh45/logo.png",
+        "symbol": "https://images.pokemontcg.io/swsh45/symbol.png"
+      },
+      "name": "Shining Fates",
+      "release_date": "2021/02/19",
+      "series": "Sword & Shield",
+      "updated_at": "2021/02/24 16:17:00"
+    },
+    "swsh5": {
+      "id": "swsh5",
+      "images": {
+        "logo": "https://images.pokemontcg.io/swsh5/logo.png",
+        "symbol": "https://images.pokemontcg.io/swsh5/symbol.png"
+      },
+      "name": "Battle Styles",
+      "release_date": "2021/03/19",
+      "series": "Sword & Shield",
+      "updated_at": "2021/03/19 15:12:00"
+    },
+    "swsh6": {
+      "id": "swsh6",
+      "images": {
+        "logo": "https://images.pokemontcg.io/swsh6/logo.png",
+        "symbol": "https://images.pokemontcg.io/swsh6/symbol.png"
+      },
+      "name": "Chilling Reign",
+      "release_date": "2021/06/18",
+      "series": "Sword & Shield",
+      "updated_at": "2021/06/18 12:12:00"
+    },
+    "swsh7": {
+      "id": "swsh7",
+      "images": {
+        "logo": "https://images.pokemontcg.io/swsh7/logo.png",
+        "symbol": "https://images.pokemontcg.io/swsh7/symbol.png"
+      },
+      "name": "Evolving Skies",
+      "release_date": "2021/08/27",
+      "series": "Sword & Shield",
+      "updated_at": "2021/08/27 10:17:00"
+    }
+  }
+}
