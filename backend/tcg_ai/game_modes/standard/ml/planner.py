@@ -51,7 +51,8 @@ class StandardTurnPlanner:
                 }
             )
 
-        best = max(candidates, key=lambda candidate: (candidate["score"], candidate["action_id"]))
+        best_score = max(candidate["score"] for candidate in candidates)
+        best = next(candidate for candidate in candidates if candidate["score"] == best_score)
         return {
             "chosen_action": best["action"],
             "chosen_action_id": best["action_id"],

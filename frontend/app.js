@@ -10,11 +10,14 @@ let previousState = null;
 let aiIsRunning = false;
 let aiAutoRunQueued = false;
 let aiAutoRunPaused = false;
+let stateRequestEpoch = 0;
 
 const uiState = {
   selectedCardId: null,
   selectedBoardTarget: null,
+  pendingAttackActionIds: [],
   availableContextActions: [],
+  deckBrowseRequest: null,
   selectedGameModeId: null,
   selectedTrainerId: null,
   selectedHumanDeckId: null,
@@ -25,8 +28,15 @@ const pointerState = {
   clientY: null,
 };
 
+const deckBrowserDragState = {
+  pointerId: null,
+  startClientX: 0,
+  startScrollLeft: 0,
+};
+
 const {
   deriveInteractionContext,
+  findBackgroundPlayActionForSelection,
   findBenchPlayActionForSelection,
   findBoardTargetLabelForPlayer,
   isBoardRefClickable,
@@ -136,12 +146,14 @@ function handlePointerMove(event) {
   pointerState.clientX = event.clientX;
   pointerState.clientY = event.clientY;
   syncCursorForPointerPosition();
+  syncAttackDragIndicatorPosition();
 }
 
 function handlePointerLeaveWindow() {
   pointerState.clientX = null;
   pointerState.clientY = null;
   document.body.style.cursor = "";
+  syncAttackDragIndicatorPosition();
 }
 
 function getStoredSessionId() {
@@ -156,7 +168,21 @@ function clearStoredSessionId() {
   window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
 }
 
+function resetToLobbyState(gameModeId = null) {
+  stateRequestEpoch += 1;
+  clearStoredSessionId();
+  currentState = null;
+  lobbyState = null;
+  previousState = null;
+  aiIsRunning = false;
+  aiAutoRunQueued = false;
+  aiAutoRunPaused = false;
+  resetSelections();
+  uiState.selectedGameModeId = gameModeId || null;
+}
+
 async function refreshGame() {
+  const requestEpoch = stateRequestEpoch;
   const sessionId = getStoredSessionId();
   if (!sessionId) {
     await loadLobby();
@@ -164,7 +190,11 @@ async function refreshGame() {
   }
 
   try {
-    currentState = await requestJson(`/api/game?session_id=${encodeURIComponent(sessionId)}`);
+    const payload = await requestJson(`/api/game?session_id=${encodeURIComponent(sessionId)}`);
+    if (requestEpoch !== stateRequestEpoch) {
+      return;
+    }
+    currentState = payload;
     lobbyState = null;
     aiAutoRunPaused = false;
     uiState.selectedGameModeId = uiState.selectedGameModeId || currentState.game_mode || null;
@@ -174,6 +204,9 @@ async function refreshGame() {
     render(currentState);
     maybeRunAiTurn(currentState);
   } catch (error) {
+    if (requestEpoch !== stateRequestEpoch) {
+      return;
+    }
     if (error.code === "session_not_found" || error.code === "missing_session_id") {
       clearStoredSessionId();
       currentState = null;
@@ -186,23 +219,45 @@ async function refreshGame() {
   }
 }
 
-async function loadLobby() {
+async function loadLobby(requestedGameModeId = null) {
+  const requestEpoch = stateRequestEpoch;
   try {
-    lobbyState = await requestJson("/api/lobby");
+    const query = requestedGameModeId ? `?game_mode=${encodeURIComponent(requestedGameModeId)}` : "";
+    const payload = await requestJson(`/api/lobby${query}`);
+    if (requestEpoch !== stateRequestEpoch) {
+      return;
+    }
+    lobbyState = payload;
     currentState = null;
     previousState = null;
     aiAutoRunPaused = false;
     resetSelections();
-    uiState.selectedGameModeId = uiState.selectedGameModeId || lobbyState.game_mode || null;
-    uiState.selectedTrainerId = uiState.selectedTrainerId || lobbyState.ai_trainer?.id || null;
-    uiState.selectedHumanDeckId = uiState.selectedHumanDeckId || lobbyState.human_deck_id || null;
+    uiState.selectedGameModeId = lobbyState.game_mode || null;
+
+    const availableTrainerIds = new Set((lobbyState.available_trainers || []).map((trainer) => trainer.id));
+    if (!availableTrainerIds.has(uiState.selectedTrainerId)) {
+      uiState.selectedTrainerId = lobbyState.ai_trainer?.id || null;
+    }
+
+    const availableDeckIds = new Set((lobbyState.available_decks || []).map((deck) => deck.id));
+    if (!availableDeckIds.has(uiState.selectedHumanDeckId)) {
+      uiState.selectedHumanDeckId =
+        lobbyState.human_deck_id ||
+        lobbyState.available_decks?.find((deck) => deck.selected)?.id ||
+        lobbyState.available_decks?.[0]?.id ||
+        null;
+    }
     renderLobby(lobbyState);
   } catch (error) {
+    if (requestEpoch !== stateRequestEpoch) {
+      return;
+    }
     updateStatus(error.message);
   }
 }
 
 async function newGame() {
+  const requestEpoch = stateRequestEpoch;
   try {
     const payloadBody = {};
     const selectionState = currentState || lobbyState;
@@ -222,6 +277,9 @@ async function newGame() {
       method: "POST",
       body: JSON.stringify(payloadBody),
     });
+    if (requestEpoch !== stateRequestEpoch) {
+      return;
+    }
     currentState = payload;
     lobbyState = null;
     previousState = null;
@@ -234,6 +292,9 @@ async function newGame() {
     render(currentState);
     maybeRunAiTurn(currentState);
   } catch (error) {
+    if (requestEpoch !== stateRequestEpoch) {
+      return;
+    }
     updateStatus(error.message);
   }
 }
@@ -243,22 +304,30 @@ async function submitAction(actionView) {
     return;
   }
 
+  const requestEpoch = stateRequestEpoch;
   try {
     aiAutoRunPaused = false;
-    if (actionView.type === "attack") {
+    if (actionView.type === "attack" || actionView.type === "mulligan") {
       resetSelections();
     }
-    currentState = await requestJson("/api/action", {
+    const payload = await requestJson("/api/action", {
       method: "POST",
       body: JSON.stringify({
         session_id: currentState.session_id,
         action: actionView.action,
       }),
     });
+    if (requestEpoch !== stateRequestEpoch) {
+      return;
+    }
+    currentState = payload;
     sanitizeSelections(currentState);
     render(currentState);
     maybeRunAiTurn(currentState);
   } catch (error) {
+    if (requestEpoch !== stateRequestEpoch) {
+      return;
+    }
     updateStatus(error.message);
   }
 }
@@ -268,6 +337,7 @@ async function runAiTurn() {
     return;
   }
 
+  const requestEpoch = stateRequestEpoch;
   aiAutoRunPaused = false;
   aiAutoRunQueued = false;
   aiIsRunning = true;
@@ -275,11 +345,17 @@ async function runAiTurn() {
   updateStatus("AI is thinking...");
   try {
     await sleep(randomDelay(AI_HUMAN_DELAY_MIN_MS, AI_HUMAN_DELAY_MAX_MS));
+    if (requestEpoch !== stateRequestEpoch) {
+      return;
+    }
     while (currentState && currentState.current_player === 1 && currentState.winner === null) {
       const payload = await requestJson("/api/ai-step", {
         method: "POST",
         body: JSON.stringify({ session_id: currentState.session_id }),
       });
+      if (requestEpoch !== stateRequestEpoch) {
+        return;
+      }
       const step = payload.ai_step;
       currentState = payload;
       sanitizeSelections(currentState);
@@ -301,13 +377,19 @@ async function runAiTurn() {
       await waitForPaint();
 
       await sleep(step.delay_ms || FALLBACK_AI_STEP_DELAY_MS);
+      if (requestEpoch !== stateRequestEpoch) {
+        return;
+      }
     }
   } catch (error) {
+    if (requestEpoch !== stateRequestEpoch) {
+      return;
+    }
     aiAutoRunPaused = true;
     updateStatus(`AI auto-run stopped: ${error.message} Refresh or restart the backend server, then try again.`);
   } finally {
     aiIsRunning = false;
-    if (currentState) {
+    if (requestEpoch === stateRequestEpoch && currentState) {
       render(currentState);
     }
   }
@@ -318,10 +400,14 @@ async function runAiTurnReplayFallback() {
     return;
   }
 
+  const requestEpoch = stateRequestEpoch;
   const payload = await requestJson("/api/ai-turn", {
     method: "POST",
     body: JSON.stringify({ session_id: currentState.session_id }),
   });
+  if (requestEpoch !== stateRequestEpoch) {
+    return;
+  }
 
   const replaySteps = payload.ai_turn_replay?.steps || [];
   for (const replayStep of replaySteps) {
@@ -336,6 +422,9 @@ async function runAiTurnReplayFallback() {
     }
 
     await sleep(replayStep.delay_ms || FALLBACK_AI_STEP_DELAY_MS);
+    if (requestEpoch !== stateRequestEpoch) {
+      return;
+    }
   }
 
   currentState = payload;
@@ -401,9 +490,9 @@ function renderAppIdentity(state) {
     .map((mode) => `
       <button
         type="button"
-        class="game-mode-pill${mode.id === selectedModeId ? " is-selected" : ""}"
+        class="game-mode-pill${mode.id === selectedModeId ? " is-selected" : ""}${mode.available ? "" : " is-unavailable"}"
         data-game-mode="${escapeHtml(mode.id)}"
-        ${mode.available ? "" : "disabled"}
+        aria-disabled="${mode.available ? "false" : "true"}"
       >
         ${escapeHtml(mode.name)}
       </button>
@@ -462,12 +551,15 @@ function handleDeckChange(event) {
 }
 
 function handleGameModeChange(gameModeId) {
-  uiState.selectedGameModeId = gameModeId || null;
-  if (currentState) {
-    render(currentState);
-  } else if (lobbyState) {
-    renderLobby(lobbyState);
+  const nextGameModeId = gameModeId || null;
+  const activeState = currentState || lobbyState;
+  const currentGameModeId = resolveGameMode(activeState);
+  if (nextGameModeId === currentGameModeId && !currentState) {
+    return;
   }
+
+  resetToLobbyState(nextGameModeId);
+  void loadLobby(uiState.selectedGameModeId);
 }
 
 function maybeRunAiTurn(state) {
@@ -504,13 +596,25 @@ function queueAiTurn() {
 function resetSelections() {
   uiState.selectedCardId = null;
   uiState.selectedBoardTarget = null;
+  uiState.pendingAttackActionIds = [];
   uiState.availableContextActions = [];
+  uiState.deckBrowseRequest = null;
 }
 
 function sanitizeSelections(state) {
   const sanitized = sanitizeSelectionState(uiState, state);
   uiState.selectedCardId = sanitized.selectedCardId;
   uiState.selectedBoardTarget = sanitized.selectedBoardTarget;
+  uiState.pendingAttackActionIds = (uiState.pendingAttackActionIds || []).filter((actionId) =>
+    state.legal_actions.some(
+      (actionView) =>
+        actionView.action_id === actionId &&
+        refsMatch(actionView.source, uiState.selectedBoardTarget),
+    ),
+  );
+  if (!resolveDeckBrowseRequest(state, uiState.selectedCardId)) {
+    uiState.deckBrowseRequest = null;
+  }
 }
 
 function render(state) {
@@ -518,6 +622,7 @@ function render(state) {
   const human = state.players[0];
   const ai = state.players[1];
   const context = deriveContext(state);
+  const mulliganAction = findOpeningMulliganAction(state);
   const faceDownCardImageUrl = resolveFaceDownCardImageUrl(state);
   const sharedEnergyEnabled = usesSharedEnergyPool(state);
   const playerActiveTargetRef = human.active?.ref || {
@@ -584,9 +689,11 @@ function render(state) {
   });
   renderPrizePile(document.getElementById("player-prizes"), human.prize_pile, {
     imageUrl: faceDownCardImageUrl,
+    compactPile: state.game_mode === "standard",
   });
   renderPrizePile(document.getElementById("opponent-prizes"), ai.prize_pile, {
     imageUrl: faceDownCardImageUrl,
+    compactPile: state.game_mode === "standard",
   });
   renderDiscard(document.getElementById("player-discard"), human.discard_top, human.discard_count);
   renderDiscard(document.getElementById("opponent-discard"), ai.discard_top, ai.discard_count);
@@ -606,14 +713,21 @@ function render(state) {
       context,
       targetRef: playerActiveTargetRef,
       previousPokemon: previousSnapshot?.players?.[0]?.active || null,
+      setupPromptAction: mulliganAction,
     },
   );
   renderPokemonZone(
     document.getElementById("opponent-active"),
     ai.active,
     {
-      clickable: false,
-      selectedTarget: null,
+      clickable: isBoardRefClickable({
+        state,
+        uiState,
+        context,
+        aiIsRunning,
+        ref: opponentActiveTargetRef,
+      }),
+      selectedTarget: uiState.selectedBoardTarget,
       context,
       targetRef: opponentActiveTargetRef,
       previousPokemon: previousSnapshot?.players?.[1]?.active || null,
@@ -641,14 +755,23 @@ function render(state) {
     document.getElementById("opponent-bench"),
     ai.bench,
     {
-      clickable: false,
-      selectedTarget: null,
+      isRefClickable: (ref) => isBoardRefClickable({
+        state,
+        uiState,
+        context,
+        aiIsRunning,
+        ref,
+      }),
+      selectedTarget: uiState.selectedBoardTarget,
       context,
       previousBench: previousSnapshot?.players?.[1]?.bench || [],
     },
   );
 
   renderHand(document.getElementById("player-hand"), human.hand, context, previousSnapshot?.players?.[0]?.hand || []);
+  renderSelectedCardPreview(state);
+  renderDeckBrowserOverlay(state);
+  renderAttackDragIndicator(state);
   const contextActionsElement = document.getElementById("context-actions");
   if (contextActionsElement) {
     renderContextActions(contextActionsElement, context.actions);
@@ -682,9 +805,18 @@ function renderLobby(state) {
   renderDeckPicker(state);
   renderOpponentIdentity(state);
   renderLobbyBoard(state);
+  const selectedMode = resolveGameModeMetadata(state);
+  const newGameButton = document.getElementById("new-game-button");
+  if (newGameButton) {
+    newGameButton.disabled = aiIsRunning || !selectedMode?.available;
+  }
   syncAdaptiveActiveCardLayout();
   syncCursorForPointerPosition();
-  updateStatus("Choose your deck and gym leader, then start a new game.");
+  updateStatus(
+    selectedMode?.available
+      ? "Choose your deck and gym leader, then start a new game."
+      : "Standard ex Battle Deck data is loaded for preview, but Standard battles are not wired up yet.",
+  );
 }
 
 function resolveFaceDownCardImageUrl(state) {
@@ -759,6 +891,24 @@ function renderPrizePile(element, prizePile, options) {
   element.classList.toggle("is-empty", count === 0);
   if (count <= 0) {
     element.appendChild(buildPrizeEmptyStamp());
+    return;
+  }
+
+  if (options.compactPile) {
+    const prizeCard = buildFaceDownPileCard({
+      imageUrl,
+      title: usesCoinArtwork ? "Prize coin pile" : "Prize card pile",
+      description: usesCoinArtwork
+        ? `Prize pile • ${count} coin${count === 1 ? "" : "s"} remaining`
+        : `Prize pile • ${count} card${count === 1 ? "" : "s"} remaining`,
+      kind: "prize",
+      badgeText: count,
+      stacked: count > 1,
+    });
+    prizeCard.classList.add("prize-pile-card");
+    prizeCard.classList.toggle("prize-pile-card-coin", usesCoinArtwork);
+    prizeCard.setAttribute("aria-hidden", "true");
+    element.appendChild(prizeCard);
     return;
   }
 
@@ -920,6 +1070,282 @@ function renderHand(element, hand, context, previousHand) {
   }
 }
 
+function renderSelectedCardPreview(state) {
+  const previewElement = document.getElementById("floating-card-preview");
+  if (!previewElement) {
+    return;
+  }
+
+  const preview = resolveSelectedPreview(state);
+  if (!preview) {
+    previewElement.hidden = true;
+    previewElement.innerHTML = "";
+    return;
+  }
+
+  previewElement.hidden = false;
+  const card = document.createElement("article");
+  card.className = "floating-card-preview__card";
+  card.dataset.element = preview.element || "";
+  card.dataset.kind = preview.kind || "";
+  card.title = preview.name;
+  card.setAttribute("aria-label", `${preview.name} enlarged preview`);
+  card.innerHTML = buildCardImageMarkup(preview.imageUrl, preview.name);
+  previewElement.innerHTML = "";
+  previewElement.appendChild(card);
+}
+
+function resolveDeckBrowseRequest(state, sourceCardId = uiState.selectedCardId) {
+  const player = state?.players?.[0];
+  if (!player || !sourceCardId) {
+    return null;
+  }
+
+  const handCard = player.hand?.find((card) => card.instance_id === sourceCardId);
+  if (!handCard) {
+    return null;
+  }
+
+  const searchEffect = (handCard.effect_specs || []).find(
+    (effectSpec) =>
+      effectSpec.effect_type === "search_deck" &&
+      effectSpec.source_zone === "deck" &&
+      effectSpec.destination_zone,
+  );
+  if (!searchEffect) {
+    return null;
+  }
+
+  const visibleCount = Number.isInteger(searchEffect.count) && searchEffect.count > 0
+    ? searchEffect.count
+    : null;
+  return {
+    sourceCardId,
+    sourceCardName: handCard.name,
+    sourceZone: searchEffect.source_zone || "deck",
+    scope: visibleCount ? "top_cards" : "full_deck",
+    visibleCount,
+    chooseCount: Number.isInteger(searchEffect.choose_count) ? searchEffect.choose_count : 1,
+    destinationZone: searchEffect.destination_zone || "hand",
+    searchFilters: Array.isArray(searchEffect.search_filters) ? searchEffect.search_filters : [],
+  };
+}
+
+function openDeckBrowserForSelection(state) {
+  const request = resolveDeckBrowseRequest(state);
+  if (!request) {
+    return false;
+  }
+  uiState.deckBrowseRequest = request;
+  render(currentState);
+  return true;
+}
+
+function cardMatchesSearchFilters(card, searchFilters) {
+  if (!Array.isArray(searchFilters) || !searchFilters.length) {
+    return true;
+  }
+
+  return searchFilters.every((filter) => {
+    if (filter === "pokemon") {
+      return card.kind === "pokemon";
+    }
+    if (filter === "basic_pokemon") {
+      return card.kind === "pokemon" && card.is_basic;
+    }
+    return true;
+  });
+}
+
+function attachDeckBrowserDragBehavior(track) {
+  if (!track) {
+    return;
+  }
+
+  track.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) {
+      return;
+    }
+    deckBrowserDragState.pointerId = event.pointerId;
+    deckBrowserDragState.startClientX = event.clientX;
+    deckBrowserDragState.startScrollLeft = track.scrollLeft;
+    track.classList.add("is-dragging");
+    track.setPointerCapture?.(event.pointerId);
+    event.preventDefault();
+  });
+
+  track.addEventListener("pointermove", (event) => {
+    if (deckBrowserDragState.pointerId !== event.pointerId) {
+      return;
+    }
+    const deltaX = event.clientX - deckBrowserDragState.startClientX;
+    track.scrollLeft = deckBrowserDragState.startScrollLeft - deltaX;
+  });
+
+  const stopDragging = (event) => {
+    if (deckBrowserDragState.pointerId !== event.pointerId) {
+      return;
+    }
+    deckBrowserDragState.pointerId = null;
+    track.classList.remove("is-dragging");
+    track.releasePointerCapture?.(event.pointerId);
+  };
+
+  track.addEventListener("pointerup", stopDragging);
+  track.addEventListener("pointercancel", stopDragging);
+}
+
+function renderDeckBrowserOverlay(state) {
+  const overlay = document.getElementById("deck-browser-overlay");
+  if (!overlay) {
+    return;
+  }
+
+  const activeRequest = uiState.deckBrowseRequest;
+  const selectedRequest = resolveDeckBrowseRequest(state);
+  if (!activeRequest || !selectedRequest || activeRequest.sourceCardId !== selectedRequest.sourceCardId) {
+    overlay.hidden = true;
+    overlay.innerHTML = "";
+    return;
+  }
+
+  const player = state?.players?.[0];
+  const deckCards = Array.isArray(player?.deck_cards) ? player.deck_cards : [];
+  const visibleCards = activeRequest.visibleCount
+    ? deckCards.slice(0, activeRequest.visibleCount)
+    : deckCards;
+  const scopeLabel = activeRequest.scope === "top_cards"
+    ? `Top ${activeRequest.visibleCount}`
+    : "Full Deck";
+  const destinationLabel = (activeRequest.destinationZone || "hand").replaceAll("_", " ");
+
+  overlay.hidden = false;
+  overlay.innerHTML = `
+    <div class="deck-browser">
+      <div class="deck-browser__header">
+        <div class="deck-browser__copy">
+          <p class="deck-browser__eyebrow">${escapeHtml(scopeLabel)} Search</p>
+          <h3>${escapeHtml(activeRequest.sourceCardName)}</h3>
+          <p class="deck-browser__meta">Choose ${escapeHtml(String(activeRequest.chooseCount))} card${activeRequest.chooseCount === 1 ? "" : "s"} to place into ${escapeHtml(destinationLabel)}.</p>
+        </div>
+        <button type="button" class="deck-browser__close" aria-label="Close deck browser">Close</button>
+      </div>
+      <div class="deck-browser__track" aria-label="Deck cards carousel">
+        ${visibleCards
+          .map(
+            (card) => `
+              <article
+                class="deck-browser-card${cardMatchesSearchFilters(card, activeRequest.searchFilters) ? " is-match" : ""}"
+                data-kind="${escapeHtml(card.kind || "")}"
+                data-element="${escapeHtml(card.element || "")}"
+                title="${escapeHtml(card.name)}"
+              >
+                ${buildCardImageMarkup(card.image_url, card.name)}
+              </article>
+            `,
+          )
+          .join("")}
+      </div>
+    </div>
+  `;
+
+  overlay.querySelector(".deck-browser__close")?.addEventListener("click", () => {
+    uiState.deckBrowseRequest = null;
+    render(currentState);
+  });
+  attachDeckBrowserDragBehavior(overlay.querySelector(".deck-browser__track"));
+}
+
+function renderAttackDragIndicator(state) {
+  const indicator = document.getElementById("attack-drag-indicator");
+  if (!indicator) {
+    return;
+  }
+
+  const info = resolvePendingAttackTargetingInfo(state);
+  if (!info || pointerState.clientX === null || pointerState.clientY === null) {
+    indicator.hidden = true;
+    indicator.innerHTML = "";
+    return;
+  }
+
+  indicator.hidden = false;
+  indicator.innerHTML = `
+    <div class="attack-drag-indicator__damage">${escapeHtml(info.damageLabel)}</div>
+    <div class="attack-drag-indicator__label">${escapeHtml(info.attackName)}</div>
+  `;
+  syncAttackDragIndicatorPosition();
+}
+
+function syncAttackDragIndicatorPosition() {
+  const indicator = document.getElementById("attack-drag-indicator");
+  if (!indicator) {
+    return;
+  }
+  if (indicator.hidden || pointerState.clientX === null || pointerState.clientY === null) {
+    indicator.style.transform = "";
+    return;
+  }
+  indicator.style.transform = `translate(${pointerState.clientX + 18}px, ${pointerState.clientY + 18}px)`;
+}
+
+function resolveSelectedPreview(state) {
+  const player = state?.players?.[0];
+  if (!player) {
+    return null;
+  }
+
+  if (uiState.selectedCardId) {
+    const handCard = player.hand.find((card) => card.instance_id === uiState.selectedCardId);
+    if (handCard) {
+      return {
+        name: handCard.name,
+        imageUrl: handCard.image_url,
+        element: handCard.element,
+        kind: handCard.kind,
+      };
+    }
+  }
+
+  const selectedTarget = uiState.selectedBoardTarget;
+  if (!selectedTarget) {
+    return null;
+  }
+
+  if (player.active?.ref && refsMatch(player.active.ref, selectedTarget)) {
+    return {
+      name: player.active.name,
+      imageUrl: player.active.image_url,
+      element: player.active.element,
+      kind: player.active.kind,
+    };
+  }
+
+  const benchedPokemon = player.bench.find((pokemon) => refsMatch(pokemon.ref, selectedTarget));
+  if (benchedPokemon) {
+    return {
+      name: benchedPokemon.name,
+      imageUrl: benchedPokemon.image_url,
+      element: benchedPokemon.element,
+      kind: benchedPokemon.kind,
+    };
+  }
+
+  if (selectedTarget.zone === "energy") {
+    const topEnergyCard = player.energy_zone?.[player.energy_zone.length - 1] || null;
+    if (topEnergyCard) {
+      return {
+        name: topEnergyCard.name,
+        imageUrl: topEnergyCard.image_url,
+        element: topEnergyCard.element,
+        kind: topEnergyCard.kind,
+      };
+    }
+  }
+
+  return null;
+}
+
 function renderContextActions(element, actions) {
   element.innerHTML = "";
   if (!actions.length) {
@@ -991,6 +1417,9 @@ function buildPokemonCard(pokemon, options) {
   if (!pokemon) {
     return buildActiveSlotPlaceholder(options);
   }
+  if (pokemon.face_down) {
+    return buildFaceDownPokemonCard(pokemon, options);
+  }
 
   const card = document.createElement("article");
   const classNames = ["board-card"];
@@ -1004,6 +1433,9 @@ function buildPokemonCard(pokemon, options) {
   }
   if (isBenchCard) {
     classNames.push("is-bench-card");
+  }
+  if (pokemon.attached_energy?.length) {
+    classNames.push("has-attached-energy");
   }
   if (options.selectedTarget && refsMatch(options.selectedTarget, pokemon.ref)) {
     classNames.push("is-selected");
@@ -1026,6 +1458,12 @@ function buildPokemonCard(pokemon, options) {
   }
 
   card.className = classNames.join(" ");
+  if (isBenchCard) {
+    const benchCardWidth = pokemon.ref?.player_index === 1 ? 108 : 124;
+    const attachedEnergyOverhang = (pokemon.attached_energy?.length || 0) * benchCardWidth * 0.1;
+    card.style.setProperty("--bench-card-width", `${benchCardWidth}px`);
+    card.style.setProperty("--attached-energy-overhang", `${attachedEnergyOverhang}px`);
+  }
   card.dataset.element = pokemon.element || "";
   card.dataset.kind = pokemon.kind || "";
   card.title = pokemon.name;
@@ -1089,16 +1527,44 @@ function buildPokemonCard(pokemon, options) {
     attackButton.addEventListener("click", (event) => {
       event.stopPropagation();
       const attackIndex = Number(attackButton.dataset.attackIndex);
-      const attackAction = findAttackActionForPokemon(pokemon, attackIndex);
-      if (attackAction) {
-        submitAction(attackAction);
-      }
+      handleAttackButtonClick(pokemon, attackIndex);
     });
   }
 
   if (options.clickable) {
     card.addEventListener("click", () => toggleSelectedBoardTarget(pokemon.ref));
   }
+  return card;
+}
+
+function buildFaceDownPokemonCard(pokemon, options) {
+  const card = document.createElement("article");
+  const classNames = ["board-card", "board-card-facedown"];
+  if (options.compact) {
+    classNames.push("is-compact");
+  }
+  if (options.benchCard) {
+    classNames.push("is-bench-card");
+  }
+  card.className = classNames.join(" ");
+  card.dataset.element = "";
+  card.dataset.kind = "pokemon";
+  card.title = pokemon.name || "Face-down Pokemon";
+  card.setAttribute("aria-label", pokemon.name || "Face-down Pokemon");
+  card.innerHTML = `
+    <div class="card-visual">
+      <img src="${escapeHtml(pokemon.image_url || resolveFaceDownCardImageUrl(currentState))}" alt="${escapeHtml(pokemon.name || "Face-down Pokemon")}" loading="lazy" />
+    </div>
+    <div class="card-copy card-copy-facedown">
+      <div class="card-title-row">
+        <div class="card-title-group">
+          <div class="card-title">Face-down Pokemon</div>
+          <p class="card-subtitle">Reveals after setup is complete</p>
+        </div>
+        <div class="stage-pill">Hidden</div>
+      </div>
+    </div>
+  `;
   return card;
 }
 
@@ -1118,9 +1584,30 @@ function buildActiveSlotPlaceholder(options = {}) {
   element.setAttribute("aria-label", "Active empty");
   const copy = document.createElement("div");
   copy.className = "active-slot-placeholder-copy";
-  copy.appendChild(buildStackedStamp(["Active", "Empty"], "bench-empty-stamp active-slot-empty-stamp"));
+  if (options.setupPromptAction) {
+    const prompt = document.createElement("div");
+    prompt.className = "active-slot-setup-prompt";
+    prompt.innerHTML = `
+      <p class="active-slot-setup-prompt__title">No Basic Pokemon in hand</p>
+      <p class="active-slot-setup-prompt__copy">Return your opening hand to the deck, shuffle, and draw 7 new cards.</p>
+    `;
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "primary active-slot-setup-prompt__button";
+    button.textContent = options.setupPromptAction.label || "Okay";
+    button.disabled = aiIsRunning;
+    button.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      submitAction(options.setupPromptAction);
+    });
+    prompt.appendChild(button);
+    copy.appendChild(prompt);
+  } else {
+    copy.appendChild(buildStackedStamp(["Active", "Empty"], "bench-empty-stamp active-slot-empty-stamp"));
+  }
   element.appendChild(copy);
-  if (options.clickable && options.targetRef) {
+  if (!options.setupPromptAction && options.clickable && options.targetRef) {
     element.addEventListener("click", () => toggleSelectedBoardTarget(options.targetRef));
   }
   return element;
@@ -1248,7 +1735,33 @@ function buildCardImageMarkup(imageUrl, altText) {
   return `<img src="${escapeHtml(imageUrl)}" alt="${escapeHtml(altText)}" loading="lazy" draggable="false" />`;
 }
 
+function buildAttachedEnergyMarkup(attachedEnergy) {
+  if (!Array.isArray(attachedEnergy) || !attachedEnergy.length) {
+    return "";
+  }
+
+  return `
+    <div class="attached-energy-stack" aria-hidden="true">
+      ${attachedEnergy
+        .map(
+          (energyCard, index) => `
+            <div class="attached-energy-card" style="--attached-energy-index: ${index + 1}; --attached-energy-z: ${attachedEnergy.length - index};">
+              ${buildCardImageMarkup(energyCard.image_url, energyCard.name)}
+            </div>
+          `,
+        )
+        .join("")}
+    </div>
+  `;
+}
+
 function buildPokemonImageMarkup(pokemon) {
+  const attachedEnergy = Array.isArray(pokemon.attached_energy) ? pokemon.attached_energy : [];
+  const attachedEnergyMarkup = buildAttachedEnergyMarkup(attachedEnergy);
+  const classNames = ["card-visual"];
+  if (attachedEnergy.length) {
+    classNames.push("has-attached-energy");
+  }
   const overlay =
     pokemon.remaining_hp !== pokemon.hp
       ? `
@@ -1260,23 +1773,29 @@ function buildPokemonImageMarkup(pokemon) {
 
   if (!pokemon.image_url) {
     return `
-      <div class="card-visual card-visual-fallback">
-        <div class="placeholder-card">${escapeHtml(pokemon.name)}</div>
-        ${overlay}
+      <div class="${classNames.join(" ")} card-visual-fallback">
+        ${attachedEnergyMarkup}
+        <div class="pokemon-visual-card">
+          <div class="placeholder-card">${escapeHtml(pokemon.name)}</div>
+          ${overlay}
+        </div>
       </div>
     `;
   }
 
   return `
-    <div class="card-visual">
-      <img src="${escapeHtml(pokemon.image_url)}" alt="${escapeHtml(pokemon.name)}" loading="lazy" />
-      ${overlay}
+    <div class="${classNames.join(" ")}">
+      ${attachedEnergyMarkup}
+      <div class="pokemon-visual-card">
+        <img src="${escapeHtml(pokemon.image_url)}" alt="${escapeHtml(pokemon.name)}" loading="lazy" />
+        ${overlay}
+      </div>
     </div>
   `;
 }
 
 function renderAttackChip(pokemon, attack, attackIndex, options) {
-  const attackAction = findAttackActionForPokemon(pokemon, attackIndex);
+  const attackActions = findAttackActionsForPokemon(pokemon, attackIndex);
   const isPlayersActivePokemon =
     options.clickable &&
     pokemon.ref?.player_index === 0 &&
@@ -1285,7 +1804,7 @@ function renderAttackChip(pokemon, attack, attackIndex, options) {
   const classes = ["attack-chip"];
   if (isPlayersActivePokemon) {
     classes.push("attack-chip-button");
-    if (attackAction) {
+    if (attackActions.length) {
       classes.push("is-ready");
     }
   }
@@ -1299,7 +1818,7 @@ function renderAttackChip(pokemon, attack, attackIndex, options) {
   ];
   if (tagName === "button") {
     tagAttributes.push('type="button"');
-    if (!attackAction || aiIsRunning) {
+    if (!attackActions.length || aiIsRunning) {
       tagAttributes.push("disabled");
     }
   }
@@ -1314,19 +1833,57 @@ function renderAttackChip(pokemon, attack, attackIndex, options) {
   `;
 }
 
-function findAttackActionForPokemon(pokemon, attackIndex) {
+function findAttackActionsForPokemon(pokemon, attackIndex) {
   if (!currentState || !pokemon?.ref) {
-    return null;
+    return [];
   }
 
+  return currentState.legal_actions.filter(
+    (actionView) =>
+      actionView.type === "attack" &&
+      actionView.source?.zone === pokemon.ref.zone &&
+      actionView.source?.player_index === pokemon.ref.player_index &&
+      actionView.source?.instance_id === pokemon.ref.instance_id &&
+      actionView.action?.attack_index === attackIndex,
+  );
+}
+
+function handleAttackButtonClick(pokemon, attackIndex) {
+  const attackActions = findAttackActionsForPokemon(pokemon, attackIndex);
+  if (!attackActions.length) {
+    return;
+  }
+
+  if (attackActions.length === 1) {
+    uiState.pendingAttackActionIds = [];
+    submitAction(attackActions[0]);
+    return;
+  }
+
+  const targetedActions = attackActions.filter(
+    (actionView) =>
+      actionView.target &&
+      !refsMatch(actionView.target, actionView.source),
+  );
+
+  if (targetedActions.length) {
+    uiState.selectedCardId = null;
+    uiState.selectedBoardTarget = pokemon.ref ? { ...pokemon.ref } : null;
+    uiState.pendingAttackActionIds = targetedActions.map((actionView) => actionView.action_id);
+    render(currentState);
+    return;
+  }
+
+  uiState.pendingAttackActionIds = [];
+  submitAction(attackActions[0]);
+}
+
+function findAttackActionForPokemon(pokemon, attackIndex) {
   return (
-    currentState.legal_actions.find(
+    findAttackActionsForPokemon(pokemon, attackIndex).find(
       (actionView) =>
-        actionView.type === "attack" &&
-        actionView.source?.zone === pokemon.ref.zone &&
-        actionView.source?.player_index === pokemon.ref.player_index &&
-        actionView.source?.instance_id === pokemon.ref.instance_id &&
-        actionView.action?.attack_index === attackIndex,
+        !actionView.target ||
+        refsMatch(actionView.target, actionView.source),
     ) || null
   );
 }
@@ -1525,6 +2082,8 @@ function renderLobbyBoard(state) {
   debugActions.appendChild(buildPlaceholder("Start a new game to inspect legal actions."));
 
   renderPlayerEndTurnButtonLobby();
+  renderSelectedCardPreview(null);
+  renderDeckBrowserOverlay(null);
   previousState = null;
 }
 
@@ -1603,11 +2162,11 @@ function renderPlayerEndTurnButton(state) {
     return;
   }
 
-  const endTurnAction =
-    state.legal_actions.find((actionView) => actionView.type === "end_turn") || null;
-  button.disabled = aiIsRunning || !endTurnAction;
-  button.classList.toggle("is-ready", !!endTurnAction && !aiIsRunning);
-  button.onclick = endTurnAction ? () => submitAction(endTurnAction) : null;
+  const primaryAction = findPrimaryTurnAction(state);
+  button.disabled = aiIsRunning || !primaryAction;
+  button.classList.toggle("is-ready", !!primaryAction && !aiIsRunning);
+  setPrimaryTurnButtonLabel(button, primaryAction);
+  button.onclick = primaryAction ? () => submitAction(primaryAction) : null;
 }
 
 function renderPlayerEndTurnButtonLobby() {
@@ -1619,6 +2178,30 @@ function renderPlayerEndTurnButtonLobby() {
   button.disabled = true;
   button.classList.remove("is-ready");
   button.onclick = null;
+  setPrimaryTurnButtonLabel(button, null);
+}
+
+function findPrimaryTurnAction(state) {
+  if (!state?.legal_actions?.length) {
+    return null;
+  }
+  return (
+    state.legal_actions.find((actionView) => actionView.type === "end_setup") ||
+    state.legal_actions.find((actionView) => actionView.type === "end_turn") ||
+    null
+  );
+}
+
+function setPrimaryTurnButtonLabel(button, actionView) {
+  const labelElement = button.querySelector(".end-turn-button__label");
+  if (!labelElement) {
+    return;
+  }
+  if (actionView?.type === "end_setup") {
+    labelElement.innerHTML = "END<br />SETUP";
+    return;
+  }
+  labelElement.innerHTML = "END<br />TURN";
 }
 
 function buildActionButton(actionView, options = {}) {
@@ -1640,11 +2223,18 @@ function buildActionButton(actionView, options = {}) {
   return button;
 }
 
+function findOpeningMulliganAction(state) {
+  if (!state || state.game_mode !== "standard") {
+    return null;
+  }
+  return state.legal_actions.find((actionView) => actionView.type === "mulligan") || null;
+}
+
 function classifyAction(actionView) {
   if (actionView.type === "attack") {
     return "is-attack";
   }
-  if (actionView.type === "end_turn" || actionView.type === "promote") {
+  if (actionView.type === "end_turn" || actionView.type === "end_setup" || actionView.type === "promote") {
     return "is-primary";
   }
   return "is-support";
@@ -1654,10 +2244,13 @@ function describeActionType(actionType) {
   const labels = {
     attack: "Attack",
     bench_basic: "Bench play",
+    end_setup: "Setup",
     end_turn: "Turn action",
     evolve: "Evolution",
     play_energy: "Energy attach",
+    play_item: "Item",
     play_potion: "Support effect",
+    play_supporter: "Supporter",
     play_switch: "Switch",
     promote: "Required choice",
   };
@@ -1724,6 +2317,12 @@ function makePhaseLabel(state) {
   if (state.winner !== null) {
     return "Match over";
   }
+  if (state.game_mode === "standard" && state.setup_phase === "choose_active") {
+    return "Choose active";
+  }
+  if (state.game_mode === "standard" && state.setup_phase === "awaiting_end_setup") {
+    return "End setup";
+  }
   if (state.pending_promotion_for === 0) {
     return "Choose promotion";
   }
@@ -1745,10 +2344,12 @@ function toggleSelectedCard(instanceId) {
 
   uiState.selectedCardId = result.nextUiState.selectedCardId;
   uiState.selectedBoardTarget = result.nextUiState.selectedBoardTarget;
+  uiState.pendingAttackActionIds = [];
   render(currentState);
 }
 
 function toggleSelectedBoardTarget(targetRef) {
+  const previousSelectedBoardTarget = uiState.selectedBoardTarget;
   const result = resolveSelectedBoardTargetClick({
     state: currentState,
     uiState,
@@ -1763,6 +2364,12 @@ function toggleSelectedBoardTarget(targetRef) {
 
   uiState.selectedCardId = result.nextUiState.selectedCardId;
   uiState.selectedBoardTarget = result.nextUiState.selectedBoardTarget;
+  uiState.pendingAttackActionIds =
+    previousSelectedBoardTarget &&
+    result.nextUiState.selectedBoardTarget &&
+    refsMatch(previousSelectedBoardTarget, result.nextUiState.selectedBoardTarget)
+      ? uiState.pendingAttackActionIds
+      : [];
   render(currentState);
 }
 
@@ -1786,6 +2393,13 @@ function findBenchPlayAction(state) {
   return findBenchPlayActionForSelection(state, uiState.selectedCardId, aiIsRunning);
 }
 
+function findBackgroundPlayAction(state) {
+  if (!state) {
+    return null;
+  }
+  return findBackgroundPlayActionForSelection(state, uiState.selectedCardId, aiIsRunning);
+}
+
 function syncBenchZoneState(element, state) {
   if (!element) {
     return;
@@ -1800,6 +2414,10 @@ function deriveContext(state) {
 
 function describeSelection(state, context) {
   const fragments = [];
+  const pendingAttackInfo = resolvePendingAttackTargetingInfo(state);
+  if (pendingAttackInfo) {
+    fragments.push(`Attack: ${pendingAttackInfo.attackName}`);
+  }
   if (uiState.selectedCardId) {
     const card = state.players[0].hand.find((item) => item.instance_id === uiState.selectedCardId);
     if (card) {
@@ -1821,12 +2439,77 @@ function describeSelection(state, context) {
   return fragments.join(" • ");
 }
 
+function resolvePendingAttackTargetingInfo(state) {
+  if (!state || !uiState.pendingAttackActionIds.length || !uiState.selectedBoardTarget) {
+    return null;
+  }
+
+  const pendingActions = state.legal_actions.filter((actionView) =>
+    uiState.pendingAttackActionIds.includes(actionView.action_id),
+  );
+  if (!pendingActions.length) {
+    return null;
+  }
+
+  const actionView = pendingActions[0];
+  const sourceRef = actionView.source;
+  if (!sourceRef) {
+    return null;
+  }
+
+  const player = state.players?.[sourceRef.player_index];
+  if (!player) {
+    return null;
+  }
+
+  const pokemon =
+    sourceRef.zone === "active"
+      ? player.active
+      : sourceRef.zone === "bench"
+        ? player.bench[sourceRef.bench_index]
+        : null;
+  const attackIndex = actionView.action?.attack_index;
+  const attack = Number.isInteger(attackIndex) ? pokemon?.attacks?.[attackIndex] : null;
+  if (!attack) {
+    return null;
+  }
+
+  const targetedEffect = (attack.effect_specs || []).find(
+    (effectSpec) =>
+      effectSpec.effect_type === "damage_target" &&
+      effectSpec.target_player === "opponent" &&
+      Number(effectSpec.selection_count || 0) === 1,
+  );
+  const damageAmount = targetedEffect?.amount ?? attack.damage ?? "";
+  const damageLabel = String(damageAmount || "?");
+  return {
+    attackName: attack.name,
+    damageLabel: `${damageLabel} DMG`,
+  };
+}
+
 function findBoardTargetLabel(player, ref) {
-  return findBoardTargetLabelForPlayer(player, ref);
+  if (!currentState || !ref) {
+    return null;
+  }
+
+  const targetPlayer = currentState.players?.[ref.player_index];
+  if (!targetPlayer) {
+    return null;
+  }
+
+  const label = findBoardTargetLabelForPlayer(targetPlayer, ref);
+  if (!label) {
+    return null;
+  }
+  return ref.player_index === 0 ? label : `Opponent ${label}`;
 }
 
 function makeStatusMessage(state, context) {
   const battleLabel = `${state.players[0].deck_name} vs ${state.ai_trainer?.name || state.players[1].deck_name}`;
+  const mulliganAction = findOpeningMulliganAction(state);
+  const chooseActiveAction =
+    state?.legal_actions?.find((actionView) => actionView.type === "play_basic_to_active") || null;
   if (state.winner === 0) {
     return `${battleLabel} • Game over: you won.`;
   }
@@ -1838,6 +2521,23 @@ function makeStatusMessage(state, context) {
   }
   if (state.pending_promotion_for === 0) {
     return `${battleLabel} • Promotion required. ${context.instructions}`;
+  }
+  if (mulliganAction) {
+    return `${battleLabel} • No Basic Pokemon in hand.`;
+  }
+  if (state.game_mode === "standard" && state.setup_phase === "choose_active" && chooseActiveAction) {
+    return `${battleLabel} • Choose your Active Pokemon.`;
+  }
+  if (
+    state.game_mode === "standard" &&
+    state.setup_phase === "choose_active" &&
+    !state.players[0].active &&
+    !state.legal_actions.length
+  ) {
+    return `${battleLabel} • Opening hands are drawn.`;
+  }
+  if (state.game_mode === "standard" && state.setup_phase === "awaiting_end_setup") {
+    return `${battleLabel} • Setup is ready. End setup to begin Turn 1.`;
   }
   if (state.current_player === 0) {
     return `${battleLabel} • Your turn.`;
@@ -1864,10 +2564,32 @@ function handleBoardBackgroundClick(event) {
   }
 
   const clickedInteractiveElement = event.target.closest(
-    ".mini-card, .board-card, .attack-chip-button, .end-turn-button, .resource-panel, button, select, input, label",
+    ".mini-card, .board-card, .attack-chip-button, .end-turn-button, .resource-panel, .deck-browser, button, select, input, label",
   );
   if (clickedInteractiveElement) {
     return;
+  }
+
+  const clickedBoardSearchArea = !event.target.closest(
+    ".hand-tray, .player-side-pocket",
+  );
+  if (clickedBoardSearchArea && openDeckBrowserForSelection(currentState)) {
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
+
+  const clickedBoardPlayArea = !event.target.closest(
+    "#player-bench-zone, .hand-tray, .player-side-pocket",
+  );
+  if (clickedBoardPlayArea) {
+    const backgroundPlayAction = findBackgroundPlayAction(currentState);
+    if (backgroundPlayAction) {
+      event.preventDefault();
+      event.stopPropagation();
+      submitAction(backgroundPlayAction);
+      return;
+    }
   }
 
   if (!uiState.selectedCardId && !uiState.selectedBoardTarget) {

@@ -159,6 +159,7 @@
                     <div class="player-title-block">
                       <p class="panel-kicker">Player</p>
                       <h2>Your Board</h2>
+                      <div id="floating-card-preview" class="floating-card-preview" hidden></div>
                     </div>
 
                     <section class="player-active-pocket">
@@ -173,6 +174,8 @@
                       <div id="player-shared-energy" class="shared-energy-slot"></div>
                     </section>
                   </div>
+
+                  <div id="deck-browser-overlay" class="deck-browser-overlay" hidden></div>
 
                   <div class="board-zone board-zone-player">
                     <section id="player-bench-zone" class="board-row board-row-bench">
@@ -215,11 +218,13 @@
               </div>
             </article>
           </section>
+
         </div>
       </section>
     </main>
 
     <script src="/selection-state.js" defer></script>
     <script src="/app.js" defer></script>
+    <div id="attack-drag-indicator" class="attack-drag-indicator" hidden></div>
   </body>
 </html>

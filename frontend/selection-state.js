@@ -29,8 +29,12 @@
     );
   }
 
-  function boardTargetExists(player, target) {
-    if (!player || !target) {
+  function boardTargetExists(state, target) {
+    if (!state || !target) {
+      return false;
+    }
+    const player = state.players?.[target.player_index];
+    if (!player) {
       return false;
     }
     if (target.zone === "active") {
@@ -44,7 +48,7 @@
       return !!pokemon && pokemon.ref.instance_id === target.instance_id;
     }
     if (target.zone === "energy") {
-      return target.player_index === 0;
+      return target.player_index === 0 || target.player_index === 1;
     }
     return false;
   }
@@ -79,7 +83,7 @@
       selectedCardId,
       selectedBoardTarget:
         selectedBoardTarget &&
-        boardTargetExists(player, selectedBoardTarget) &&
+        boardTargetExists(state, selectedBoardTarget) &&
         (selectedBoardTarget.zone !== "energy" || keepEnergyTargetSelected)
           ? cloneRef(selectedBoardTarget)
           : null,
@@ -110,18 +114,26 @@
     return matchingActions.length === 1 ? matchingActions[0] : null;
   }
 
-  function findMatchingBoardTargetedAction(state, sourceRef, targetRef, aiIsRunning) {
+  function findMatchingBoardTargetedAction(
+    state,
+    sourceRef,
+    targetRef,
+    aiIsRunning,
+    pendingAttackActionIds = [],
+  ) {
     if (!state || aiIsRunning) {
       return null;
     }
 
+    const pendingActionSet = new Set(pendingAttackActionIds);
     const matchingActions = state.legal_actions.filter(
       (action) =>
         action.source &&
         action.source.zone !== "hand" &&
         refsMatch(action.source, sourceRef) &&
         action.target &&
-        refsMatch(action.target, targetRef),
+        refsMatch(action.target, targetRef) &&
+        (!pendingActionSet.size || pendingActionSet.has(action.action_id)),
     );
 
     return matchingActions.length === 1 ? matchingActions[0] : null;
@@ -223,6 +235,7 @@
         currentTarget,
         nextTarget,
         aiIsRunning,
+        uiState.pendingAttackActionIds,
       );
       if (boardAction) {
         return {
@@ -256,6 +269,22 @@
     return matchingActions.length === 1 ? matchingActions[0] : null;
   }
 
+  function findBackgroundPlayActionForSelection(state, selectedCardId, aiIsRunning) {
+    if (!state || !selectedCardId || aiIsRunning) {
+      return null;
+    }
+
+    const matchingActions = state.legal_actions.filter(
+      (action) =>
+        action.type === "play_supporter" &&
+        action.source?.zone === "hand" &&
+        action.source.instance_id === selectedCardId &&
+        !action.target,
+    );
+
+    return matchingActions.length === 1 ? matchingActions[0] : null;
+  }
+
   function isBoardRefClickable({ state, uiState, context, aiIsRunning, ref }) {
     if (!ref || aiIsRunning) {
       return false;
@@ -264,6 +293,13 @@
     if (ref.zone === "energy") {
       if (!uiState.selectedCardId) {
         return false;
+      }
+      return context.highlightedTargets.some((target) => refsMatch(target, ref));
+    }
+
+    if (ref.player_index !== 0) {
+      if (uiState.selectedBoardTarget && refsMatch(uiState.selectedBoardTarget, ref)) {
+        return true;
       }
       return context.highlightedTargets.some((target) => refsMatch(target, ref));
     }
@@ -329,22 +365,22 @@
         actions = fromSelectedCard;
       }
     } else if (uiState.selectedBoardTarget) {
+      const pendingAttackActionIds = new Set(uiState.pendingAttackActionIds || []);
       const sourceActions = legalActions.filter(
         (action) =>
           action.source &&
           action.source.zone !== "hand" &&
-          refsMatch(action.source, uiState.selectedBoardTarget),
+          refsMatch(action.source, uiState.selectedBoardTarget) &&
+          (!pendingAttackActionIds.size || pendingAttackActionIds.has(action.action_id)),
       );
       const directSourceActions = sourceActions.filter(
         (action) =>
           !action.target ||
-          refsMatch(action.target, uiState.selectedBoardTarget) ||
-          action.target.player_index !== 0,
+          refsMatch(action.target, uiState.selectedBoardTarget),
       );
       const targetedBoardActions = sourceActions.filter(
         (action) =>
           action.target &&
-          action.target.player_index === 0 &&
           !refsMatch(action.target, uiState.selectedBoardTarget),
       );
       const targetActions = legalActions.filter(
@@ -357,7 +393,7 @@
       actions = directSourceActions;
       const visibleBoardTargets = targetedBoardActions.map((action) => action.target);
       if (visibleBoardTargets.length) {
-        instructions.push("This Pokemon is selected. Now choose one of the highlighted board targets.");
+        instructions.push("This Pokemon is selected. Now choose one of the highlighted targets.");
         collectUniqueRefs(visibleBoardTargets, highlightedTargets);
       }
       for (const action of targetActions) {
@@ -410,6 +446,7 @@
   const api = {
     boardTargetExists,
     deriveInteractionContext,
+    findBackgroundPlayActionForSelection,
     findBenchPlayActionForSelection,
     findBoardTargetLabelForPlayer,
     isBoardRefClickable,

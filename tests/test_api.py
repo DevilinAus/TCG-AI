@@ -12,6 +12,7 @@ from backend.tcg_ai.server import (
     ApiError,
     TcgApplication,
 )
+from backend.tcg_ai.game_modes.standard.cards import load_deck_cards
 from backend.tcg_ai.learning import RewardLearner
 from backend.tcg_ai.models import PokemonInPlay
 
@@ -20,7 +21,11 @@ class ApiTests(unittest.TestCase):
     def setUp(self) -> None:
         self.temp_dir = tempfile.TemporaryDirectory()
         self.state_path = Path(self.temp_dir.name) / "trainer_progress.txt"
-        self.app = TcgApplication(trainer_state_path=self.state_path)
+        self.policy_state_path = Path(self.temp_dir.name) / "standard_policy_progress.json"
+        self.app = TcgApplication(
+            trainer_state_path=self.state_path,
+            standard_policy_state_path=self.policy_state_path,
+        )
 
     def tearDown(self) -> None:
         self.temp_dir.cleanup()
@@ -70,7 +75,7 @@ class ApiTests(unittest.TestCase):
             ["my_first_battle", "standard"],
         )
         standard_mode = next(mode for mode in lobby["available_game_modes"] if mode["id"] == "standard")
-        self.assertFalse(standard_mode["available"])
+        self.assertTrue(standard_mode["available"])
         self.assertEqual(
             [deck["id"] for deck in lobby["available_decks"]],
             ["bulbasaur", "charmander", "squirtle", "pikachu"],
@@ -82,11 +87,825 @@ class ApiTests(unittest.TestCase):
             "/assets/coins/my-first-battle/charmander-prize-coin.png",
         )
 
-    def test_new_game_rejects_an_unavailable_game_mode(self) -> None:
-        with self.assertRaises(ApiError) as context:
-            self.app.new_game({"human_first": True, "game_mode": "standard"})
+    def test_lobby_can_preview_standard_mode_decks_while_standard_is_unavailable(self) -> None:
+        lobby = self.app.lobby("standard")
 
-        self.assertEqual(context.exception.code, "game_mode_unavailable")
+        self.assertEqual(lobby["game_mode"], "standard")
+        self.assertEqual(lobby["human_deck_id"], "ampharos-ex-battle-deck")
+        self.assertEqual(lobby["ai_deck_id"], "lucario-ex-battle-deck")
+        self.assertEqual(len(lobby["available_decks"]), 12)
+        self.assertEqual(
+            [mode["id"] for mode in lobby["available_game_modes"]],
+            ["my_first_battle", "standard"],
+        )
+        standard_mode = next(mode for mode in lobby["available_game_modes"] if mode["id"] == "standard")
+        self.assertTrue(standard_mode["available"])
+        self.assertTrue(standard_mode["selected"])
+        selected_deck = next(deck for deck in lobby["available_decks"] if deck["selected"])
+        self.assertEqual(selected_deck["id"], "ampharos-ex-battle-deck")
+        self.assertEqual(selected_deck["paired_deck_id"], "lucario-ex-battle-deck")
+        self.assertEqual(selected_deck["element"], "lightning")
+        self.assertEqual(selected_deck["product_line"], "ex-battle")
+
+    def test_new_game_can_start_standard_and_draw_opening_hands(self) -> None:
+        state = self.app.new_game(
+            {
+                "game_mode": "standard",
+                "human_first": True,
+                "human_deck_id": "ampharos-ex-battle-deck",
+                "seed": 1,
+            }
+        )
+
+        self.assertEqual(state["game_mode"], "standard")
+        self.assertEqual(state["current_player"], 0)
+        self.assertEqual(state["setup_phase"], "choose_active")
+        self.assertEqual(state["players"][0]["deck_name"], "Ampharos ex Battle Deck")
+        self.assertEqual(state["players"][1]["deck_name"], "Lucario ex Battle Deck")
+        self.assertEqual(len(state["players"][0]["hand"]), 7)
+        self.assertEqual(state["players"][0]["hand_count"], 7)
+        self.assertEqual(state["players"][1]["hand_count"], 6)
+        self.assertEqual(state["players"][0]["deck_count"], 53)
+        self.assertEqual(state["players"][1]["deck_count"], 53)
+        self.assertIsNone(state["players"][0]["active"])
+        self.assertTrue(state["players"][1]["active"]["face_down"])
+        self.assertEqual(
+            state["players"][1]["active"]["image_url"],
+            "/assets/cards/shared/card-back.png",
+        )
+        self.assertEqual(state["players"][0]["bench"], [])
+        self.assertEqual(
+            [action["type"] for action in state["legal_actions"]],
+            ["play_basic_to_active", "play_basic_to_active", "play_basic_to_active"],
+        )
+        self.assertEqual(state["legal_actions"][0]["target"]["zone"], "active")
+        self.assertEqual(state["legal_actions"][0]["source"]["zone"], "hand")
+        self.assertTrue(
+            all(
+                card["image_url"].startswith("/assets/cards/standard/shared/")
+                for card in state["players"][0]["hand"]
+            )
+        )
+        self.assertEqual(state["ai_learning"], {})
+        self.assertEqual(state["ai_decision_debug"]["provider_type"], "fallback")
+        self.assertEqual(len(state["ai_decision_debug"]["pending_traces"]), 1)
+        self.assertIn("opening hand", state["log"][1]["text"].lower())
+
+    def test_standard_new_game_records_an_ai_opening_trace_without_persisting_it(self) -> None:
+        state = self.app.new_game(
+            {
+                "game_mode": "standard",
+                "human_first": True,
+                "human_deck_id": "ampharos-ex-battle-deck",
+                "seed": 1,
+            }
+        )
+
+        self.assertEqual(state["players"][1]["active"]["name"], "Face-down Active Pokemon")
+        self.assertTrue(state["players"][1]["active"]["face_down"])
+        self.assertEqual(state["ai_decision_debug"]["last_decision"]["decision_type"], "opening_active")
+        self.assertEqual(state["ai_decision_debug"]["last_decision"]["source"], "local")
+        self.assertEqual(state["ai_decision_debug"]["pending_traces"][0]["chosen_card_id"], "sv1-124")
+        self.assertFalse(self.policy_state_path.exists())
+
+    def test_standard_supporters_expose_machine_readable_effect_specs_in_hand_and_actions(self) -> None:
+        state = self.app.new_game(
+            {
+                "game_mode": "standard",
+                "human_first": True,
+                "human_deck_id": "ampharos-ex-battle-deck",
+                "seed": 1,
+            }
+        )
+
+        session = self.app.sessions.get(state["session_id"])
+        from backend.tcg_ai.game_modes.standard.engine import apply_action, card_definition, list_legal_actions
+
+        active_action = next(
+            action for action in list_legal_actions(session.state) if action["type"] == "play_basic_to_active"
+        )
+        apply_action(session.state, active_action)
+        end_setup = next(action for action in list_legal_actions(session.state) if action["type"] == "end_setup")
+        apply_action(session.state, end_setup)
+        session.state.turn_number = 2
+
+        player = session.state.players[0]
+        nemona_id = self._move_standard_named_card_to_hand(session.state, 0, "Nemona")
+        player.hand = [nemona_id]
+
+        snapshot = self.app.get_game(state["session_id"])
+        nemona = snapshot["players"][0]["hand"][0]
+        supporter_action = next(
+            action for action in snapshot["legal_actions"] if action["type"] == "play_supporter"
+        )
+
+        self.assertEqual(card_definition(session.state, nemona_id).name, "Nemona")
+        self.assertEqual(nemona["card_tags"], ["supporter"])
+        self.assertEqual(nemona["effect_specs"][0]["effect_type"], "draw")
+        self.assertEqual(nemona["effect_specs"][0]["count"], 3)
+        self.assertEqual(nemona["effect_specs"][0]["destination_zone"], "hand")
+        self.assertTrue(nemona["effect_specs"][0]["changes_hidden_information"])
+        self.assertEqual(supporter_action["source"]["card_id"], "sv1-180")
+        self.assertEqual(supporter_action["card_tags"], ["supporter"])
+        self.assertEqual(supporter_action["effect_specs"][0]["effect_type"], "draw")
+        self.assertTrue(supporter_action["changes_hidden_information"])
+
+    def test_standard_ultra_ball_exposes_deck_search_metadata_and_viewer_deck_cards(self) -> None:
+        state = self.app.new_game(
+            {
+                "game_mode": "standard",
+                "human_first": True,
+                "human_deck_id": "ampharos-ex-battle-deck",
+                "seed": 1,
+            }
+        )
+
+        session = self.app.sessions.get(state["session_id"])
+        ultra_ball_id = self._move_standard_named_card_to_hand(session.state, 0, "Ultra Ball")
+        snapshot = self.app.get_game(state["session_id"])
+
+        ultra_ball = next(card for card in snapshot["players"][0]["hand"] if card["instance_id"] == ultra_ball_id)
+        self.assertEqual(ultra_ball["effect_specs"][1]["effect_type"], "search_deck")
+        self.assertEqual(ultra_ball["effect_specs"][1]["destination_zone"], "hand")
+        self.assertEqual(ultra_ball["effect_specs"][1]["search_filters"], ["pokemon"])
+        self.assertEqual(ultra_ball["effect_specs"][1]["choose_count"], 1)
+        self.assertGreater(len(snapshot["players"][0]["deck_cards"]), 0)
+        self.assertEqual(snapshot["players"][1]["deck_cards"], [])
+
+    def test_standard_potion_exposes_targeted_item_actions_and_heals_the_selected_pokemon(self) -> None:
+        state = self.app.new_game(
+            {
+                "game_mode": "standard",
+                "human_first": True,
+                "human_deck_id": "ampharos-ex-battle-deck",
+                "seed": 1,
+            }
+        )
+        session = self.app.sessions.get(state["session_id"])
+        from backend.tcg_ai.game_modes.standard.engine import apply_action, list_legal_actions
+
+        active_action = next(
+            action for action in list_legal_actions(session.state) if action["type"] == "play_basic_to_active"
+        )
+        apply_action(session.state, active_action)
+        bench_action = next(
+            action for action in list_legal_actions(session.state) if action["type"] == "bench_basic"
+        )
+        apply_action(session.state, bench_action)
+        end_setup = next(action for action in list_legal_actions(session.state) if action["type"] == "end_setup")
+        apply_action(session.state, end_setup)
+
+        potion_id = self._move_standard_named_card_to_hand(session.state, 0, "Potion")
+        self._set_standard_exact_hand(session.state, 0, [potion_id])
+        session.state.players[0].active.damage = 40
+        session.state.players[0].bench[0].damage = 20
+
+        snapshot = self.app.get_game(state["session_id"])
+        potion = snapshot["players"][0]["hand"][0]
+        potion_actions = [action for action in snapshot["legal_actions"] if action["type"] == "play_item"]
+
+        self.assertEqual(potion["card_id"], "sv1-188")
+        self.assertEqual(potion["effect_specs"][0]["effect_type"], "heal_damage")
+        self.assertEqual(potion["effect_specs"][0]["count"], 30)
+        self.assertEqual(
+            {(action["target"]["zone"], action["target"].get("bench_index")) for action in potion_actions},
+            {("active", None), ("bench", 0)},
+        )
+
+        active_target_action = next(action for action in potion_actions if action["target"]["zone"] == "active")
+        updated = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": active_target_action["action"],
+            }
+        )
+
+        self.assertEqual(updated["players"][0]["active"]["damage"], 10)
+        self.assertEqual(updated["players"][0]["bench"][0]["damage"], 20)
+        self.assertEqual(updated["players"][0]["discard_top"]["name"], "Potion")
+
+    def test_standard_evolution_exposes_targeted_actions_and_evolves_the_selected_pokemon(self) -> None:
+        state = self.app.new_game(
+            {
+                "game_mode": "standard",
+                "human_first": True,
+                "human_deck_id": "ampharos-ex-battle-deck",
+                "seed": 1,
+            }
+        )
+        session = self.app.sessions.get(state["session_id"])
+        from backend.tcg_ai.game_modes.standard.engine import apply_action, list_legal_actions
+
+        active_action = next(
+            action for action in list_legal_actions(session.state) if action["type"] == "play_basic_to_active"
+        )
+        apply_action(session.state, active_action)
+        end_setup = next(action for action in list_legal_actions(session.state) if action["type"] == "end_setup")
+        apply_action(session.state, end_setup)
+
+        session.state.players[0].turns_taken = 2
+        kilowattrel_id = self._move_standard_named_card_to_hand(session.state, 0, "Kilowattrel")
+        self._set_standard_exact_hand(session.state, 0, [kilowattrel_id])
+
+        snapshot = self.app.get_game(state["session_id"])
+        evolve_actions = [action for action in snapshot["legal_actions"] if action["type"] == "evolve"]
+
+        self.assertEqual(len(evolve_actions), 1)
+        self.assertEqual(evolve_actions[0]["source"]["zone"], "hand")
+        self.assertEqual(evolve_actions[0]["source"]["card_id"], "sv1-79")
+        self.assertEqual(evolve_actions[0]["target"]["zone"], "active")
+
+        updated = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": evolve_actions[0]["action"],
+            }
+        )
+
+        self.assertEqual(updated["players"][0]["active"]["name"], "Kilowattrel")
+        self.assertEqual(updated["players"][0]["active"]["stage"], "stage1")
+        self.assertEqual(updated["players"][0]["hand_count"], 0)
+
+    def test_standard_switch_exposes_bench_targets_and_swaps_active_pokemon(self) -> None:
+        state = self.app.new_game(
+            {
+                "game_mode": "standard",
+                "human_first": True,
+                "human_deck_id": "ampharos-ex-battle-deck",
+                "seed": 1,
+            }
+        )
+        session = self.app.sessions.get(state["session_id"])
+        from backend.tcg_ai.game_modes.standard.engine import apply_action, list_legal_actions
+
+        active_action = next(
+            action for action in list_legal_actions(session.state) if action["type"] == "play_basic_to_active"
+        )
+        apply_action(session.state, active_action)
+        bench_action = next(
+            action for action in list_legal_actions(session.state) if action["type"] == "bench_basic"
+        )
+        apply_action(session.state, bench_action)
+        end_setup = next(action for action in list_legal_actions(session.state) if action["type"] == "end_setup")
+        apply_action(session.state, end_setup)
+
+        switch_id = self._move_standard_named_card_to_hand(session.state, 0, "Switch")
+        self._set_standard_exact_hand(session.state, 0, [switch_id])
+        expected_bench_name = session.state.players[0].bench[0].stack[-1]
+        expected_active_name = session.state.players[0].active.stack[-1]
+
+        snapshot = self.app.get_game(state["session_id"])
+        switch_card = snapshot["players"][0]["hand"][0]
+        switch_actions = [action for action in snapshot["legal_actions"] if action["type"] == "play_item"]
+
+        self.assertEqual(switch_card["card_id"], "sv1-194")
+        self.assertEqual(switch_card["effect_specs"][0]["effect_type"], "switch_active_with_bench")
+        self.assertEqual(len(switch_actions), 1)
+        self.assertEqual(switch_actions[0]["target"]["zone"], "bench")
+        self.assertEqual(switch_actions[0]["target"]["bench_index"], 0)
+
+        updated = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": switch_actions[0]["action"],
+            }
+        )
+
+        self.assertEqual(updated["players"][0]["active"]["instance_id"], expected_bench_name)
+        self.assertEqual(updated["players"][0]["bench"][0]["instance_id"], expected_active_name)
+        self.assertEqual(updated["players"][0]["discard_top"]["name"], "Switch")
+
+    def test_standard_energy_attachment_actions_expose_targets_and_update_state(self) -> None:
+        state = self.app.new_game(
+            {
+                "game_mode": "standard",
+                "human_first": True,
+                "human_deck_id": "ampharos-ex-battle-deck",
+                "seed": 1,
+            }
+        )
+        session = self.app.sessions.get(state["session_id"])
+        from backend.tcg_ai.game_modes.standard.engine import apply_action, list_legal_actions
+
+        active_action = next(
+            action for action in list_legal_actions(session.state) if action["type"] == "play_basic_to_active"
+        )
+        apply_action(session.state, active_action)
+        bench_action = next(
+            action for action in list_legal_actions(session.state) if action["type"] == "bench_basic"
+        )
+        apply_action(session.state, bench_action)
+        end_setup = next(action for action in list_legal_actions(session.state) if action["type"] == "end_setup")
+        apply_action(session.state, end_setup)
+
+        energy_id = self._move_standard_named_card_to_hand(session.state, 0, "Basic Lightning Energy")
+        self._set_standard_exact_hand(session.state, 0, [energy_id])
+
+        snapshot = self.app.get_game(state["session_id"])
+        energy_actions = [action for action in snapshot["legal_actions"] if action["type"] == "play_energy"]
+
+        self.assertEqual(len(energy_actions), 2)
+        active_target = next(action for action in energy_actions if action["target"]["zone"] == "active")
+        bench_target = next(action for action in energy_actions if action["target"]["zone"] == "bench")
+        self.assertEqual(
+            active_target["target"]["instance_id"],
+            snapshot["players"][0]["active"]["ref"]["instance_id"],
+        )
+        self.assertEqual(bench_target["target"]["bench_index"], 0)
+        self.assertEqual(
+            bench_target["target"]["instance_id"],
+            snapshot["players"][0]["bench"][0]["ref"]["instance_id"],
+        )
+
+        updated = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": active_target["action"],
+            }
+        )
+
+        self.assertEqual(updated["players"][0]["hand_count"], 0)
+        self.assertEqual(updated["players"][0]["energy_count"], 1)
+        self.assertFalse(updated["players"][0]["energy_attachment_available"])
+        self.assertEqual(updated["players"][0]["active"]["attached_energy_count"], 1)
+        self.assertEqual(updated["players"][0]["active"]["attached_energy"][0]["name"], "Basic Lightning Energy")
+        self.assertFalse(updated["players"][0]["active"]["can_attack"])
+        self.assertEqual(
+            [action["type"] for action in updated["legal_actions"]],
+            ["end_turn"],
+        )
+
+    def test_standard_collect_attack_draws_a_card_and_passes_the_turn_on_a_later_turn(self) -> None:
+        state = self.app.new_game(
+            {
+                "game_mode": "standard",
+                "human_first": True,
+                "human_deck_id": "ampharos-ex-battle-deck",
+                "seed": 1,
+            }
+        )
+        session = self.app.sessions.get(state["session_id"])
+        from backend.tcg_ai.game_modes.standard.engine import apply_action, list_legal_actions
+
+        active_action = next(
+            action for action in list_legal_actions(session.state) if action["type"] == "play_basic_to_active"
+        )
+        apply_action(session.state, active_action)
+        end_setup = next(action for action in list_legal_actions(session.state) if action["type"] == "end_setup")
+        apply_action(session.state, end_setup)
+        session.state.turn_number = 2
+        session.state.players[0].turns_taken = 2
+
+        energy_id = self._move_standard_named_card_to_hand(session.state, 0, "Basic Lightning Energy")
+        self._set_standard_exact_hand(session.state, 0, [energy_id])
+        attach_action = next(action for action in list_legal_actions(session.state) if action["type"] == "play_energy")
+        apply_action(session.state, attach_action)
+
+        updated = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": next(
+                    action["action"]
+                    for action in self.app.get_game(state["session_id"])["legal_actions"]
+                    if action["type"] == "attack"
+                ),
+            }
+        )
+
+        self.assertEqual(updated["current_player"], 1)
+        self.assertEqual(updated["players"][1]["active"]["damage"], 0)
+        self.assertEqual(updated["players"][0]["hand_count"], 1)
+        self.assertTrue(any("drew 1 card" in entry["text"].lower() for entry in updated["log"]))
+
+    def test_standard_opening_hand_shuffle_is_seeded(self) -> None:
+        first = self.app.new_game(
+            {
+                "game_mode": "standard",
+                "human_first": True,
+                "human_deck_id": "ampharos-ex-battle-deck",
+                "seed": 77,
+            }
+        )
+        second = self.app.new_game(
+            {
+                "game_mode": "standard",
+                "human_first": True,
+                "human_deck_id": "ampharos-ex-battle-deck",
+                "seed": 77,
+            }
+        )
+
+        self.assertEqual(
+            [card["card_id"] for card in first["players"][0]["hand"]],
+            [card["card_id"] for card in second["players"][0]["hand"]],
+        )
+        self.assertEqual(
+            [action["label"] for action in first["legal_actions"]],
+            [action["label"] for action in second["legal_actions"]],
+        )
+
+    def test_standard_cards_use_catalog_basic_and_stage_data(self) -> None:
+        deck_cards = {card.card_id: card for card in load_deck_cards("ampharos-ex-battle-deck")}
+
+        self.assertTrue(deck_cards["sv1-66"].is_basic)
+        self.assertEqual(deck_cards["sv1-66"].stage, "basic")
+        self.assertFalse(deck_cards["svp-15"].is_basic)
+        self.assertEqual(deck_cards["svp-15"].stage, "stage1")
+        self.assertFalse(deck_cards["svp-16"].is_basic)
+        self.assertEqual(deck_cards["svp-16"].stage, "stage2")
+
+    def test_standard_opening_hand_mulligan_redraws_when_no_basic_is_present(self) -> None:
+        state = self.app.new_game(
+            {
+                "game_mode": "standard",
+                "human_first": True,
+                "human_deck_id": "ampharos-ex-battle-deck",
+                "seed": 4,
+            }
+        )
+
+        self.assertEqual(
+            [card["name"] for card in state["players"][0]["hand"]],
+            [
+                "Youngster",
+                "Basic Lightning Energy",
+                "Basic Lightning Energy",
+                "Basic Lightning Energy",
+                "Nemona",
+                "Ultra Ball",
+                "Basic Lightning Energy",
+            ],
+        )
+        self.assertEqual([action["type"] for action in state["legal_actions"]], ["mulligan"])
+
+        updated = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": state["legal_actions"][0]["action"],
+            }
+        )
+
+        self.assertEqual(updated["players"][0]["hand_count"], 7)
+        self.assertEqual(updated["players"][0]["deck_count"], 53)
+        self.assertEqual(
+            [card["name"] for card in updated["players"][0]["hand"]],
+            [
+                "Wattrel",
+                "Mareep",
+                "Nest Ball",
+                "Rotom",
+                "Jacq",
+                "Starly",
+                "Basic Lightning Energy",
+            ],
+        )
+        self.assertEqual(
+            [action["type"] for action in updated["legal_actions"]],
+            [
+                "play_basic_to_active",
+                "play_basic_to_active",
+                "play_basic_to_active",
+                "play_basic_to_active",
+            ],
+        )
+
+    def _move_standard_named_card_to_hand(self, state, player_index: int, card_name: str) -> str:
+        player = state.players[player_index]
+        from backend.tcg_ai.game_modes.standard.engine import card_definition
+
+        for zone_name in ("hand", "deck", "discard"):
+            zone = getattr(player, zone_name)
+            for instance_id in list(zone):
+                if card_definition(state, instance_id).name != card_name:
+                    continue
+                if zone_name != "hand":
+                    zone.remove(instance_id)
+                    player.hand.append(instance_id)
+                return instance_id
+        self.fail(f"Could not find {card_name} for player {player_index}")
+        self.assertIn("7 cards were redrawn", updated["log"][-2]["text"])
+
+    def _set_standard_exact_hand(self, state, player_index: int, ordered_instance_ids: list[str]) -> None:
+        player = state.players[player_index]
+        kept = set(ordered_instance_ids)
+        extras = [instance_id for instance_id in player.hand if instance_id not in kept]
+        player.hand = list(ordered_instance_ids)
+        player.deck.extend(extras)
+
+    def test_standard_can_play_a_basic_from_hand_into_the_active_spot(self) -> None:
+        state = self.app.new_game(
+            {
+                "game_mode": "standard",
+                "human_first": True,
+                "human_deck_id": "ampharos-ex-battle-deck",
+                "seed": 1,
+            }
+        )
+
+        action = state["legal_actions"][0]
+        self.assertEqual(action["type"], "play_basic_to_active")
+
+        updated = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": action["action"],
+            }
+        )
+
+        self.assertEqual(updated["players"][0]["active"]["name"], "Wattrel")
+        self.assertEqual(updated["players"][0]["active"]["stage"], "basic")
+        self.assertEqual(updated["players"][0]["active"]["hp"], 50)
+        self.assertEqual(updated["players"][0]["active"]["ref"]["zone"], "active")
+        self.assertEqual(updated["players"][0]["hand_count"], 6)
+        self.assertEqual(updated["players"][0]["deck_count"], 53)
+        self.assertTrue(updated["players"][1]["active"]["face_down"])
+        self.assertEqual(updated["setup_phase"], "awaiting_end_setup")
+        self.assertEqual(
+            [action["type"] for action in updated["legal_actions"]],
+            ["bench_basic", "bench_basic", "end_setup"],
+        )
+
+    def test_standard_can_bench_a_basic_during_setup_after_choosing_active(self) -> None:
+        state = self.app.new_game(
+            {
+                "game_mode": "standard",
+                "human_first": True,
+                "human_deck_id": "ampharos-ex-battle-deck",
+                "seed": 1,
+            }
+        )
+        after_active = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": state["legal_actions"][0]["action"],
+            }
+        )
+        bench_action = next(
+            action for action in after_active["legal_actions"] if action["type"] == "bench_basic"
+        )
+
+        updated = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": bench_action["action"],
+            }
+        )
+
+        self.assertEqual(len(updated["players"][0]["bench"]), 1)
+        self.assertEqual(updated["players"][0]["bench"][0]["name"], "Mareep")
+        self.assertEqual(updated["players"][0]["hand_count"], 5)
+        self.assertEqual(updated["setup_phase"], "awaiting_end_setup")
+        self.assertEqual(
+            [action["type"] for action in updated["legal_actions"]],
+            ["bench_basic", "end_setup"],
+        )
+        self.assertIn("during setup", updated["log"][-1]["text"])
+
+    def test_standard_end_setup_begins_turn_one_and_enables_end_turn(self) -> None:
+        state = self.app.new_game(
+            {
+                "game_mode": "standard",
+                "human_first": True,
+                "human_deck_id": "ampharos-ex-battle-deck",
+                "seed": 1,
+            }
+        )
+        choose_active = state["legal_actions"][0]
+        after_active = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": choose_active["action"],
+            }
+        )
+        self.assertEqual(
+            [action["type"] for action in after_active["legal_actions"]],
+            ["bench_basic", "bench_basic", "end_setup"],
+        )
+        end_setup_action = next(
+            action for action in after_active["legal_actions"] if action["type"] == "end_setup"
+        )
+
+        after_setup = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": end_setup_action["action"],
+            }
+        )
+
+        self.assertIsNone(after_setup["setup_phase"])
+        self.assertEqual(after_setup["current_player"], 0)
+        self.assertEqual(after_setup["turn_number"], 1)
+        self.assertEqual(after_setup["players"][0]["hand_count"], 7)
+        self.assertEqual(after_setup["players"][0]["deck_count"], 52)
+        self.assertEqual(after_setup["players"][1]["active"]["name"], "Koraidon")
+        self.assertFalse(after_setup["players"][1]["active"]["face_down"])
+        self.assertEqual(
+            [action["type"] for action in after_setup["legal_actions"]],
+            ["bench_basic", "bench_basic", "play_energy", "play_energy", "end_turn"],
+        )
+        self.assertIn("Turn 1 begins", after_setup["log"][-2]["text"])
+        self.assertIn("You drew", after_setup["log"][-1]["text"])
+
+    def test_standard_can_bench_a_basic_during_the_turn(self) -> None:
+        state = self.app.new_game(
+            {
+                "game_mode": "standard",
+                "human_first": True,
+                "human_deck_id": "ampharos-ex-battle-deck",
+                "seed": 1,
+            }
+        )
+        after_active = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": state["legal_actions"][0]["action"],
+            }
+        )
+        end_setup_action = next(
+            action for action in after_active["legal_actions"] if action["type"] == "end_setup"
+        )
+        after_setup = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": end_setup_action["action"],
+            }
+        )
+        bench_action = next(
+            action for action in after_setup["legal_actions"] if action["type"] == "bench_basic"
+        )
+
+        updated = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": bench_action["action"],
+            }
+        )
+
+        self.assertEqual(len(updated["players"][0]["bench"]), 1)
+        self.assertEqual(updated["players"][0]["bench"][0]["name"], "Mareep")
+        self.assertIsNone(updated["setup_phase"])
+        self.assertEqual(
+            [action["type"] for action in updated["legal_actions"]],
+            ["bench_basic", "play_energy", "play_energy", "play_energy", "play_energy", "end_turn"],
+        )
+
+    def test_standard_ai_turn_can_finish_and_pass_the_turn_back(self) -> None:
+        state = self.app.new_game(
+            {
+                "game_mode": "standard",
+                "human_first": True,
+                "human_deck_id": "ampharos-ex-battle-deck",
+                "seed": 1,
+            }
+        )
+        after_active = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": state["legal_actions"][0]["action"],
+            }
+        )
+        end_setup_action = next(
+            action for action in after_active["legal_actions"] if action["type"] == "end_setup"
+        )
+        after_setup = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": end_setup_action["action"],
+            }
+        )
+        end_turn_action = next(
+            action for action in after_setup["legal_actions"] if action["type"] == "end_turn"
+        )
+        after_end_turn = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": end_turn_action["action"],
+            }
+        )
+
+        self.assertEqual(after_end_turn["current_player"], 1)
+        actions_taken: list[str] = []
+        ai_state = after_end_turn
+        for _ in range(10):
+            ai_state = self.app.ai_step({"session_id": state["session_id"]})
+            actions_taken.append(ai_state["ai_step"]["action"]["type"])
+            if ai_state["current_player"] == 0:
+                break
+
+        self.assertEqual(ai_state["current_player"], 0)
+        self.assertEqual(ai_state["turn_number"], 2)
+        self.assertEqual(actions_taken[-1], "end_turn")
+        self.assertEqual(
+            [action["type"] for action in ai_state["legal_actions"]],
+            ["bench_basic", "bench_basic", "play_energy", "play_energy", "play_energy", "play_supporter", "play_supporter", "end_turn"],
+        )
+
+    def test_standard_ai_step_can_play_a_supporter_and_draw_cards(self) -> None:
+        state = self.app.new_game(
+            {
+                "game_mode": "standard",
+                "human_first": True,
+                "human_deck_id": "ampharos-ex-battle-deck",
+                "seed": 1,
+            }
+        )
+        session = self.app.sessions.get(state["session_id"])
+
+        after_active = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": state["legal_actions"][0]["action"],
+            }
+        )
+        end_setup_action = next(
+            action for action in after_active["legal_actions"] if action["type"] == "end_setup"
+        )
+        after_setup = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": end_setup_action["action"],
+            }
+        )
+        end_turn_action = next(
+            action for action in after_setup["legal_actions"] if action["type"] == "end_turn"
+        )
+        after_end_turn = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": end_turn_action["action"],
+            }
+        )
+
+        nemona_id = self._move_standard_named_card_to_hand(session.state, 1, "Nemona")
+        self._set_standard_exact_hand(session.state, 1, [nemona_id])
+        expected_ai_draw = list(session.state.players[1].deck[:3])
+
+        ai_step = self.app.ai_step({"session_id": state["session_id"]})
+
+        self.assertEqual(after_end_turn["current_player"], 1)
+        self.assertEqual(ai_step["ai_step"]["action"]["type"], "play_supporter")
+        self.assertEqual(ai_step["current_player"], 1)
+        self.assertEqual(ai_step["players"][1]["hand_count"], 3)
+        self.assertEqual(
+            session.state.players[1].hand,
+            expected_ai_draw,
+        )
+        from backend.tcg_ai.game_modes.standard.engine import card_definition
+
+        self.assertEqual(ai_step["players"][1]["discard_count"], 1)
+        self.assertEqual(card_definition(session.state, session.state.players[1].discard[-1]).name, "Nemona")
+        self.assertIn("played Nemona", ai_step["log"][-2]["text"])
+        self.assertIn("drew 3 cards", ai_step["log"][-1]["text"])
+
+    def test_standard_ai_step_can_attach_energy_to_its_active_pokemon(self) -> None:
+        state = self.app.new_game(
+            {
+                "game_mode": "standard",
+                "human_first": True,
+                "human_deck_id": "ampharos-ex-battle-deck",
+                "seed": 1,
+            }
+        )
+        session = self.app.sessions.get(state["session_id"])
+
+        after_active = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": state["legal_actions"][0]["action"],
+            }
+        )
+        end_setup_action = next(
+            action for action in after_active["legal_actions"] if action["type"] == "end_setup"
+        )
+        after_setup = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": end_setup_action["action"],
+            }
+        )
+        end_turn_action = next(
+            action for action in after_setup["legal_actions"] if action["type"] == "end_turn"
+        )
+        after_end_turn = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": end_turn_action["action"],
+            }
+        )
+
+        energy_id = self._move_standard_named_card_to_hand(session.state, 1, "Basic Fighting Energy")
+        self._set_standard_exact_hand(session.state, 1, [energy_id])
+
+        ai_step = self.app.ai_step({"session_id": state["session_id"]})
+
+        self.assertEqual(after_end_turn["current_player"], 1)
+        self.assertEqual(ai_step["ai_step"]["action"]["type"], "play_energy")
+        self.assertEqual(ai_step["current_player"], 1)
+        self.assertEqual(ai_step["players"][1]["hand_count"], 0)
+        self.assertEqual(ai_step["players"][1]["energy_count"], 1)
+        self.assertEqual(ai_step["players"][1]["active"]["attached_energy_count"], 1)
+        self.assertEqual(ai_step["players"][1]["active"]["attached_energy"][0]["name"], "Basic Fighting Energy")
+        self.assertIn("attached Basic Fighting Energy", ai_step["log"][-1]["text"])
 
     def test_new_game_can_select_a_human_deck_and_exposes_available_decks(self) -> None:
         state = self.app.new_game({"human_first": True, "human_deck_id": "bulbasaur"})
