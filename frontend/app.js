@@ -10,12 +10,14 @@ let previousState = null;
 let aiIsRunning = false;
 let aiAutoRunQueued = false;
 let aiAutoRunPaused = false;
+let stateRequestEpoch = 0;
 
 const uiState = {
   selectedCardId: null,
   selectedBoardTarget: null,
   pendingAttackActionIds: [],
   availableContextActions: [],
+  deckBrowseRequest: null,
   selectedGameModeId: null,
   selectedTrainerId: null,
   selectedHumanDeckId: null,
@@ -24,6 +26,12 @@ const uiState = {
 const pointerState = {
   clientX: null,
   clientY: null,
+};
+
+const deckBrowserDragState = {
+  pointerId: null,
+  startClientX: 0,
+  startScrollLeft: 0,
 };
 
 const {
@@ -160,7 +168,21 @@ function clearStoredSessionId() {
   window.sessionStorage.removeItem(SESSION_STORAGE_KEY);
 }
 
+function resetToLobbyState(gameModeId = null) {
+  stateRequestEpoch += 1;
+  clearStoredSessionId();
+  currentState = null;
+  lobbyState = null;
+  previousState = null;
+  aiIsRunning = false;
+  aiAutoRunQueued = false;
+  aiAutoRunPaused = false;
+  resetSelections();
+  uiState.selectedGameModeId = gameModeId || null;
+}
+
 async function refreshGame() {
+  const requestEpoch = stateRequestEpoch;
   const sessionId = getStoredSessionId();
   if (!sessionId) {
     await loadLobby();
@@ -168,7 +190,11 @@ async function refreshGame() {
   }
 
   try {
-    currentState = await requestJson(`/api/game?session_id=${encodeURIComponent(sessionId)}`);
+    const payload = await requestJson(`/api/game?session_id=${encodeURIComponent(sessionId)}`);
+    if (requestEpoch !== stateRequestEpoch) {
+      return;
+    }
+    currentState = payload;
     lobbyState = null;
     aiAutoRunPaused = false;
     uiState.selectedGameModeId = uiState.selectedGameModeId || currentState.game_mode || null;
@@ -178,6 +204,9 @@ async function refreshGame() {
     render(currentState);
     maybeRunAiTurn(currentState);
   } catch (error) {
+    if (requestEpoch !== stateRequestEpoch) {
+      return;
+    }
     if (error.code === "session_not_found" || error.code === "missing_session_id") {
       clearStoredSessionId();
       currentState = null;
@@ -191,9 +220,14 @@ async function refreshGame() {
 }
 
 async function loadLobby(requestedGameModeId = null) {
+  const requestEpoch = stateRequestEpoch;
   try {
     const query = requestedGameModeId ? `?game_mode=${encodeURIComponent(requestedGameModeId)}` : "";
-    lobbyState = await requestJson(`/api/lobby${query}`);
+    const payload = await requestJson(`/api/lobby${query}`);
+    if (requestEpoch !== stateRequestEpoch) {
+      return;
+    }
+    lobbyState = payload;
     currentState = null;
     previousState = null;
     aiAutoRunPaused = false;
@@ -215,11 +249,15 @@ async function loadLobby(requestedGameModeId = null) {
     }
     renderLobby(lobbyState);
   } catch (error) {
+    if (requestEpoch !== stateRequestEpoch) {
+      return;
+    }
     updateStatus(error.message);
   }
 }
 
 async function newGame() {
+  const requestEpoch = stateRequestEpoch;
   try {
     const payloadBody = {};
     const selectionState = currentState || lobbyState;
@@ -239,6 +277,9 @@ async function newGame() {
       method: "POST",
       body: JSON.stringify(payloadBody),
     });
+    if (requestEpoch !== stateRequestEpoch) {
+      return;
+    }
     currentState = payload;
     lobbyState = null;
     previousState = null;
@@ -251,6 +292,9 @@ async function newGame() {
     render(currentState);
     maybeRunAiTurn(currentState);
   } catch (error) {
+    if (requestEpoch !== stateRequestEpoch) {
+      return;
+    }
     updateStatus(error.message);
   }
 }
@@ -260,22 +304,30 @@ async function submitAction(actionView) {
     return;
   }
 
+  const requestEpoch = stateRequestEpoch;
   try {
     aiAutoRunPaused = false;
     if (actionView.type === "attack" || actionView.type === "mulligan") {
       resetSelections();
     }
-    currentState = await requestJson("/api/action", {
+    const payload = await requestJson("/api/action", {
       method: "POST",
       body: JSON.stringify({
         session_id: currentState.session_id,
         action: actionView.action,
       }),
     });
+    if (requestEpoch !== stateRequestEpoch) {
+      return;
+    }
+    currentState = payload;
     sanitizeSelections(currentState);
     render(currentState);
     maybeRunAiTurn(currentState);
   } catch (error) {
+    if (requestEpoch !== stateRequestEpoch) {
+      return;
+    }
     updateStatus(error.message);
   }
 }
@@ -285,6 +337,7 @@ async function runAiTurn() {
     return;
   }
 
+  const requestEpoch = stateRequestEpoch;
   aiAutoRunPaused = false;
   aiAutoRunQueued = false;
   aiIsRunning = true;
@@ -292,11 +345,17 @@ async function runAiTurn() {
   updateStatus("AI is thinking...");
   try {
     await sleep(randomDelay(AI_HUMAN_DELAY_MIN_MS, AI_HUMAN_DELAY_MAX_MS));
+    if (requestEpoch !== stateRequestEpoch) {
+      return;
+    }
     while (currentState && currentState.current_player === 1 && currentState.winner === null) {
       const payload = await requestJson("/api/ai-step", {
         method: "POST",
         body: JSON.stringify({ session_id: currentState.session_id }),
       });
+      if (requestEpoch !== stateRequestEpoch) {
+        return;
+      }
       const step = payload.ai_step;
       currentState = payload;
       sanitizeSelections(currentState);
@@ -318,13 +377,19 @@ async function runAiTurn() {
       await waitForPaint();
 
       await sleep(step.delay_ms || FALLBACK_AI_STEP_DELAY_MS);
+      if (requestEpoch !== stateRequestEpoch) {
+        return;
+      }
     }
   } catch (error) {
+    if (requestEpoch !== stateRequestEpoch) {
+      return;
+    }
     aiAutoRunPaused = true;
     updateStatus(`AI auto-run stopped: ${error.message} Refresh or restart the backend server, then try again.`);
   } finally {
     aiIsRunning = false;
-    if (currentState) {
+    if (requestEpoch === stateRequestEpoch && currentState) {
       render(currentState);
     }
   }
@@ -335,10 +400,14 @@ async function runAiTurnReplayFallback() {
     return;
   }
 
+  const requestEpoch = stateRequestEpoch;
   const payload = await requestJson("/api/ai-turn", {
     method: "POST",
     body: JSON.stringify({ session_id: currentState.session_id }),
   });
+  if (requestEpoch !== stateRequestEpoch) {
+    return;
+  }
 
   const replaySteps = payload.ai_turn_replay?.steps || [];
   for (const replayStep of replaySteps) {
@@ -353,6 +422,9 @@ async function runAiTurnReplayFallback() {
     }
 
     await sleep(replayStep.delay_ms || FALLBACK_AI_STEP_DELAY_MS);
+    if (requestEpoch !== stateRequestEpoch) {
+      return;
+    }
   }
 
   currentState = payload;
@@ -479,13 +551,14 @@ function handleDeckChange(event) {
 }
 
 function handleGameModeChange(gameModeId) {
-  if (currentState) {
-    uiState.selectedGameModeId = currentState.game_mode || null;
-    render(currentState);
+  const nextGameModeId = gameModeId || null;
+  const activeState = currentState || lobbyState;
+  const currentGameModeId = resolveGameMode(activeState);
+  if (nextGameModeId === currentGameModeId && !currentState) {
     return;
   }
 
-  uiState.selectedGameModeId = gameModeId || null;
+  resetToLobbyState(nextGameModeId);
   void loadLobby(uiState.selectedGameModeId);
 }
 
@@ -525,6 +598,7 @@ function resetSelections() {
   uiState.selectedBoardTarget = null;
   uiState.pendingAttackActionIds = [];
   uiState.availableContextActions = [];
+  uiState.deckBrowseRequest = null;
 }
 
 function sanitizeSelections(state) {
@@ -538,6 +612,9 @@ function sanitizeSelections(state) {
         refsMatch(actionView.source, uiState.selectedBoardTarget),
     ),
   );
+  if (!resolveDeckBrowseRequest(state, uiState.selectedCardId)) {
+    uiState.deckBrowseRequest = null;
+  }
 }
 
 function render(state) {
@@ -693,6 +770,7 @@ function render(state) {
 
   renderHand(document.getElementById("player-hand"), human.hand, context, previousSnapshot?.players?.[0]?.hand || []);
   renderSelectedCardPreview(state);
+  renderDeckBrowserOverlay(state);
   renderAttackDragIndicator(state);
   const contextActionsElement = document.getElementById("context-actions");
   if (contextActionsElement) {
@@ -1015,6 +1093,167 @@ function renderSelectedCardPreview(state) {
   card.innerHTML = buildCardImageMarkup(preview.imageUrl, preview.name);
   previewElement.innerHTML = "";
   previewElement.appendChild(card);
+}
+
+function resolveDeckBrowseRequest(state, sourceCardId = uiState.selectedCardId) {
+  const player = state?.players?.[0];
+  if (!player || !sourceCardId) {
+    return null;
+  }
+
+  const handCard = player.hand?.find((card) => card.instance_id === sourceCardId);
+  if (!handCard) {
+    return null;
+  }
+
+  const searchEffect = (handCard.effect_specs || []).find(
+    (effectSpec) =>
+      effectSpec.effect_type === "search_deck" &&
+      effectSpec.source_zone === "deck" &&
+      effectSpec.destination_zone,
+  );
+  if (!searchEffect) {
+    return null;
+  }
+
+  const visibleCount = Number.isInteger(searchEffect.count) && searchEffect.count > 0
+    ? searchEffect.count
+    : null;
+  return {
+    sourceCardId,
+    sourceCardName: handCard.name,
+    sourceZone: searchEffect.source_zone || "deck",
+    scope: visibleCount ? "top_cards" : "full_deck",
+    visibleCount,
+    chooseCount: Number.isInteger(searchEffect.choose_count) ? searchEffect.choose_count : 1,
+    destinationZone: searchEffect.destination_zone || "hand",
+    searchFilters: Array.isArray(searchEffect.search_filters) ? searchEffect.search_filters : [],
+  };
+}
+
+function openDeckBrowserForSelection(state) {
+  const request = resolveDeckBrowseRequest(state);
+  if (!request) {
+    return false;
+  }
+  uiState.deckBrowseRequest = request;
+  render(currentState);
+  return true;
+}
+
+function cardMatchesSearchFilters(card, searchFilters) {
+  if (!Array.isArray(searchFilters) || !searchFilters.length) {
+    return true;
+  }
+
+  return searchFilters.every((filter) => {
+    if (filter === "pokemon") {
+      return card.kind === "pokemon";
+    }
+    if (filter === "basic_pokemon") {
+      return card.kind === "pokemon" && card.is_basic;
+    }
+    return true;
+  });
+}
+
+function attachDeckBrowserDragBehavior(track) {
+  if (!track) {
+    return;
+  }
+
+  track.addEventListener("pointerdown", (event) => {
+    if (event.button !== 0) {
+      return;
+    }
+    deckBrowserDragState.pointerId = event.pointerId;
+    deckBrowserDragState.startClientX = event.clientX;
+    deckBrowserDragState.startScrollLeft = track.scrollLeft;
+    track.classList.add("is-dragging");
+    track.setPointerCapture?.(event.pointerId);
+    event.preventDefault();
+  });
+
+  track.addEventListener("pointermove", (event) => {
+    if (deckBrowserDragState.pointerId !== event.pointerId) {
+      return;
+    }
+    const deltaX = event.clientX - deckBrowserDragState.startClientX;
+    track.scrollLeft = deckBrowserDragState.startScrollLeft - deltaX;
+  });
+
+  const stopDragging = (event) => {
+    if (deckBrowserDragState.pointerId !== event.pointerId) {
+      return;
+    }
+    deckBrowserDragState.pointerId = null;
+    track.classList.remove("is-dragging");
+    track.releasePointerCapture?.(event.pointerId);
+  };
+
+  track.addEventListener("pointerup", stopDragging);
+  track.addEventListener("pointercancel", stopDragging);
+}
+
+function renderDeckBrowserOverlay(state) {
+  const overlay = document.getElementById("deck-browser-overlay");
+  if (!overlay) {
+    return;
+  }
+
+  const activeRequest = uiState.deckBrowseRequest;
+  const selectedRequest = resolveDeckBrowseRequest(state);
+  if (!activeRequest || !selectedRequest || activeRequest.sourceCardId !== selectedRequest.sourceCardId) {
+    overlay.hidden = true;
+    overlay.innerHTML = "";
+    return;
+  }
+
+  const player = state?.players?.[0];
+  const deckCards = Array.isArray(player?.deck_cards) ? player.deck_cards : [];
+  const visibleCards = activeRequest.visibleCount
+    ? deckCards.slice(0, activeRequest.visibleCount)
+    : deckCards;
+  const scopeLabel = activeRequest.scope === "top_cards"
+    ? `Top ${activeRequest.visibleCount}`
+    : "Full Deck";
+  const destinationLabel = (activeRequest.destinationZone || "hand").replaceAll("_", " ");
+
+  overlay.hidden = false;
+  overlay.innerHTML = `
+    <div class="deck-browser">
+      <div class="deck-browser__header">
+        <div class="deck-browser__copy">
+          <p class="deck-browser__eyebrow">${escapeHtml(scopeLabel)} Search</p>
+          <h3>${escapeHtml(activeRequest.sourceCardName)}</h3>
+          <p class="deck-browser__meta">Choose ${escapeHtml(String(activeRequest.chooseCount))} card${activeRequest.chooseCount === 1 ? "" : "s"} to place into ${escapeHtml(destinationLabel)}.</p>
+        </div>
+        <button type="button" class="deck-browser__close" aria-label="Close deck browser">Close</button>
+      </div>
+      <div class="deck-browser__track" aria-label="Deck cards carousel">
+        ${visibleCards
+          .map(
+            (card) => `
+              <article
+                class="deck-browser-card${cardMatchesSearchFilters(card, activeRequest.searchFilters) ? " is-match" : ""}"
+                data-kind="${escapeHtml(card.kind || "")}"
+                data-element="${escapeHtml(card.element || "")}"
+                title="${escapeHtml(card.name)}"
+              >
+                ${buildCardImageMarkup(card.image_url, card.name)}
+              </article>
+            `,
+          )
+          .join("")}
+      </div>
+    </div>
+  `;
+
+  overlay.querySelector(".deck-browser__close")?.addEventListener("click", () => {
+    uiState.deckBrowseRequest = null;
+    render(currentState);
+  });
+  attachDeckBrowserDragBehavior(overlay.querySelector(".deck-browser__track"));
 }
 
 function renderAttackDragIndicator(state) {
@@ -1844,6 +2083,7 @@ function renderLobbyBoard(state) {
 
   renderPlayerEndTurnButtonLobby();
   renderSelectedCardPreview(null);
+  renderDeckBrowserOverlay(null);
   previousState = null;
 }
 
@@ -2324,9 +2564,18 @@ function handleBoardBackgroundClick(event) {
   }
 
   const clickedInteractiveElement = event.target.closest(
-    ".mini-card, .board-card, .attack-chip-button, .end-turn-button, .resource-panel, button, select, input, label",
+    ".mini-card, .board-card, .attack-chip-button, .end-turn-button, .resource-panel, .deck-browser, button, select, input, label",
   );
   if (clickedInteractiveElement) {
+    return;
+  }
+
+  const clickedBoardSearchArea = !event.target.closest(
+    ".hand-tray, .player-side-pocket",
+  );
+  if (clickedBoardSearchArea && openDeckBrowserForSelection(currentState)) {
+    event.preventDefault();
+    event.stopPropagation();
     return;
   }
 

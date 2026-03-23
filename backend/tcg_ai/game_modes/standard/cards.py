@@ -109,6 +109,25 @@ TRAINER_EFFECT_SPECS: dict[str, tuple[EffectSpec, ...]] = {
             selection_count=1,
         ),
     ),
+    "sv1-196": (
+        EffectSpec(
+            effect_type="discard_from_hand",
+            source_zone="hand",
+            destination_zone="discard",
+            choose_count=2,
+            exclude_source_card=True,
+        ),
+        EffectSpec(
+            effect_type="search_deck",
+            source_zone="deck",
+            destination_zone="hand",
+            choose_count=1,
+            search_filters=("pokemon",),
+            shuffle_destination=True,
+            revealed_to="all",
+            changes_hidden_information=True,
+        ),
+    ),
 }
 
 ATTACK_EFFECT_SPECS: dict[tuple[str, str], tuple[AttackEffectSpec, ...]] = {

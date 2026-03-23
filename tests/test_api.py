@@ -210,6 +210,28 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(supporter_action["effect_specs"][0]["effect_type"], "draw")
         self.assertTrue(supporter_action["changes_hidden_information"])
 
+    def test_standard_ultra_ball_exposes_deck_search_metadata_and_viewer_deck_cards(self) -> None:
+        state = self.app.new_game(
+            {
+                "game_mode": "standard",
+                "human_first": True,
+                "human_deck_id": "ampharos-ex-battle-deck",
+                "seed": 1,
+            }
+        )
+
+        session = self.app.sessions.get(state["session_id"])
+        ultra_ball_id = self._move_standard_named_card_to_hand(session.state, 0, "Ultra Ball")
+        snapshot = self.app.get_game(state["session_id"])
+
+        ultra_ball = next(card for card in snapshot["players"][0]["hand"] if card["instance_id"] == ultra_ball_id)
+        self.assertEqual(ultra_ball["effect_specs"][1]["effect_type"], "search_deck")
+        self.assertEqual(ultra_ball["effect_specs"][1]["destination_zone"], "hand")
+        self.assertEqual(ultra_ball["effect_specs"][1]["search_filters"], ["pokemon"])
+        self.assertEqual(ultra_ball["effect_specs"][1]["choose_count"], 1)
+        self.assertGreater(len(snapshot["players"][0]["deck_cards"]), 0)
+        self.assertEqual(snapshot["players"][1]["deck_cards"], [])
+
     def test_standard_potion_exposes_targeted_item_actions_and_heals_the_selected_pokemon(self) -> None:
         state = self.app.new_game(
             {

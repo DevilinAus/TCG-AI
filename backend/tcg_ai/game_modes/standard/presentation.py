@@ -67,6 +67,9 @@ def _serialize_player_state(
             "count": len(player.deck),
             "face_down": True,
         },
+        "deck_cards": [
+            _serialize_card_instance(state, instance_id) for instance_id in player.deck
+        ] if player_index == viewer else [],
         "discard_count": len(player.discard),
         "discard_top": _serialize_discard_top(state, player),
         "energy_count": _count_attached_energy(player),

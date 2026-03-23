@@ -12,7 +12,7 @@ from urllib.parse import parse_qs, urlparse
 
 from .game_modes import (
     DEFAULT_GAME_MODE,
-    GameModeDefinition,
+    GameModeDefinition,   
     available_game_mode_snapshots,
     get_game_mode,
 )
