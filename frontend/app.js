@@ -2261,8 +2261,9 @@ function formatStageLabel(stage) {
   if (!stage || stage === "basic") {
     return "Basic Pokemon";
   }
-  if (stage === "stage1") {
-    return "Stage 1 Pokemon";
+  const numberedStageMatch = stage.match(/^stage(\d+)$/);
+  if (numberedStageMatch) {
+    return `Stage ${numberedStageMatch[1]} Pokemon`;
   }
   return stage.replaceAll("_", " ");
 }
@@ -2271,8 +2272,9 @@ function formatStagePillLabel(stage) {
   if (!stage || stage === "basic") {
     return "Basic";
   }
-  if (stage === "stage1") {
-    return "Stage 1";
+  const numberedStageMatch = stage.match(/^stage(\d+)$/);
+  if (numberedStageMatch) {
+    return `Stage ${numberedStageMatch[1]}`;
   }
   return stage.replaceAll("_", " ");
 }
