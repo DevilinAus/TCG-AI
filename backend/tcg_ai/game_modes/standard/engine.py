@@ -424,6 +424,8 @@ def _to_card_definition(entry: DeckCardDefinition) -> CardDefinition:
         evolves_from=entry.evolves_from,
         hp=entry.hp,
         attacks=entry.attacks,
+        weaknesses=entry.weaknesses,
+        resistances=entry.resistances,
         image_url=entry.image_url,
         card_tags=entry.card_tags,
         rules_text=entry.rules_text,
@@ -1423,6 +1425,23 @@ def _apply_attack_damage(
         state.log.append(f"Damage to {_board_target_name(state, target_pokemon)} was prevented.")
         return
 
+    target_card = get_top_card_definition(state, target_pokemon)
+    if (
+        attacker_index != target_player_index
+        and target_zone == "active"
+        and attacker_card is not None
+        and target_card is not None
+    ):
+        damage, modifier_log_lines = _apply_weakness_and_resistance(
+            damage=damage,
+            attacker_card=attacker_card,
+            target_card=target_card,
+        )
+        state.log.extend(modifier_log_lines)
+        if damage <= 0:
+            state.log.append(f"{_board_target_name(state, target_pokemon)} took 0 damage.")
+            return
+
     target_pokemon.damage += damage
     state.log.append(f"{_board_target_name(state, target_pokemon)} took {damage} damage.")
 
@@ -1460,6 +1479,32 @@ def _is_attack_damage_prevented(
         effect.effect_type == "prevent_damage_from_basic_pokemon_attacks"
         for effect in target_pokemon.lingering_effects
     )
+
+
+def _apply_weakness_and_resistance(
+    *,
+    damage: int,
+    attacker_card: CardDefinition,
+    target_card: CardDefinition,
+) -> tuple[int, list[str]]:
+    if damage <= 0 or attacker_card.element is None:
+        return max(0, damage), []
+
+    adjusted_damage = damage
+    log_lines: list[str] = []
+    for weakness in target_card.weaknesses:
+        if weakness.element == attacker_card.element:
+            previous_damage = adjusted_damage
+            adjusted_damage *= weakness.value
+            log_lines.append(f"Weakness applied: {previous_damage} -> {adjusted_damage}.")
+
+    for resistance in target_card.resistances:
+        if resistance.element == attacker_card.element:
+            previous_damage = adjusted_damage
+            adjusted_damage += resistance.value
+            log_lines.append(f"Resistance applied: {previous_damage} -> {max(0, adjusted_damage)}.")
+
+    return max(0, adjusted_damage), log_lines
 
 
 def _resolve_knockouts_after_attack(state: GameState, attacker_index: int) -> None:

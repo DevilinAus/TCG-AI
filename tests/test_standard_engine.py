@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import unittest
 from unittest.mock import patch
 
@@ -11,6 +12,7 @@ from backend.tcg_ai.game_modes.standard.engine import (
     list_legal_actions,
 )
 from backend.tcg_ai.game_modes.standard.models import PokemonInPlay
+from backend.tcg_ai.game_modes.standard.models import TypeModifier
 
 
 class StandardEngineTests(unittest.TestCase):
@@ -283,6 +285,96 @@ class StandardEngineTests(unittest.TestCase):
         self.assertEqual(state.players[1].active.damage, 10)
         self.assertEqual(state.current_player, 1)
 
+    def test_weakness_doubles_damage_to_the_opponents_active_pokemon(self) -> None:
+        state = create_game(seed=1, human_deck_id="lucario-ex-battle-deck")
+        state.setup_phase = None
+        state.current_player = 1
+        state.turn_number = 2
+        state.players[0].turns_taken = 2
+        state.players[1].turns_taken = 2
+        self._set_named_active_pokemon(state, 0, "Squawkabilly")
+        self._set_named_active_pokemon(state, 1, "Mareep")
+        state.players[1].active.attached_energy = [
+            self._find_instance_id(state, 1, "Basic Lightning Energy"),
+        ]
+
+        attack_action = next(action for action in list_legal_actions(state) if action["type"] == "attack")
+        apply_action(state, attack_action)
+
+        self.assertEqual(state.players[0].active.damage, 20)
+        self.assertIn("Weakness applied: 10 -> 20.", state.log)
+
+    def test_resistance_reduces_damage_to_the_opponents_active_pokemon(self) -> None:
+        state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck")
+        state.setup_phase = None
+        state.current_player = 1
+        state.turn_number = 2
+        state.players[0].turns_taken = 2
+        state.players[1].turns_taken = 2
+        self._set_named_active_pokemon(state, 0, "Staraptor")
+        self._set_named_active_pokemon(state, 1, "Mankey")
+        state.players[1].active.attached_energy = [
+            self._find_instance_id(state, 1, "Basic Fighting Energy"),
+        ]
+
+        attack_action = next(action for action in list_legal_actions(state) if action["type"] == "attack")
+        apply_action(state, attack_action)
+
+        self.assertEqual(state.players[0].active.damage, 0)
+        self.assertIn("Resistance applied: 30 -> 0.", state.log)
+
+    def test_weakness_is_not_applied_to_benched_pokemon(self) -> None:
+        state = create_game(seed=1, human_deck_id="lucario-ex-battle-deck")
+        state.setup_phase = None
+        state.current_player = 1
+        state.turn_number = 2
+        state.players[0].turns_taken = 2
+        state.players[1].turns_taken = 2
+        self._set_named_active_pokemon(state, 0, "Cyclizar")
+        self._set_named_bench_pokemon(state, 0, "Squawkabilly")
+        self._set_named_active_pokemon(state, 1, "Rotom")
+        state.players[1].active.attached_energy = [
+            self._find_instance_id(state, 1, "Basic Lightning Energy"),
+        ]
+
+        attack_action = next(
+            action
+            for action in list_legal_actions(state)
+            if action["type"] == "attack" and action["target_zone"] == "bench"
+        )
+        apply_action(state, attack_action)
+
+        self.assertEqual(state.players[0].bench[0].damage, 20)
+
+    def test_self_damage_ignores_weakness_and_resistance(self) -> None:
+        state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck")
+        state.setup_phase = None
+        state.current_player = 1
+        state.turn_number = 2
+        state.players[0].turns_taken = 2
+        state.players[1].turns_taken = 2
+        self._set_named_active_pokemon(state, 0, "Kilowattrel")
+        self._set_named_active_pokemon(state, 1, "Primeape")
+        primeape_instance_id = state.players[1].active.stack[-1]
+        primeape_definition = card_definition(state, primeape_instance_id)
+        state.card_definitions[primeape_definition.card_id] = replace(
+            primeape_definition,
+            weaknesses=(TypeModifier(element="fighting", value=2),),
+            resistances=(TypeModifier(element="fighting", value=-30),),
+        )
+        attack = card_definition(state, primeape_instance_id).attacks[0]
+        state.players[1].active.attached_energy = self._find_instance_ids(
+            state,
+            1,
+            "Basic Fighting Energy",
+            attack.cost,
+        )
+
+        attack_action = next(action for action in list_legal_actions(state) if action["type"] == "attack")
+        apply_action(state, attack_action)
+
+        self.assertEqual(state.players[1].active.damage, 20)
+
     def test_linear_attack_can_target_the_opposing_bench(self) -> None:
         state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck")
         state.setup_phase = None
@@ -416,7 +508,7 @@ class StandardEngineTests(unittest.TestCase):
         raging_punch = next(action for action in list_legal_actions(state) if action["type"] == "attack")
         apply_action(state, raging_punch)
 
-        self.assertEqual(state.players[0].active.damage, 70)
+        self.assertEqual(state.players[0].active.damage, 40)
         self.assertEqual(state.players[1].active.damage, 20)
 
     def test_touring_draws_two_cards(self) -> None:
@@ -473,7 +565,7 @@ class StandardEngineTests(unittest.TestCase):
         )
         apply_action(state, rage_fist)
 
-        self.assertEqual(state.players[0].active.damage, 140)
+        self.assertEqual(state.players[0].active.damage, 280)
 
     def test_kick_shot_does_nothing_on_tails(self) -> None:
         state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck")
@@ -530,7 +622,7 @@ class StandardEngineTests(unittest.TestCase):
         )
         apply_action(state, aura_sphere)
 
-        self.assertEqual(state.players[0].active.damage, 160)
+        self.assertEqual(state.players[0].active.damage, 320)
         self.assertEqual(state.players[0].bench[0].damage, 50)
 
     def test_rampaging_fang_discards_three_energy(self) -> None:

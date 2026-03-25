@@ -217,13 +217,6 @@ h3 {
   opacity: 0.62;
 }
 
-.game-mode-meta {
-  margin: 0;
-  color: var(--ink-soft);
-  font-size: 0.95rem;
-  line-height: 1.5;
-}
-
 .trainer-picker-label {
   color: var(--ink-soft);
   font-size: 0.82rem;
@@ -368,22 +361,6 @@ h3 {
   background: rgba(18, 29, 44, 0.04);
 }
 
-.status-banner {
-  margin: 0;
-  padding: 16px 18px;
-  border-radius: 20px;
-  background: linear-gradient(
-    135deg,
-    rgba(22, 33, 51, 0.98),
-    rgba(34, 51, 77, 0.92)
-  );
-  color: #f7fbff;
-  font-weight: 700;
-  line-height: 1.5;
-  box-shadow:
-    inset 0 1px 0 rgba(255, 255, 255, 0.08),
-    0 18px 36px rgba(16, 24, 36, 0.18);
-}
 
 .main-stage {
   display: grid;
@@ -544,10 +521,16 @@ h3 {
   min-height: 0;
 }
 
+.battle-log-panel {
+  min-height: 0;
+}
+
 .battle-log-panel[open] {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
   height: 100%;
+  min-height: 0;
+  overflow: hidden;
 }
 
 .support-panel > summary {
@@ -587,12 +570,35 @@ h3 {
 
 .log-list {
   display: grid;
+  align-content: start;
   gap: 12px;
-  flex: 1;
   min-height: 0;
-  max-height: none;
-  overflow: auto;
+  max-height: 100%;
+  overflow-y: auto;
+  overflow-x: hidden;
   padding: 0 20px 20px;
+  overscroll-behavior: contain;
+  scrollbar-gutter: stable;
+  scrollbar-width: auto;
+}
+
+.log-list::-webkit-scrollbar {
+  width: 12px;
+}
+
+.log-list::-webkit-scrollbar-track {
+  background: rgba(18, 29, 44, 0.06);
+  border-radius: 999px;
+}
+
+.log-list::-webkit-scrollbar-thumb {
+  background: rgba(63, 134, 168, 0.44);
+  border: 2px solid rgba(255, 255, 255, 0.72);
+  border-radius: 999px;
+}
+
+.log-list::-webkit-scrollbar-thumb:hover {
+  background: rgba(63, 134, 168, 0.62);
 }
 
 .debug-actions {
@@ -2749,10 +2755,6 @@ h3 {
   .table-stage {
     padding: 18px;
     border-radius: 24px;
-  }
-
-  .status-banner {
-    font-size: 0.94rem;
   }
 
   .player-active-pocket {

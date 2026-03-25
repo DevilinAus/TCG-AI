@@ -76,7 +76,7 @@ GAME_MODES: dict[str, GameModeDefinition] = {
     "standard": GameModeDefinition(
         game_mode="standard",
         name="Standard",
-        description="Full-size 60-card ex Battle Deck opening-hand prototype.",
+        description="",
         available=True,
         uses_opening_roll=False,
         create_game=standard_engine.create_game,
