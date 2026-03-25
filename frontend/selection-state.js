@@ -269,17 +269,30 @@
     return matchingActions.length === 1 ? matchingActions[0] : null;
   }
 
-  function findBackgroundPlayActionForSelection(state, selectedCardId, aiIsRunning) {
+  function actionMatchesSelectedDiscardIds(action, selectedDiscardIds = []) {
+    const requiredDiscardIds = action?.action?.discard_from_hand_ids;
+    if (!Array.isArray(requiredDiscardIds) || !requiredDiscardIds.length) {
+      return !selectedDiscardIds.length;
+    }
+    if (requiredDiscardIds.length !== selectedDiscardIds.length) {
+      return false;
+    }
+    const selectedSet = new Set(selectedDiscardIds);
+    return requiredDiscardIds.every((instanceId) => selectedSet.has(instanceId));
+  }
+
+  function findBackgroundPlayActionForSelection(state, selectedCardId, aiIsRunning, selectedDiscardIds = []) {
     if (!state || !selectedCardId || aiIsRunning) {
       return null;
     }
 
     const matchingActions = state.legal_actions.filter(
       (action) =>
-        action.type === "play_supporter" &&
+        (action.type === "play_supporter" || action.type === "play_item") &&
         action.source?.zone === "hand" &&
         action.source.instance_id === selectedCardId &&
-        !action.target,
+        !action.target &&
+        actionMatchesSelectedDiscardIds(action, selectedDiscardIds),
     );
 
     return matchingActions.length === 1 ? matchingActions[0] : null;
@@ -346,8 +359,17 @@
           action.source?.zone === "hand" &&
           action.source.instance_id === uiState.selectedCardId,
       );
-      const directActions = fromSelectedCard.filter((action) => !action.target);
+      const directActions = fromSelectedCard
+        .filter((action) => !action.target)
+        .filter((action) => !Array.isArray(action?.action?.search_deck_ids))
+        .filter((action) => actionMatchesSelectedDiscardIds(action, uiState.selectedDiscardIds || []));
       const targetedActions = fromSelectedCard.filter((action) => !!action.target);
+      const discardCostActions = fromSelectedCard.filter(
+        (action) => !action.target && Array.isArray(action?.action?.discard_from_hand_ids),
+      );
+      const requiredDiscardCount = discardCostActions.length
+        ? Math.max(...discardCostActions.map((action) => (action.action.discard_from_hand_ids || []).length))
+        : 0;
 
       if (targetedActions.length && !uiState.selectedBoardTarget) {
         instructions.push("Choose a highlighted target on your board to finish this play.");
@@ -362,7 +384,14 @@
           collectUniqueRefs(targetedActions.map((action) => action.target), highlightedTargets);
         }
       } else {
-        actions = fromSelectedCard;
+        actions = directActions;
+      }
+
+      if (
+        requiredDiscardCount > 0 &&
+        (!Array.isArray(uiState.selectedDiscardIds) || uiState.selectedDiscardIds.length < requiredDiscardCount)
+      ) {
+        instructions.push(`Select ${requiredDiscardCount} cards from your hand to discard before playing this card.`);
       }
     } else if (uiState.selectedBoardTarget) {
       const pendingAttackActionIds = new Set(uiState.pendingAttackActionIds || []);

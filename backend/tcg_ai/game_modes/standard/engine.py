@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from itertools import combinations
 import random
 import re
 from typing import Any
@@ -27,7 +28,6 @@ from .models import (
 OPENING_HAND_SIZE = 7
 BENCH_LIMIT = 5
 _DAMAGE_PATTERN = re.compile(r"\d+")
-_DYNAMIC_ACTION_FIELDS = frozenset({"discard_from_hand_ids", "search_result_ids"})
 
 
 def create_game(
@@ -177,10 +177,8 @@ def apply_action_for_player(
     player_index: int,
 ) -> GameState:
     legal_actions = list_legal_actions(state, player_index=player_index)
-    resolved_action = _resolve_submitted_action(state, player_index, action, legal_actions)
-    if resolved_action is None:
+    if action not in legal_actions:
         raise ValueError("Illegal action.")
-    action = resolved_action
 
     player = state.players[player_index]
     actor_name = "You" if player_index == 0 else player.name
@@ -322,18 +320,28 @@ def action_id_for(action: dict[str, Any]) -> str:
         return f"evolve:{action['hand_card_id']}:active"
     if action["type"] == "play_item":
         target_zone = action.get("target_zone")
+        discard_suffix = _discard_action_id_suffix(action)
+        search_suffix = _search_action_id_suffix(action)
         if target_zone == "bench":
-            return f"play_item:{action['hand_card_id']}:bench:{action['target_bench_index']}"
+            return (
+                f"play_item:{action['hand_card_id']}:bench:{action['target_bench_index']}"
+                f"{discard_suffix}{search_suffix}"
+            )
         if target_zone == "active":
-            return f"play_item:{action['hand_card_id']}:active"
-        return f"play_item:{action['hand_card_id']}"
+            return f"play_item:{action['hand_card_id']}:active{discard_suffix}{search_suffix}"
+        return f"play_item:{action['hand_card_id']}{discard_suffix}{search_suffix}"
     if action["type"] == "play_supporter":
         target_zone = action.get("target_zone")
+        discard_suffix = _discard_action_id_suffix(action)
+        search_suffix = _search_action_id_suffix(action)
         if target_zone == "bench":
-            return f"play_supporter:{action['hand_card_id']}:bench:{action['target_bench_index']}"
+            return (
+                f"play_supporter:{action['hand_card_id']}:bench:{action['target_bench_index']}"
+                f"{discard_suffix}{search_suffix}"
+            )
         if target_zone == "active":
-            return f"play_supporter:{action['hand_card_id']}:active"
-        return f"play_supporter:{action['hand_card_id']}"
+            return f"play_supporter:{action['hand_card_id']}:active{discard_suffix}{search_suffix}"
+        return f"play_supporter:{action['hand_card_id']}{discard_suffix}{search_suffix}"
     if action["type"] == "attack":
         suffix_parts = [f"attack:{action['attack_index']}"]
         target_player_index = action.get("target_player_index")
@@ -350,134 +358,18 @@ def action_id_for(action: dict[str, Any]) -> str:
     return action["type"]
 
 
-def _resolve_submitted_action(
-    state: GameState,
-    player_index: int,
-    submitted_action: dict[str, Any],
-    legal_actions: list[dict[str, Any]],
-) -> dict[str, Any] | None:
-    submitted_base_action = _base_action_payload(submitted_action)
-    for legal_action in legal_actions:
-        if submitted_base_action != legal_action:
-            continue
-        return _resolve_dynamic_action_fields(state, player_index, legal_action, submitted_action)
-    return None
+def _discard_action_id_suffix(action: dict[str, Any]) -> str:
+    discard_ids = action.get("discard_from_hand_ids")
+    if not discard_ids:
+        return ""
+    return f":discard:{','.join(discard_ids)}"
 
 
-def _base_action_payload(action: dict[str, Any]) -> dict[str, Any]:
-    return {
-        key: value
-        for key, value in action.items()
-        if key not in _DYNAMIC_ACTION_FIELDS
-    }
-
-
-def _resolve_dynamic_action_fields(
-    state: GameState,
-    player_index: int,
-    legal_action: dict[str, Any],
-    submitted_action: dict[str, Any],
-) -> dict[str, Any]:
-    if legal_action["type"] not in {"play_supporter", "play_item"}:
-        return dict(legal_action)
-
-    hand_card_id = legal_action.get("hand_card_id")
-    if not isinstance(hand_card_id, str):
-        return dict(legal_action)
-
-    player = state.players[player_index]
-    card = card_definition(state, hand_card_id)
-    resolved_action = dict(legal_action)
-    auto_select = player_index != 0
-
-    for effect_spec in card.effect_specs:
-        if effect_spec.effect_type == "discard_from_hand":
-            resolved_action["discard_from_hand_ids"] = _resolve_discard_from_hand_selection(
-                player,
-                hand_card_id,
-                effect_spec,
-                submitted_action,
-                auto_select=auto_select,
-            )
-            continue
-
-        if effect_spec.effect_type == "search_deck":
-            resolved_action["search_result_ids"] = _resolve_search_deck_selection(
-                state,
-                player,
-                effect_spec,
-                submitted_action,
-                auto_select=auto_select,
-            )
-
-    return resolved_action
-
-
-def _resolve_discard_from_hand_selection(
-    player: PlayerState,
-    source_card_id: str,
-    effect_spec: EffectSpec,
-    submitted_action: dict[str, Any],
-    *,
-    auto_select: bool,
-) -> list[str]:
-    required_count = _required_choice_count(effect_spec)
-    candidate_ids = _available_hand_choice_ids(player, source_card_id, effect_spec)
-    if len(candidate_ids) < required_count:
-        raise ValueError("Not enough cards are available to discard from hand.")
-
-    selected_ids = _coerce_action_card_ids(submitted_action.get("discard_from_hand_ids"))
-    if not selected_ids:
-        if not auto_select:
-            raise ValueError("This action requires cards to discard from hand.")
-        return candidate_ids[:required_count]
-
-    if len(selected_ids) != required_count or len(set(selected_ids)) != len(selected_ids):
-        raise ValueError("Discard selections must match the required card count.")
-    if any(instance_id not in candidate_ids for instance_id in selected_ids):
-        raise ValueError("Discard selections must come from the acting player's hand.")
-    return selected_ids
-
-
-def _resolve_search_deck_selection(
-    state: GameState,
-    player: PlayerState,
-    effect_spec: EffectSpec,
-    submitted_action: dict[str, Any],
-    *,
-    auto_select: bool,
-) -> list[str]:
-    required_count = _required_choice_count(effect_spec)
-    candidate_ids = _available_deck_choice_ids(state, player, effect_spec)
-    if len(candidate_ids) < required_count:
-        raise ValueError("Not enough cards are available in deck for this search.")
-
-    selected_ids = _coerce_action_card_ids(submitted_action.get("search_result_ids"))
-    if not selected_ids:
-        if not auto_select:
-            raise ValueError("This action requires cards to be chosen from deck.")
-        return candidate_ids[:required_count]
-
-    if len(selected_ids) != required_count or len(set(selected_ids)) != len(selected_ids):
-        raise ValueError("Deck search selections must match the required card count.")
-    if any(instance_id not in candidate_ids for instance_id in selected_ids):
-        raise ValueError("Deck search selections must match the card filter.")
-    return selected_ids
-
-
-def _required_choice_count(effect_spec: EffectSpec) -> int:
-    count = effect_spec.choose_count if effect_spec.choose_count is not None else effect_spec.count
-    if not isinstance(count, int) or count <= 0:
-        raise ValueError(f"Unsupported choice count for effect: {effect_spec.effect_type}")
-    return count
-
-
-def _coerce_action_card_ids(value: Any) -> list[str]:
-    if value is None:
-        return []
-    if not isinstance(value, list) or any(not isinstance(item, str) for item in value):
-        raise ValueError("Action card selections must be provided as a list of instance ids.")
-    return list(value)
+def _search_action_id_suffix(action: dict[str, Any]) -> str:
+    search_ids = action.get("search_deck_ids")
+    if not search_ids:
+        return ""
+    return f":search:{','.join(search_ids)}"
 
 
 def card_definition(state: GameState, instance_id: str) -> CardDefinition:
@@ -636,28 +528,6 @@ def _resolve_effect_specs(
             )
             continue
 
-        if effect_spec.effect_type == "discard_from_hand":
-            discarded = _discard_cards_from_hand_for_effect(player, action, effect_spec)
-            state.log.append(
-                f"{actor_name} discarded {len(discarded)} card"
-                f"{'' if len(discarded) == 1 else 's'} from hand."
-            )
-            continue
-
-        if effect_spec.effect_type == "search_deck":
-            moved_cards = _move_cards_from_deck_for_effect(state, player, action, effect_spec)
-            moved_names = [card_definition(state, instance_id).name for instance_id in moved_cards]
-            if moved_names:
-                if len(moved_names) == 1:
-                    state.log.append(f"{actor_name} searched the deck for {moved_names[0]} and put it into hand.")
-                else:
-                    card_list = ", ".join(moved_names)
-                    state.log.append(f"{actor_name} searched the deck for {card_list} and put them into hand.")
-            if effect_spec.shuffle_destination:
-                state.rng.shuffle(player.deck)
-                state.log.append(f"{actor_name} shuffled the deck.")
-            continue
-
         if effect_spec.effect_type == "heal_damage":
             heal_amount = effect_spec.count or 0
             target = _resolve_board_target(player, action)
@@ -687,51 +557,61 @@ def _resolve_effect_specs(
             state.log.append(f"{actor_name} switched to {_board_target_name(state, player.active)}.")
             continue
 
+        if effect_spec.effect_type == "discard_from_hand":
+            if effect_spec.source_zone != "hand" or effect_spec.destination_zone != "discard":
+                raise ValueError(f"Unsupported discard effect configuration: {effect_spec}")
+            choose_count = int(effect_spec.choose_count or 0)
+            if choose_count <= 0:
+                raise ValueError("Discard effect must require at least one card.")
+            discard_ids = list(action.get("discard_from_hand_ids") or []) if action else []
+            if len(discard_ids) != choose_count:
+                raise ValueError("Discard effect is missing required selected cards.")
+            if len(set(discard_ids)) != len(discard_ids):
+                raise ValueError("Discard selection contains duplicate cards.")
+            source_card_id = action.get("hand_card_id") if action else None
+            if effect_spec.exclude_source_card and source_card_id in discard_ids:
+                raise ValueError("Discard selection cannot include the source card.")
+            for discard_id in discard_ids:
+                if discard_id not in player.hand:
+                    raise ValueError("Discard selection contains a card that is not in hand.")
+            for discard_id in discard_ids:
+                player.hand.remove(discard_id)
+                player.discard.append(discard_id)
+            state.log.append(
+                f"{actor_name} discarded {len(discard_ids)} card{'' if len(discard_ids) == 1 else 's'} from hand."
+            )
+            continue
+
+        if effect_spec.effect_type == "search_deck":
+            if effect_spec.source_zone != "deck":
+                raise ValueError(f"Unsupported search effect configuration: {effect_spec}")
+            choose_count = max(0, int(effect_spec.choose_count or 1))
+            chosen_ids = list(action.get("search_deck_ids") or []) if action else []
+            if len(chosen_ids) != choose_count:
+                raise ValueError("Search effect is missing required selected cards.")
+            if len(set(chosen_ids)) != len(chosen_ids):
+                raise ValueError("Search selection contains duplicate cards.")
+            for chosen_id in chosen_ids:
+                if chosen_id not in player.deck:
+                    raise ValueError("Search selection contains a card that is not in deck.")
+                if not _card_matches_search_filters(state, chosen_id, effect_spec.search_filters):
+                    raise ValueError("Search selection contains a card that does not match filters.")
+            destination_zone = effect_spec.destination_zone or "hand"
+            for chosen_id in chosen_ids:
+                player.deck.remove(chosen_id)
+                if destination_zone == "hand":
+                    player.hand.append(chosen_id)
+                else:
+                    raise ValueError(f"Unsupported search destination zone: {destination_zone}")
+            if effect_spec.shuffle_destination:
+                state.rng.shuffle(player.deck)
+            state.log.append(
+                f"{actor_name} searched the deck and added {len(chosen_ids)} card"
+                f"{'' if len(chosen_ids) == 1 else 's'} to hand."
+            )
+            continue
+
         raise ValueError(f"Unsupported Standard effect type: {effect_spec.effect_type}")
-
-
-def _discard_cards_from_hand_for_effect(
-    player: PlayerState,
-    action: dict[str, Any] | None,
-    effect_spec: EffectSpec,
-) -> list[str]:
-    if action is None:
-        raise ValueError("Discarding from hand requires an action payload.")
-
-    selected_ids = _coerce_action_card_ids(action.get("discard_from_hand_ids"))
-    required_count = _required_choice_count(effect_spec)
-    if len(selected_ids) != required_count:
-        raise ValueError("Discard effect is missing the required number of selected cards.")
-
-    discarded: list[str] = []
-    for instance_id in selected_ids:
-        player.discard.append(_remove_from_hand(player, instance_id))
-        discarded.append(instance_id)
-    return discarded
-
-
-def _move_cards_from_deck_for_effect(
-    state: GameState,
-    player: PlayerState,
-    action: dict[str, Any] | None,
-    effect_spec: EffectSpec,
-) -> list[str]:
-    if action is None:
-        raise ValueError("Searching the deck requires an action payload.")
-
-    selected_ids = _coerce_action_card_ids(action.get("search_result_ids"))
-    required_count = _required_choice_count(effect_spec)
-    if len(selected_ids) != required_count:
-        raise ValueError("Search effect is missing the required number of selected cards.")
-    if effect_spec.source_zone != "deck" or effect_spec.destination_zone != "hand":
-        raise ValueError(f"Unsupported search effect configuration: {effect_spec}")
-
-    moved_cards: list[str] = []
-    for instance_id in selected_ids:
-        player.deck.remove(instance_id)
-        player.hand.append(instance_id)
-        moved_cards.append(instance_id)
-    return moved_cards
 
 
 def _list_bench_basic_actions(
@@ -843,6 +723,8 @@ def _list_trainer_actions(
         card = card_definition(state, instance_id)
         if card.kind != "trainer" or not card.effect_specs:
             continue
+        if not _supports_trainer_effect_specs(card.effect_specs):
+            continue
 
         is_supporter = "supporter" in card.card_tags
         is_item = "item" in card.card_tags
@@ -852,35 +734,143 @@ def _list_trainer_actions(
             continue
 
         targeted_actions = _list_targeted_trainer_actions(state, player_index, instance_id, card)
+        base_actions: list[dict[str, Any]]
         if targeted_actions:
-            actions.extend(targeted_actions)
-            continue
-
-        if any(
-            effect_spec.options
-            or effect_spec.selection_count is not None
-            or effect_spec.destination_position is not None
-            for effect_spec in card.effect_specs
-        ):
-            continue
-        if not _can_resolve_non_targeted_trainer_effects(state, player_index, instance_id, card.effect_specs):
-            continue
-
-        if is_supporter:
-            action_type = "play_supporter"
-        elif is_item:
-            action_type = "play_item"
+            base_actions = targeted_actions
         else:
-            continue
-
-        actions.append(
-            {
-                "type": action_type,
-                "hand_card_id": instance_id,
-                "label": f"Play {card.name}",
-            }
+            if any(
+                effect_spec.options
+                or effect_spec.selection_count is not None
+                or effect_spec.destination_position is not None
+                for effect_spec in card.effect_specs
+            ):
+                continue
+            if is_supporter:
+                action_type = "play_supporter"
+            elif is_item:
+                action_type = "play_item"
+            else:
+                continue
+            base_actions = [
+                {
+                    "type": action_type,
+                    "hand_card_id": instance_id,
+                    "label": f"Play {card.name}",
+                }
+            ]
+        discard_expanded = _expand_trainer_actions_for_hand_discard_costs(
+            state,
+            player,
+            card,
+            base_actions,
+            instance_id,
         )
+        actions.extend(_expand_trainer_actions_for_search_choices(state, player, card, discard_expanded))
     return actions
+
+
+def _supports_trainer_effect_specs(effect_specs: tuple[EffectSpec, ...]) -> bool:
+    supported_effect_types = {
+        "draw",
+        "shuffle_zone_into_deck",
+        "heal_damage",
+        "switch_active_with_bench",
+        "discard_from_hand",
+        "search_deck",
+    }
+    return all(effect_spec.effect_type in supported_effect_types for effect_spec in effect_specs)
+
+
+def _expand_trainer_actions_for_hand_discard_costs(
+    state: GameState,
+    player: PlayerState,
+    card: CardDefinition,
+    base_actions: list[dict[str, Any]],
+    source_instance_id: str,
+) -> list[dict[str, Any]]:
+    del state
+    discard_effects = [
+        effect_spec
+        for effect_spec in card.effect_specs
+        if effect_spec.effect_type == "discard_from_hand"
+    ]
+    expanded_actions = list(base_actions)
+    for discard_effect in discard_effects:
+        if discard_effect.source_zone != "hand" or discard_effect.destination_zone != "discard":
+            return []
+        choose_count = int(discard_effect.choose_count or 0)
+        if choose_count <= 0:
+            return []
+        candidate_ids = [
+            instance_id
+            for instance_id in player.hand
+            if not (discard_effect.exclude_source_card and instance_id == source_instance_id)
+        ]
+        if len(candidate_ids) < choose_count:
+            return []
+        expanded_actions = [
+            {
+                **action,
+                "discard_from_hand_ids": list(discard_combo),
+            }
+            for action in expanded_actions
+            for discard_combo in combinations(candidate_ids, choose_count)
+        ]
+        if not expanded_actions:
+            return []
+    return expanded_actions
+
+
+def _expand_trainer_actions_for_search_choices(
+    state: GameState,
+    player: PlayerState,
+    card: CardDefinition,
+    base_actions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    search_effects = [
+        effect_spec
+        for effect_spec in card.effect_specs
+        if effect_spec.effect_type == "search_deck"
+    ]
+    expanded_actions = list(base_actions)
+    for search_effect in search_effects:
+        if search_effect.source_zone != "deck":
+            return []
+        choose_count = max(0, int(search_effect.choose_count or 1))
+        candidate_ids = [
+            instance_id
+            for instance_id in player.deck
+            if _card_matches_search_filters(state, instance_id, search_effect.search_filters)
+        ]
+        if len(candidate_ids) < choose_count:
+            return []
+        expanded_actions = [
+            {
+                **action,
+                "search_deck_ids": list(search_combo),
+            }
+            for action in expanded_actions
+            for search_combo in combinations(candidate_ids, choose_count)
+        ]
+        if not expanded_actions:
+            return []
+    return expanded_actions
+
+
+def _card_matches_search_filters(
+    state: GameState,
+    instance_id: str,
+    search_filters: tuple[str, ...],
+) -> bool:
+    card = card_definition(state, instance_id)
+    if not search_filters:
+        return True
+    for search_filter in search_filters:
+        if search_filter == "pokemon" and card.kind != "pokemon":
+            return False
+        if search_filter == "basic_pokemon" and (card.kind != "pokemon" or not card.is_basic):
+            return False
+    return True
 
 
 def _supporters_blocked_for_turn(state: GameState, player_index: int) -> bool:
@@ -940,64 +930,6 @@ def _list_targeted_trainer_actions(
             return actions
 
     return []
-
-
-def _can_resolve_non_targeted_trainer_effects(
-    state: GameState,
-    player_index: int,
-    source_card_id: str,
-    effect_specs: tuple[EffectSpec, ...],
-) -> bool:
-    player = state.players[player_index]
-    for effect_spec in effect_specs:
-        if effect_spec.effect_type in {"draw", "shuffle_zone_into_deck"}:
-            continue
-        if effect_spec.effect_type == "discard_from_hand":
-            if len(_available_hand_choice_ids(player, source_card_id, effect_spec)) < _required_choice_count(effect_spec):
-                return False
-            continue
-        if effect_spec.effect_type == "search_deck":
-            if len(_available_deck_choice_ids(state, player, effect_spec)) < _required_choice_count(effect_spec):
-                return False
-            continue
-        return False
-    return True
-
-
-def _available_hand_choice_ids(
-    player: PlayerState,
-    source_card_id: str,
-    effect_spec: EffectSpec,
-) -> list[str]:
-    return [
-        instance_id
-        for instance_id in player.hand
-        if not (effect_spec.exclude_source_card and instance_id == source_card_id)
-    ]
-
-
-def _available_deck_choice_ids(
-    state: GameState,
-    player: PlayerState,
-    effect_spec: EffectSpec,
-) -> list[str]:
-    return [
-        instance_id
-        for instance_id in player.deck
-        if _card_matches_effect_filters(card_definition(state, instance_id), effect_spec.search_filters)
-    ]
-
-
-def _card_matches_effect_filters(card: CardDefinition, search_filters: tuple[str, ...]) -> bool:
-    if not search_filters:
-        return True
-
-    for search_filter in search_filters:
-        if search_filter == "pokemon" and card.kind != "pokemon":
-            return False
-        if search_filter == "basic_pokemon" and (card.kind != "pokemon" or not card.is_basic):
-            return False
-    return True
 
 
 def _list_attack_actions(
