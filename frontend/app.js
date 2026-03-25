@@ -1371,7 +1371,10 @@ function attachDeckBrowserDragBehavior(track) {
     if (event.button !== 0) {
       return;
     }
-    if (event.target instanceof Element && event.target.closest(".deck-browser-card.is-selectable")) {
+    if (
+      event.target instanceof Element &&
+      event.target.closest(".deck-browser-card.is-selectable, .mini-card.is-clickable")
+    ) {
       return;
     }
     deckBrowserDragState.pointerId = event.pointerId;
