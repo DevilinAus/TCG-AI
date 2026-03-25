@@ -61,6 +61,12 @@ class EffectSpec:
 
 
 @dataclass(frozen=True)
+class TypeModifier:
+    element: str
+    value: int
+
+
+@dataclass(frozen=True)
 class CardDefinition:
     card_id: str
     name: str
@@ -71,6 +77,8 @@ class CardDefinition:
     evolves_from: str | None = None
     hp: int | None = None
     attacks: tuple[AttackDefinition, ...] = ()
+    weaknesses: tuple[TypeModifier, ...] = ()
+    resistances: tuple[TypeModifier, ...] = ()
     image_url: str | None = None
     card_tags: tuple[str, ...] = ()
     rules_text: tuple[str, ...] = ()

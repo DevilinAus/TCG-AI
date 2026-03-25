@@ -490,8 +490,7 @@ function usesSharedEnergyPool(state) {
 
 function renderAppIdentity(state) {
   const appTitle = document.getElementById("app-title");
-  const gameModeMeta = document.getElementById("game-mode-meta");
-  if (!appTitle || !gameModeMeta) {
+  if (!appTitle) {
     return;
   }
 
@@ -509,12 +508,6 @@ function renderAppIdentity(state) {
       </button>
     `)
     .join("");
-
-  const selectedMode =
-    modes.find((mode) => mode.id === selectedModeId) ||
-    modes.find((mode) => mode.selected) ||
-    null;
-  gameModeMeta.textContent = selectedMode?.description || "Choose the game board for your next battle.";
 
   for (const button of appTitle.querySelectorAll("[data-game-mode]")) {
     button.addEventListener("click", () => handleGameModeChange(button.dataset.gameMode || null));
@@ -2455,16 +2448,12 @@ function renderTrainerPicker(state) {
   const selectedTrainer =
     trainers.find((trainer) => trainer.id === selectedTrainerId) || state.ai_trainer || null;
   if (!selectedTrainer) {
-    trainerMeta.textContent = "Choose a gym leader for your next battle.";
+    trainerMeta.textContent = "";
     trainerProgress.hidden = true;
     return;
   }
 
-  const isCurrentOpponent = state.ai_trainer?.id === selectedTrainer.id;
-  const prefix = isCurrentOpponent ? "Current opponent" : "Next battle";
-  trainerMeta.textContent =
-    `${prefix}: ${selectedTrainer.name} • Lv. ${selectedTrainer.level} • ` +
-    `${selectedTrainer.experience} XP • ${selectedTrainer.specialty} specialist`;
+  trainerMeta.textContent = "";
 
   const progress = getTrainerLevelProgress(selectedTrainer);
   trainerProgress.hidden = false;
@@ -3069,7 +3058,10 @@ function makeStatusMessage(state, context) {
 }
 
 function updateStatus(message) {
-  document.getElementById("status-banner").textContent = message;
+  const statusBanner = document.getElementById("status-banner");
+  if (statusBanner) {
+    statusBanner.textContent = message;
+  }
 }
 
 function handlePlayerBenchZoneClick(event) {

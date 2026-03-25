@@ -4,8 +4,9 @@ from dataclasses import dataclass
 from functools import lru_cache
 import json
 from pathlib import Path
+import re
 
-from .models import AttackDefinition, AttackEffectSpec, EffectSpec
+from .models import AttackDefinition, AttackEffectSpec, EffectSpec, TypeModifier
 
 PROJECT_ROOT = Path(__file__).resolve().parents[4]
 DATA_ROOT = PROJECT_ROOT / "backend" / "tcg_ai" / "game_modes" / "standard" / "data"
@@ -27,6 +28,8 @@ ELEMENT_BY_CATEGORY = {
     "Psychic": "psychic",
     "Water": "water",
 }
+_TYPE_MULTIPLIER_PATTERN = re.compile(r"[x×]\s*(\d+)", re.IGNORECASE)
+_SIGNED_NUMBER_PATTERN = re.compile(r"([+-]?\d+)")
 
 
 @dataclass(frozen=True)
@@ -53,6 +56,8 @@ class DeckCardDefinition:
     evolves_from: str | None
     hp: int | None
     attacks: tuple[AttackDefinition, ...]
+    weaknesses: tuple[TypeModifier, ...]
+    resistances: tuple[TypeModifier, ...]
     image_url: str | None
     card_tags: tuple[str, ...]
     rules_text: tuple[str, ...]
@@ -470,6 +475,43 @@ def _catalog_attacks(card_id: str, kind: str) -> tuple[AttackDefinition, ...]:
     return tuple(definitions)
 
 
+def _catalog_type_modifiers(card_id: str, field_name: str) -> tuple[TypeModifier, ...]:
+    card = _load_card_catalog().get(card_id)
+    if card is None:
+        raise ValueError(f"Missing Standard catalog data for card '{card_id}'.")
+
+    raw_modifiers = card.get(field_name, [])
+    if not isinstance(raw_modifiers, list):
+        return ()
+
+    modifiers: list[TypeModifier] = []
+    for raw_modifier in raw_modifiers:
+        if not isinstance(raw_modifier, dict):
+            continue
+        raw_type = raw_modifier.get("type")
+        raw_value = raw_modifier.get("value")
+        if not isinstance(raw_type, str) or not isinstance(raw_value, str):
+            continue
+        element = ELEMENT_BY_CATEGORY.get(raw_type)
+        value = _parse_type_modifier_value(raw_value)
+        if element is None or value is None:
+            continue
+        modifiers.append(TypeModifier(element=element, value=value))
+    return tuple(modifiers)
+
+
+def _parse_type_modifier_value(raw_value: str) -> int | None:
+    multiplier_match = _TYPE_MULTIPLIER_PATTERN.search(raw_value)
+    if multiplier_match is not None:
+        return int(multiplier_match.group(1))
+
+    amount_match = _SIGNED_NUMBER_PATTERN.search(raw_value)
+    if amount_match is not None:
+        return int(amount_match.group(1))
+
+    return None
+
+
 def _catalog_card_tags(card_id: str) -> tuple[str, ...]:
     card = _load_card_catalog().get(card_id)
     if card is None:
@@ -566,6 +608,8 @@ def load_deck_cards(deck_id: str) -> tuple[DeckCardDefinition, ...]:
                 evolves_from=_catalog_evolves_from(card_id, kind),
                 hp=_catalog_hp(card_id, kind),
                 attacks=_catalog_attacks(card_id, kind),
+                weaknesses=_catalog_type_modifiers(card_id, "weaknesses"),
+                resistances=_catalog_type_modifiers(card_id, "resistances"),
                 image_url=image_url if isinstance(image_url, str) and image_url else None,
                 card_tags=_catalog_card_tags(card_id),
                 rules_text=_catalog_rules_text(card_id),
