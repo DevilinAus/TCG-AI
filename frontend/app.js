@@ -17,7 +17,7 @@ const uiState = {
   selectedBoardTarget: null,
   pendingAttackActionIds: [],
   availableContextActions: [],
-  deckBrowseRequest: null,
+  trainerWorkflow: null,
   selectedGameModeId: null,
   selectedTrainerId: null,
   selectedHumanDeckId: null,
@@ -299,7 +299,7 @@ async function newGame() {
   }
 }
 
-async function submitAction(actionView) {
+async function submitActionPayload(action, options = {}) {
   if (!currentState || aiIsRunning) {
     return;
   }
@@ -307,14 +307,14 @@ async function submitAction(actionView) {
   const requestEpoch = stateRequestEpoch;
   try {
     aiAutoRunPaused = false;
-    if (actionView.type === "attack" || actionView.type === "mulligan") {
+    if (options.resetSelectionsBeforeSubmit) {
       resetSelections();
     }
     const payload = await requestJson("/api/action", {
       method: "POST",
       body: JSON.stringify({
         session_id: currentState.session_id,
-        action: actionView.action,
+        action,
       }),
     });
     if (requestEpoch !== stateRequestEpoch) {
@@ -330,6 +330,19 @@ async function submitAction(actionView) {
     }
     updateStatus(error.message);
   }
+}
+
+async function submitAction(actionView) {
+  if (!currentState || aiIsRunning) {
+    return;
+  }
+  if (maybeStartTrainerWorkflowForAction(currentState, actionView)) {
+    return;
+  }
+
+  await submitActionPayload(actionView.action, {
+    resetSelectionsBeforeSubmit: actionView.type === "attack" || actionView.type === "mulligan",
+  });
 }
 
 async function runAiTurn() {
@@ -598,7 +611,7 @@ function resetSelections() {
   uiState.selectedBoardTarget = null;
   uiState.pendingAttackActionIds = [];
   uiState.availableContextActions = [];
-  uiState.deckBrowseRequest = null;
+  uiState.trainerWorkflow = null;
 }
 
 function sanitizeSelections(state) {
@@ -610,11 +623,9 @@ function sanitizeSelections(state) {
       (actionView) =>
         actionView.action_id === actionId &&
         refsMatch(actionView.source, uiState.selectedBoardTarget),
-    ),
+      ),
   );
-  if (!resolveDeckBrowseRequest(state, uiState.selectedCardId)) {
-    uiState.deckBrowseRequest = null;
-  }
+  syncTrainerWorkflowState(state);
 }
 
 function render(state) {
@@ -1095,52 +1106,6 @@ function renderSelectedCardPreview(state) {
   previewElement.appendChild(card);
 }
 
-function resolveDeckBrowseRequest(state, sourceCardId = uiState.selectedCardId) {
-  const player = state?.players?.[0];
-  if (!player || !sourceCardId) {
-    return null;
-  }
-
-  const handCard = player.hand?.find((card) => card.instance_id === sourceCardId);
-  if (!handCard) {
-    return null;
-  }
-
-  const searchEffect = (handCard.effect_specs || []).find(
-    (effectSpec) =>
-      effectSpec.effect_type === "search_deck" &&
-      effectSpec.source_zone === "deck" &&
-      effectSpec.destination_zone,
-  );
-  if (!searchEffect) {
-    return null;
-  }
-
-  const visibleCount = Number.isInteger(searchEffect.count) && searchEffect.count > 0
-    ? searchEffect.count
-    : null;
-  return {
-    sourceCardId,
-    sourceCardName: handCard.name,
-    sourceZone: searchEffect.source_zone || "deck",
-    scope: visibleCount ? "top_cards" : "full_deck",
-    visibleCount,
-    chooseCount: Number.isInteger(searchEffect.choose_count) ? searchEffect.choose_count : 1,
-    destinationZone: searchEffect.destination_zone || "hand",
-    searchFilters: Array.isArray(searchEffect.search_filters) ? searchEffect.search_filters : [],
-  };
-}
-
-function openDeckBrowserForSelection(state) {
-  const request = resolveDeckBrowseRequest(state);
-  if (!request) {
-    return false;
-  }
-  uiState.deckBrowseRequest = request;
-  render(currentState);
-  return true;
-}
-
 function cardMatchesSearchFilters(card, searchFilters) {
   if (!Array.isArray(searchFilters) || !searchFilters.length) {
     return true;
@@ -1157,6 +1122,256 @@ function cardMatchesSearchFilters(card, searchFilters) {
   });
 }
 
+function resolveTrainerActionView(state, sourceCardId = uiState.selectedCardId) {
+  if (!state || !sourceCardId) {
+    return null;
+  }
+
+  return (
+    state.legal_actions.find(
+      (actionView) =>
+        actionView.source?.zone === "hand" &&
+        actionView.source.instance_id === sourceCardId &&
+        (actionView.type === "play_item" || actionView.type === "play_supporter") &&
+        !actionView.target,
+    ) || null
+  );
+}
+
+function resolveTrainerWorkflowRequest(state, sourceCardId = uiState.selectedCardId) {
+  const player = state?.players?.[0];
+  if (!player || !sourceCardId) {
+    return null;
+  }
+
+  const actionView = resolveTrainerActionView(state, sourceCardId);
+  if (!actionView) {
+    return null;
+  }
+
+  const handCard = player.hand?.find((card) => card.instance_id === sourceCardId);
+  if (!handCard) {
+    return null;
+  }
+
+  const discardEffect = (handCard.effect_specs || []).find(
+    (effectSpec) =>
+      effectSpec.effect_type === "discard_from_hand" &&
+      effectSpec.source_zone === "hand" &&
+      Number.isInteger(effectSpec.choose_count) &&
+      effectSpec.choose_count > 0,
+  );
+  const searchEffect = (handCard.effect_specs || []).find(
+    (effectSpec) =>
+      effectSpec.effect_type === "search_deck" &&
+      effectSpec.source_zone === "deck" &&
+      effectSpec.destination_zone,
+  );
+  if (!discardEffect && !searchEffect) {
+    return null;
+  }
+
+  const discardRequest = discardEffect
+    ? {
+        chooseCount: discardEffect.choose_count,
+        availableCards: (player.hand || []).filter(
+          (card) => !(discardEffect.exclude_source_card && card.instance_id === sourceCardId),
+        ),
+      }
+    : null;
+
+  const deckCards = Array.isArray(player.deck_cards) ? player.deck_cards : [];
+  const visibleCount = Number.isInteger(searchEffect?.count) && searchEffect.count > 0
+    ? searchEffect.count
+    : null;
+  const visibleCards = visibleCount
+    ? deckCards.slice(0, visibleCount)
+    : deckCards;
+  const searchRequest = searchEffect
+    ? {
+        sourceZone: searchEffect.source_zone || "deck",
+        scope: visibleCount ? "top_cards" : "full_deck",
+        visibleCount,
+        visibleCards,
+        chooseCount: Number.isInteger(searchEffect.choose_count) ? searchEffect.choose_count : 1,
+        destinationZone: searchEffect.destination_zone || "hand",
+        searchFilters: Array.isArray(searchEffect.search_filters) ? searchEffect.search_filters : [],
+      }
+    : null;
+
+  return {
+    actionView,
+    sourceCardId,
+    sourceCardName: handCard.name,
+    discardRequest,
+    searchRequest,
+  };
+}
+
+function openTrainerWorkflowForSelection(state) {
+  const request = resolveTrainerWorkflowRequest(state);
+  if (!request) {
+    return false;
+  }
+
+  uiState.trainerWorkflow = {
+    sourceCardId: request.sourceCardId,
+    stage: request.discardRequest ? "discard" : "search",
+    selectedDiscardIds: [],
+    selectedDeckCardId: null,
+  };
+  render(currentState);
+  return true;
+}
+
+function maybeStartTrainerWorkflowForAction(state, actionView) {
+  const sourceCardId = actionView?.source?.instance_id;
+  if (!state || !sourceCardId || actionView.target) {
+    return false;
+  }
+
+  uiState.selectedCardId = sourceCardId;
+  uiState.selectedBoardTarget = null;
+  uiState.pendingAttackActionIds = [];
+  return openTrainerWorkflowForSelection(state);
+}
+
+function resolveActiveTrainerWorkflow(state) {
+  if (!uiState.trainerWorkflow?.sourceCardId) {
+    return null;
+  }
+
+  const request = resolveTrainerWorkflowRequest(state, uiState.trainerWorkflow.sourceCardId);
+  if (!request) {
+    return null;
+  }
+
+  const selectedDiscardIds = request.discardRequest
+    ? (uiState.trainerWorkflow.selectedDiscardIds || []).filter((instanceId) =>
+        request.discardRequest.availableCards.some((card) => card.instance_id === instanceId),
+      )
+    : [];
+  const selectedDeckCardId =
+    request.searchRequest?.visibleCards.some((card) => card.instance_id === uiState.trainerWorkflow.selectedDeckCardId)
+      ? uiState.trainerWorkflow.selectedDeckCardId
+      : null;
+
+  let stage = uiState.trainerWorkflow.stage;
+  if (stage === "discard" && !request.discardRequest) {
+    stage = request.searchRequest ? "search" : null;
+  }
+  if (stage === "search" && !request.searchRequest) {
+    stage = request.discardRequest ? "discard" : null;
+  }
+  if (!stage) {
+    return null;
+  }
+
+  return {
+    ...request,
+    stage,
+    selectedDiscardIds,
+    selectedDeckCardId,
+  };
+}
+
+function syncTrainerWorkflowState(state) {
+  const workflow = resolveActiveTrainerWorkflow(state);
+  if (!workflow) {
+    uiState.trainerWorkflow = null;
+    return;
+  }
+
+  uiState.trainerWorkflow = {
+    sourceCardId: workflow.sourceCardId,
+    stage: workflow.stage,
+    selectedDiscardIds: workflow.selectedDiscardIds,
+    selectedDeckCardId: workflow.selectedDeckCardId,
+  };
+}
+
+function toggleTrainerWorkflowDiscardCard(instanceId) {
+  const workflow = resolveActiveTrainerWorkflow(currentState);
+  if (!workflow || workflow.stage !== "discard" || !workflow.discardRequest) {
+    return;
+  }
+
+  const selectedIds = workflow.selectedDiscardIds;
+  const isSelected = selectedIds.includes(instanceId);
+  const nextSelectedIds = isSelected
+    ? selectedIds.filter((cardId) => cardId !== instanceId)
+    : selectedIds.length >= workflow.discardRequest.chooseCount
+      ? selectedIds
+      : [...selectedIds, instanceId];
+
+  uiState.trainerWorkflow = {
+    ...uiState.trainerWorkflow,
+    selectedDiscardIds: nextSelectedIds,
+  };
+  render(currentState);
+}
+
+function toggleTrainerWorkflowDeckCard(instanceId) {
+  const workflow = resolveActiveTrainerWorkflow(currentState);
+  if (!workflow || workflow.stage !== "search" || !workflow.searchRequest) {
+    return;
+  }
+
+  const selectedCard = workflow.searchRequest.visibleCards.find(
+    (card) =>
+      card.instance_id === instanceId &&
+      cardMatchesSearchFilters(card, workflow.searchRequest.searchFilters),
+  );
+  if (!selectedCard) {
+    return;
+  }
+
+  uiState.trainerWorkflow = {
+    ...uiState.trainerWorkflow,
+    selectedDeckCardId: workflow.selectedDeckCardId === instanceId ? null : instanceId,
+  };
+  render(currentState);
+}
+
+function buildTrainerWorkflowAction(workflow) {
+  const action = { ...workflow.actionView.action };
+  if (workflow.discardRequest) {
+    action.discard_from_hand_ids = workflow.selectedDiscardIds;
+  }
+  if (workflow.searchRequest && workflow.selectedDeckCardId) {
+    action.search_result_ids = [workflow.selectedDeckCardId];
+  }
+  return action;
+}
+
+function submitTrainerWorkflow() {
+  const workflow = resolveActiveTrainerWorkflow(currentState);
+  if (!workflow) {
+    return;
+  }
+
+  if (workflow.stage === "discard") {
+    if (workflow.selectedDiscardIds.length !== workflow.discardRequest?.chooseCount) {
+      return;
+    }
+    if (workflow.searchRequest) {
+      uiState.trainerWorkflow = {
+        ...uiState.trainerWorkflow,
+        stage: "search",
+        selectedDeckCardId: null,
+      };
+      render(currentState);
+      return;
+    }
+  }
+
+  if (workflow.stage === "search" && !workflow.selectedDeckCardId) {
+    return;
+  }
+
+  void submitActionPayload(buildTrainerWorkflowAction(workflow));
+}
+
 function attachDeckBrowserDragBehavior(track) {
   if (!track) {
     return;
@@ -1164,6 +1379,9 @@ function attachDeckBrowserDragBehavior(track) {
 
   track.addEventListener("pointerdown", (event) => {
     if (event.button !== 0) {
+      return;
+    }
+    if (event.target.closest(".deck-browser-card.is-clickable, .mini-card.is-clickable")) {
       return;
     }
     deckBrowserDragState.pointerId = event.pointerId;
@@ -1201,59 +1419,108 @@ function renderDeckBrowserOverlay(state) {
     return;
   }
 
-  const activeRequest = uiState.deckBrowseRequest;
-  const selectedRequest = resolveDeckBrowseRequest(state);
-  if (!activeRequest || !selectedRequest || activeRequest.sourceCardId !== selectedRequest.sourceCardId) {
+  const workflow = resolveActiveTrainerWorkflow(state);
+  if (!workflow) {
     overlay.hidden = true;
     overlay.innerHTML = "";
     return;
   }
 
-  const player = state?.players?.[0];
-  const deckCards = Array.isArray(player?.deck_cards) ? player.deck_cards : [];
-  const visibleCards = activeRequest.visibleCount
-    ? deckCards.slice(0, activeRequest.visibleCount)
-    : deckCards;
-  const scopeLabel = activeRequest.scope === "top_cards"
-    ? `Top ${activeRequest.visibleCount}`
-    : "Full Deck";
-  const destinationLabel = (activeRequest.destinationZone || "hand").replaceAll("_", " ");
+  const isDiscardStep = workflow.stage === "discard";
+  const browseCards = isDiscardStep
+    ? workflow.discardRequest?.availableCards || []
+    : workflow.searchRequest?.visibleCards || [];
+  const chooseCount = isDiscardStep
+    ? workflow.discardRequest?.chooseCount || 0
+    : workflow.searchRequest?.chooseCount || 0;
+  const selectedCount = isDiscardStep
+    ? workflow.selectedDiscardIds.length
+    : workflow.selectedDeckCardId
+      ? 1
+      : 0;
+  const scopeLabel = isDiscardStep
+    ? "Hand Cost"
+    : workflow.searchRequest?.scope === "top_cards"
+      ? `Top ${workflow.searchRequest.visibleCount}`
+      : "Full Deck";
+  const destinationLabel = (workflow.searchRequest?.destinationZone || "hand").replaceAll("_", " ");
+  const metaLabel = isDiscardStep
+    ? `Choose ${chooseCount} other card${chooseCount === 1 ? "" : "s"} to discard.`
+    : `Choose ${chooseCount} Pokemon card${chooseCount === 1 ? "" : "s"} to place into ${destinationLabel}.`;
+  const confirmLabel = isDiscardStep ? "Confirm Discard" : "Confirm Search";
 
   overlay.hidden = false;
   overlay.innerHTML = `
     <div class="deck-browser">
       <div class="deck-browser__header">
         <div class="deck-browser__copy">
-          <p class="deck-browser__eyebrow">${escapeHtml(scopeLabel)} Search</p>
-          <h3>${escapeHtml(activeRequest.sourceCardName)}</h3>
-          <p class="deck-browser__meta">Choose ${escapeHtml(String(activeRequest.chooseCount))} card${activeRequest.chooseCount === 1 ? "" : "s"} to place into ${escapeHtml(destinationLabel)}.</p>
+          <p class="deck-browser__eyebrow">${escapeHtml(scopeLabel)} ${isDiscardStep ? "Choice" : "Search"}</p>
+          <h3>${escapeHtml(workflow.sourceCardName)}</h3>
+          <p class="deck-browser__meta">${escapeHtml(metaLabel)}</p>
         </div>
-        <button type="button" class="deck-browser__close" aria-label="Close deck browser">Close</button>
+        <button type="button" class="deck-browser__close" aria-label="Close card selection">Close</button>
       </div>
-      <div class="deck-browser__track" aria-label="Deck cards carousel">
-        ${visibleCards
-          .map(
-            (card) => `
-              <article
-                class="deck-browser-card${cardMatchesSearchFilters(card, activeRequest.searchFilters) ? " is-match" : ""}"
-                data-kind="${escapeHtml(card.kind || "")}"
-                data-element="${escapeHtml(card.element || "")}"
-                title="${escapeHtml(card.name)}"
-              >
-                ${buildCardImageMarkup(card.image_url, card.name)}
-              </article>
-            `,
-          )
-          .join("")}
+      <div class="deck-browser__track${isDiscardStep ? " is-discard-track" : ""}" aria-label="${escapeHtml(isDiscardStep ? "Hand cards to discard" : "Deck cards carousel")}"></div>
+      <div class="deck-browser__footer">
+        <p class="deck-browser__selection">${escapeHtml(String(selectedCount))} / ${escapeHtml(String(chooseCount))} selected</p>
+        <button type="button" class="action-button is-primary deck-browser__confirm" ${selectedCount === chooseCount && chooseCount > 0 ? "" : "disabled"}>${escapeHtml(confirmLabel)}</button>
       </div>
     </div>
   `;
 
+  const track = overlay.querySelector(".deck-browser__track");
+  if (track) {
+    for (const card of browseCards) {
+      const isMatch = isDiscardStep || cardMatchesSearchFilters(card, workflow.searchRequest?.searchFilters || []);
+      const isSelected = isDiscardStep
+        ? workflow.selectedDiscardIds.includes(card.instance_id)
+        : workflow.selectedDeckCardId === card.instance_id;
+      const isLocked = isDiscardStep && !isSelected && selectedCount >= chooseCount;
+
+      let cardElement;
+      if (isDiscardStep) {
+        cardElement = buildMiniCard(card, {
+          clickable: !isLocked,
+          selected: isSelected,
+          hideCopy: true,
+        });
+        cardElement.classList.add("deck-browser-mini-card");
+        if (isLocked) {
+          cardElement.classList.add("is-locked");
+        }
+      } else {
+        cardElement = document.createElement("article");
+        cardElement.className = `deck-browser-card${isMatch ? " is-match" : ""}${isSelected ? " is-selected" : ""}${isMatch ? " is-clickable" : ""}`;
+        cardElement.dataset.kind = card.kind || "";
+        cardElement.dataset.element = card.element || "";
+        cardElement.title = card.name;
+        cardElement.innerHTML = buildCardImageMarkup(card.image_url, card.name);
+      }
+
+      cardElement.dataset.instanceId = card.instance_id;
+      track.appendChild(cardElement);
+    }
+  }
+
   overlay.querySelector(".deck-browser__close")?.addEventListener("click", () => {
-    uiState.deckBrowseRequest = null;
+    uiState.trainerWorkflow = null;
     render(currentState);
   });
-  attachDeckBrowserDragBehavior(overlay.querySelector(".deck-browser__track"));
+  overlay.querySelector(".deck-browser__confirm")?.addEventListener("click", submitTrainerWorkflow);
+  overlay.querySelectorAll("[data-instance-id]").forEach((cardElement) => {
+    cardElement.addEventListener("click", () => {
+      const instanceId = cardElement.dataset.instanceId;
+      if (!instanceId) {
+        return;
+      }
+      if (isDiscardStep) {
+        toggleTrainerWorkflowDiscardCard(instanceId);
+        return;
+      }
+      toggleTrainerWorkflowDeckCard(instanceId);
+    });
+  });
+  attachDeckBrowserDragBehavior(track);
 }
 
 function renderAttackDragIndicator(state) {
@@ -2330,6 +2597,10 @@ function makePhaseLabel(state) {
 }
 
 function toggleSelectedCard(instanceId) {
+  if (uiState.trainerWorkflow) {
+    return;
+  }
+
   const result = resolveSelectedCardClick({
     state: currentState,
     uiState,
@@ -2349,6 +2620,10 @@ function toggleSelectedCard(instanceId) {
 }
 
 function toggleSelectedBoardTarget(targetRef) {
+  if (uiState.trainerWorkflow) {
+    return;
+  }
+
   const previousSelectedBoardTarget = uiState.selectedBoardTarget;
   const result = resolveSelectedBoardTargetClick({
     state: currentState,
@@ -2562,6 +2837,11 @@ function handleBoardBackgroundClick(event) {
   if (!currentState || aiIsRunning) {
     return;
   }
+  if (uiState.trainerWorkflow && !event.target.closest(".deck-browser")) {
+    event.preventDefault();
+    event.stopPropagation();
+    return;
+  }
 
   const clickedInteractiveElement = event.target.closest(
     ".mini-card, .board-card, .attack-chip-button, .end-turn-button, .resource-panel, .deck-browser, button, select, input, label",
@@ -2573,7 +2853,7 @@ function handleBoardBackgroundClick(event) {
   const clickedBoardSearchArea = !event.target.closest(
     ".hand-tray, .player-side-pocket",
   );
-  if (clickedBoardSearchArea && openDeckBrowserForSelection(currentState)) {
+  if (clickedBoardSearchArea && openTrainerWorkflowForSelection(currentState)) {
     event.preventDefault();
     event.stopPropagation();
     return;

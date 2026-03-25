@@ -716,6 +716,38 @@ class StandardEngineTests(unittest.TestCase):
         self.assertEqual(card_definition(state, state.players[0].bench[0].stack[-1]).name, previous_active_name)
         self.assertEqual(card_definition(state, state.players[0].discard[-1]).name, "Switch")
 
+    def test_ultra_ball_discards_two_other_cards_and_puts_a_pokemon_into_hand(self) -> None:
+        state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck")
+        self._finish_opening_setup(state)
+
+        ultra_ball_id = self._move_named_card_to_hand(state, 0, "Ultra Ball")
+        discard_ids = [
+            self._move_named_card_to_hand(state, 0, "Basic Lightning Energy"),
+            self._move_named_card_to_hand(state, 0, "Potion"),
+        ]
+        target_id = next(
+            instance_id
+            for instance_id in state.players[0].deck
+            if card_definition(state, instance_id).kind == "pokemon"
+        )
+
+        self._set_exact_hand(state, 0, [ultra_ball_id, *discard_ids])
+        ultra_ball_action = self._find_action_for_card_name(state, "play_item", "Ultra Ball")
+
+        apply_action(
+            state,
+            {
+                **ultra_ball_action,
+                "discard_from_hand_ids": discard_ids,
+                "search_result_ids": [target_id],
+            },
+        )
+
+        self.assertIn(target_id, state.players[0].hand)
+        self.assertNotIn(target_id, state.players[0].deck)
+        self.assertTrue(all(instance_id in state.players[0].discard for instance_id in discard_ids))
+        self.assertEqual(card_definition(state, state.players[0].discard[-1]).name, "Ultra Ball")
+
     def test_ai_can_choose_energy_attachment_over_ending_the_turn(self) -> None:
         state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck")
         self._finish_opening_setup(state)
