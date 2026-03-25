@@ -716,6 +716,57 @@ class StandardEngineTests(unittest.TestCase):
         self.assertEqual(card_definition(state, state.players[0].bench[0].stack[-1]).name, previous_active_name)
         self.assertEqual(card_definition(state, state.players[0].discard[-1]).name, "Switch")
 
+    def test_ultra_ball_is_not_legal_without_two_other_cards_in_hand(self) -> None:
+        state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck")
+        self._finish_opening_setup(state)
+        ultra_ball_id = self._move_named_card_to_hand(state, 0, "Ultra Ball")
+        self._set_exact_hand(state, 0, [ultra_ball_id])
+
+        ultra_ball_actions = [
+            action
+            for action in list_legal_actions(state)
+            if action["type"] == "play_item" and card_definition(state, action["hand_card_id"]).name == "Ultra Ball"
+        ]
+
+        self.assertEqual(ultra_ball_actions, [])
+
+    def test_ultra_ball_discards_two_selected_cards_then_adds_a_pokemon_to_hand(self) -> None:
+        state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck")
+        self._finish_opening_setup(state)
+        ultra_ball_id = self._move_named_card_to_hand(state, 0, "Ultra Ball")
+        mareep_id = self._move_named_card_to_hand(state, 0, "Mareep")
+        potion_id = self._move_named_card_to_hand(state, 0, "Potion")
+        self._set_exact_hand(state, 0, [ultra_ball_id, mareep_id, potion_id])
+        pokemon_from_deck = next(
+            instance_id
+            for instance_id in state.players[0].deck
+            if card_definition(state, instance_id).kind == "pokemon"
+        )
+        state.players[0].deck.remove(pokemon_from_deck)
+        state.players[0].deck.insert(0, pokemon_from_deck)
+
+        ultra_ball_actions = [
+            action
+            for action in list_legal_actions(state)
+            if action["type"] == "play_item" and card_definition(state, action["hand_card_id"]).name == "Ultra Ball"
+        ]
+        self.assertGreaterEqual(len(ultra_ball_actions), 1)
+        chosen_action = next(
+            action
+            for action in ultra_ball_actions
+            if set(action.get("discard_from_hand_ids", [])) == {mareep_id, potion_id}
+            and action.get("search_deck_ids") == [pokemon_from_deck]
+        )
+
+        apply_action(state, chosen_action)
+
+        self.assertIn(ultra_ball_id, state.players[0].discard)
+        self.assertIn(mareep_id, state.players[0].discard)
+        self.assertIn(potion_id, state.players[0].discard)
+        self.assertIn(pokemon_from_deck, state.players[0].hand)
+        self.assertIn("discarded 2 cards from hand", " ".join(state.log).lower())
+        self.assertIn("searched the deck and added 1 card to hand", " ".join(state.log).lower())
+
     def test_ai_can_choose_energy_attachment_over_ending_the_turn(self) -> None:
         state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck")
         self._finish_opening_setup(state)
