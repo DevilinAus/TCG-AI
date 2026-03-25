@@ -232,6 +232,68 @@ class ApiTests(unittest.TestCase):
         self.assertGreater(len(snapshot["players"][0]["deck_cards"]), 0)
         self.assertEqual(snapshot["players"][1]["deck_cards"], [])
 
+    def test_standard_ultra_ball_search_selection_confirm_adds_chosen_pokemon_to_hand(self) -> None:
+        state = self.app.new_game(
+            {
+                "game_mode": "standard",
+                "human_first": True,
+                "human_deck_id": "ampharos-ex-battle-deck",
+                "seed": 1,
+            }
+        )
+        session = self.app.sessions.get(state["session_id"])
+        from backend.tcg_ai.game_modes.standard.engine import apply_action, card_definition, list_legal_actions
+
+        active_action = next(
+            action for action in list_legal_actions(session.state) if action["type"] == "play_basic_to_active"
+        )
+        apply_action(session.state, active_action)
+        end_setup = next(action for action in list_legal_actions(session.state) if action["type"] == "end_setup")
+        apply_action(session.state, end_setup)
+
+        ultra_ball_id = self._move_standard_named_card_to_hand(session.state, 0, "Ultra Ball")
+        discard_a_id = self._move_standard_named_card_to_hand(session.state, 0, "Potion")
+        discard_b_id = self._move_standard_named_card_to_hand(session.state, 0, "Switch")
+        self._set_standard_exact_hand(session.state, 0, [ultra_ball_id, discard_a_id, discard_b_id])
+
+        chosen_pokemon_id = next(
+            instance_id
+            for instance_id in session.state.players[0].deck
+            if card_definition(session.state, instance_id).kind == "pokemon"
+        )
+        chosen_pokemon_name = card_definition(session.state, chosen_pokemon_id).name
+
+        snapshot = self.app.get_game(state["session_id"])
+        ultra_ball_actions = [
+            action
+            for action in snapshot["legal_actions"]
+            if action["type"] == "play_item"
+            and action["source"]["instance_id"] == ultra_ball_id
+            and isinstance(action["action"].get("search_deck_ids"), list)
+            and isinstance(action["action"].get("discard_from_hand_ids"), list)
+        ]
+        self.assertGreater(len(ultra_ball_actions), 0)
+
+        selected_action = next(
+            action
+            for action in ultra_ball_actions
+            if action["action"]["search_deck_ids"] == [chosen_pokemon_id]
+            and set(action["action"]["discard_from_hand_ids"]) == {discard_a_id, discard_b_id}
+        )
+
+        updated = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": selected_action["action"],
+            }
+        )
+
+        self.assertIn(
+            chosen_pokemon_name,
+            [card["name"] for card in updated["players"][0]["hand"]],
+        )
+        self.assertEqual(updated["players"][0]["discard_top"]["name"], "Ultra Ball")
+
     def test_standard_potion_exposes_targeted_item_actions_and_heals_the_selected_pokemon(self) -> None:
         state = self.app.new_game(
             {

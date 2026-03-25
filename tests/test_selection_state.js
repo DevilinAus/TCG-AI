@@ -318,6 +318,45 @@ test("findBackgroundPlayActionForSelection returns a direct supporter play actio
   assert.equal(selectedAction, action);
 });
 
+test("findBackgroundPlayActionForSelection returns a direct item action when discard ids match", () => {
+  const state = makeState();
+  const action = {
+    type: "play_item",
+    source: { zone: "hand", instance_id: "hand-potion" },
+    action: { discard_from_hand_ids: ["hand-energy", "hand-basic"] },
+  };
+  state.legal_actions = [action];
+
+  const selectedAction = findBackgroundPlayActionForSelection(
+    state,
+    "hand-potion",
+    false,
+    ["hand-basic", "hand-energy"],
+  );
+
+  assert.equal(selectedAction, action);
+});
+
+test("findBackgroundPlayActionForSelection does not return discard-cost action until all discard ids are selected", () => {
+  const state = makeState();
+  state.legal_actions = [
+    {
+      type: "play_item",
+      source: { zone: "hand", instance_id: "hand-potion" },
+      action: { discard_from_hand_ids: ["hand-energy", "hand-basic"] },
+    },
+  ];
+
+  const selectedAction = findBackgroundPlayActionForSelection(
+    state,
+    "hand-potion",
+    false,
+    ["hand-energy"],
+  );
+
+  assert.equal(selectedAction, null);
+});
+
 test("findBackgroundPlayActionForSelection ignores non-supporter hand actions", () => {
   const state = makeState();
   state.legal_actions = [
