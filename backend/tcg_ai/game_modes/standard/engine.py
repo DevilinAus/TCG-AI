@@ -587,28 +587,50 @@ def _resolve_effect_specs(
                 raise ValueError(f"Unsupported search effect configuration: {effect_spec}")
             choose_count = max(0, int(effect_spec.choose_count or 1))
             chosen_ids = list(action.get("search_deck_ids") or []) if action else []
-            if len(chosen_ids) != choose_count:
+            minimum_choose_count = 0 if effect_spec.optional else choose_count
+            if not minimum_choose_count <= len(chosen_ids) <= choose_count:
                 raise ValueError("Search effect is missing required selected cards.")
             if len(set(chosen_ids)) != len(chosen_ids):
                 raise ValueError("Search selection contains duplicate cards.")
+            searchable_ids = _searchable_deck_ids(state, player, effect_spec)
             for chosen_id in chosen_ids:
-                if chosen_id not in player.deck:
-                    raise ValueError("Search selection contains a card that is not in deck.")
-                if not _card_matches_search_filters(state, chosen_id, effect_spec.search_filters):
-                    raise ValueError("Search selection contains a card that does not match filters.")
+                if chosen_id not in searchable_ids:
+                    raise ValueError("Search selection contains a card that is not searchable.")
             destination_zone = effect_spec.destination_zone or "hand"
+            entered_play_turn = 0 if state.setup_phase is not None else player.turns_taken
+            if destination_zone == "bench":
+                if len(player.bench) + len(chosen_ids) > BENCH_LIMIT:
+                    raise ValueError("Not enough bench space for search effect.")
+                for chosen_id in chosen_ids:
+                    if card_definition(state, chosen_id).kind != "pokemon":
+                        raise ValueError("Only Pokemon can be placed onto the Bench.")
             for chosen_id in chosen_ids:
                 player.deck.remove(chosen_id)
                 if destination_zone == "hand":
                     player.hand.append(chosen_id)
+                elif destination_zone == "bench":
+                    player.bench.append(
+                        PokemonInPlay(stack=[chosen_id], entered_play_turn=entered_play_turn)
+                    )
                 else:
                     raise ValueError(f"Unsupported search destination zone: {destination_zone}")
             if effect_spec.shuffle_destination:
                 state.rng.shuffle(player.deck)
-            state.log.append(
-                f"{actor_name} searched the deck and added {len(chosen_ids)} card"
-                f"{'' if len(chosen_ids) == 1 else 's'} to hand."
-            )
+            if not chosen_ids:
+                if destination_zone == "hand":
+                    state.log.append(f"{actor_name} searched the deck but did not add a card to hand.")
+                else:
+                    state.log.append(f"{actor_name} searched the deck but did not put a card onto the Bench.")
+            elif destination_zone == "hand":
+                state.log.append(
+                    f"{actor_name} searched the deck and added {len(chosen_ids)} card"
+                    f"{'' if len(chosen_ids) == 1 else 's'} to hand."
+                )
+            else:
+                state.log.append(
+                    f"{actor_name} searched the deck and put {len(chosen_ids)} card"
+                    f"{'' if len(chosen_ids) == 1 else 's'} onto the Bench."
+                )
             continue
 
         raise ValueError(f"Unsupported Standard effect type: {effect_spec.effect_type}")
@@ -837,20 +859,30 @@ def _expand_trainer_actions_for_search_choices(
         if search_effect.source_zone != "deck":
             return []
         choose_count = max(0, int(search_effect.choose_count or 1))
-        candidate_ids = [
-            instance_id
-            for instance_id in player.deck
-            if _card_matches_search_filters(state, instance_id, search_effect.search_filters)
-        ]
-        if len(candidate_ids) < choose_count:
+        minimum_choose_count = 0 if search_effect.optional else choose_count
+        destination_zone = search_effect.destination_zone or "hand"
+        if destination_zone == "bench":
+            available_slots = BENCH_LIMIT - len(player.bench)
+            if available_slots < minimum_choose_count:
+                return []
+            max_choose_count = min(choose_count, available_slots)
+        elif destination_zone != "hand":
             return []
+        else:
+            max_choose_count = choose_count
+        candidate_ids = _searchable_deck_ids(state, player, search_effect)
+        if len(candidate_ids) < minimum_choose_count:
+            return []
+        selectable_count = min(len(candidate_ids), max_choose_count)
+        combination_sizes = range(minimum_choose_count, selectable_count + 1)
         expanded_actions = [
             {
                 **action,
                 "search_deck_ids": list(search_combo),
             }
             for action in expanded_actions
-            for search_combo in combinations(candidate_ids, choose_count)
+            for combo_size in combination_sizes
+            for search_combo in combinations(candidate_ids, combo_size)
         ]
         if not expanded_actions:
             return []
@@ -870,7 +902,23 @@ def _card_matches_search_filters(
             return False
         if search_filter == "basic_pokemon" and (card.kind != "pokemon" or not card.is_basic):
             return False
+        if search_filter == "supporter" and (card.kind != "trainer" or "supporter" not in card.card_tags):
+            return False
     return True
+
+
+def _searchable_deck_ids(
+    state: GameState,
+    player: PlayerState,
+    effect_spec: EffectSpec,
+) -> list[str]:
+    visible_count = int(effect_spec.count or 0)
+    visible_ids = player.deck[:visible_count] if visible_count > 0 else player.deck
+    return [
+        instance_id
+        for instance_id in visible_ids
+        if _card_matches_search_filters(state, instance_id, effect_spec.search_filters)
+    ]
 
 
 def _supporters_blocked_for_turn(state: GameState, player_index: int) -> bool:

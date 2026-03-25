@@ -767,6 +767,147 @@ class StandardEngineTests(unittest.TestCase):
         self.assertIn("discarded 2 cards from hand", " ".join(state.log).lower())
         self.assertIn("searched the deck and added 1 card to hand", " ".join(state.log).lower())
 
+    def test_nest_ball_puts_a_basic_pokemon_from_deck_onto_the_bench_without_a_discard_cost(self) -> None:
+        state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck")
+        self._finish_opening_setup(state)
+        nest_ball_id = self._move_named_card_to_hand(state, 0, "Nest Ball")
+        self._set_exact_hand(state, 0, [nest_ball_id])
+        basic_from_deck = next(
+            instance_id
+            for instance_id in state.players[0].deck
+            if card_definition(state, instance_id).is_basic
+        )
+
+        nest_ball_actions = [
+            action
+            for action in list_legal_actions(state)
+            if action["type"] == "play_item" and card_definition(state, action["hand_card_id"]).name == "Nest Ball"
+        ]
+
+        self.assertGreaterEqual(len(nest_ball_actions), 1)
+        chosen_action = next(
+            action
+            for action in nest_ball_actions
+            if action.get("search_deck_ids") == [basic_from_deck]
+        )
+
+        apply_action(state, chosen_action)
+
+        self.assertEqual(state.players[0].hand, [])
+        self.assertEqual(state.players[0].bench[0].stack[-1], basic_from_deck)
+        self.assertNotIn(basic_from_deck, state.players[0].deck)
+        self.assertEqual(card_definition(state, state.players[0].discard[-1]).name, "Nest Ball")
+        self.assertIn("searched the deck and put 1 card onto the bench", " ".join(state.log).lower())
+
+    def test_nest_ball_is_not_legal_when_the_bench_is_full(self) -> None:
+        state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck")
+        self._finish_opening_setup(state)
+        for card_name in ("Mareep", "Mareep", "Wattrel", "Starly", "Rotom"):
+            self._set_named_bench_pokemon(state, 0, card_name)
+        nest_ball_id = self._move_named_card_to_hand(state, 0, "Nest Ball")
+        self._set_exact_hand(state, 0, [nest_ball_id])
+
+        nest_ball_actions = [
+            action
+            for action in list_legal_actions(state)
+            if action["type"] == "play_item" and card_definition(state, action["hand_card_id"]).name == "Nest Ball"
+        ]
+
+        self.assertEqual(len(state.players[0].bench), 5)
+        self.assertEqual(nest_ball_actions, [])
+
+    def test_pokegear_only_searches_supporters_from_the_top_seven_cards(self) -> None:
+        state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck")
+        self._finish_opening_setup(state)
+        pokegear_id = self._move_named_card_to_hand(state, 0, "Pok\u00e9gear 3.0")
+        self._set_exact_hand(state, 0, [pokegear_id])
+
+        player = state.players[0]
+        top_supporter_id = self._find_instance_id(state, 0, "Nemona")
+        outside_supporter_id = self._find_instance_id(state, 0, "Youngster")
+        filler_ids = [
+            self._find_instance_id(state, 0, card_name)
+            for card_name in ("Mareep", "Wattrel", "Rotom", "Starly", "Switch", "Potion")
+        ]
+
+        ordered_top_cards = [
+            filler_ids[0],
+            filler_ids[1],
+            top_supporter_id,
+            filler_ids[2],
+            filler_ids[3],
+            filler_ids[4],
+            filler_ids[5],
+        ]
+        prioritized_ids = set(ordered_top_cards + [outside_supporter_id])
+        player.deck = ordered_top_cards + [
+            instance_id
+            for instance_id in player.deck
+            if instance_id not in prioritized_ids
+        ] + [outside_supporter_id]
+
+        pokegear_actions = [
+            action
+            for action in list_legal_actions(state)
+            if action["type"] == "play_item" and card_definition(state, action["hand_card_id"]).name == "Pok\u00e9gear 3.0"
+        ]
+
+        self.assertGreaterEqual(len(pokegear_actions), 1)
+        self.assertIn(
+            [],
+            [action.get("search_deck_ids") for action in pokegear_actions],
+        )
+        self.assertIn(
+            [top_supporter_id],
+            [action.get("search_deck_ids") for action in pokegear_actions],
+        )
+        self.assertNotIn(
+            [outside_supporter_id],
+            [action.get("search_deck_ids") for action in pokegear_actions],
+        )
+
+        chosen_action = next(
+            action
+            for action in pokegear_actions
+            if action.get("search_deck_ids") == [top_supporter_id]
+        )
+        apply_action(state, chosen_action)
+
+        self.assertIn(top_supporter_id, state.players[0].hand)
+        self.assertNotIn(outside_supporter_id, state.players[0].hand)
+        self.assertEqual(card_definition(state, state.players[0].discard[-1]).name, "Pok\u00e9gear 3.0")
+        self.assertIn("searched the deck and added 1 card to hand", " ".join(state.log).lower())
+
+    def test_pokegear_is_playable_even_when_the_top_seven_has_no_supporter(self) -> None:
+        state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck")
+        self._finish_opening_setup(state)
+        pokegear_id = self._move_named_card_to_hand(state, 0, "Pok\u00e9gear 3.0")
+        self._set_exact_hand(state, 0, [pokegear_id])
+
+        top_cards = [
+            self._find_instance_id(state, 0, card_name)
+            for card_name in ("Mareep", "Wattrel", "Rotom", "Starly", "Switch", "Potion", "Nest Ball")
+        ]
+        trailing_supporter_id = self._find_instance_id(state, 0, "Nemona")
+        self._reorder_deck(state, 0, top_cards, [trailing_supporter_id])
+
+        pokegear_actions = [
+            action
+            for action in list_legal_actions(state)
+            if action["type"] == "play_item" and card_definition(state, action["hand_card_id"]).name == "Pok\u00e9gear 3.0"
+        ]
+
+        self.assertEqual(
+            [action.get("search_deck_ids") for action in pokegear_actions],
+            [[]],
+        )
+
+        apply_action(state, pokegear_actions[0])
+
+        self.assertEqual(state.players[0].hand, [])
+        self.assertEqual(card_definition(state, state.players[0].discard[-1]).name, "Pok\u00e9gear 3.0")
+        self.assertIn("did not add a card to hand", " ".join(state.log).lower())
+
     def test_ai_can_choose_energy_attachment_over_ending_the_turn(self) -> None:
         state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck")
         self._finish_opening_setup(state)
@@ -877,6 +1018,22 @@ class StandardEngineTests(unittest.TestCase):
                 if len(matches) == count:
                     return matches
         self.fail(f"Could not find {count} copies of {card_name} for player {player_index}")
+
+    def _reorder_deck(
+        self,
+        state,
+        player_index: int,
+        leading_instance_ids: list[str],
+        trailing_instance_ids: list[str] | None = None,
+    ) -> None:
+        player = state.players[player_index]
+        trailing_instance_ids = trailing_instance_ids or []
+        prioritized_ids = set(leading_instance_ids + trailing_instance_ids)
+        player.deck = list(leading_instance_ids) + [
+            instance_id
+            for instance_id in player.deck
+            if instance_id not in prioritized_ids
+        ] + list(trailing_instance_ids)
 
 
 if __name__ == "__main__":

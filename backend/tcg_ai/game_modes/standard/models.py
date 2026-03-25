@@ -53,6 +53,7 @@ class EffectSpec:
     choose_count: int | None = None
     search_filters: tuple[str, ...] = ()
     options: tuple[EffectOption, ...] = ()
+    optional: bool = False
     shuffle_destination: bool = False
     exclude_source_card: bool = False
     revealed_to: str | None = None

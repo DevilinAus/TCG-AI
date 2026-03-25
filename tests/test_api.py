@@ -294,6 +294,263 @@ class ApiTests(unittest.TestCase):
         )
         self.assertEqual(updated["players"][0]["discard_top"]["name"], "Ultra Ball")
 
+    def test_standard_nest_ball_exposes_bench_search_metadata_and_benches_the_selected_basic(self) -> None:
+        state = self.app.new_game(
+            {
+                "game_mode": "standard",
+                "human_first": True,
+                "human_deck_id": "ampharos-ex-battle-deck",
+                "seed": 1,
+            }
+        )
+        session = self.app.sessions.get(state["session_id"])
+        from backend.tcg_ai.game_modes.standard.engine import apply_action, card_definition, list_legal_actions
+
+        active_action = next(
+            action for action in list_legal_actions(session.state) if action["type"] == "play_basic_to_active"
+        )
+        apply_action(session.state, active_action)
+        end_setup = next(action for action in list_legal_actions(session.state) if action["type"] == "end_setup")
+        apply_action(session.state, end_setup)
+
+        nest_ball_id = self._move_standard_named_card_to_hand(session.state, 0, "Nest Ball")
+        self._set_standard_exact_hand(session.state, 0, [nest_ball_id])
+
+        chosen_basic_id = next(
+            instance_id
+            for instance_id in session.state.players[0].deck
+            if card_definition(session.state, instance_id).is_basic
+        )
+        chosen_basic_name = card_definition(session.state, chosen_basic_id).name
+
+        snapshot = self.app.get_game(state["session_id"])
+        nest_ball = next(card for card in snapshot["players"][0]["hand"] if card["instance_id"] == nest_ball_id)
+        self.assertEqual(nest_ball["effect_specs"][0]["effect_type"], "search_deck")
+        self.assertEqual(nest_ball["effect_specs"][0]["destination_zone"], "bench")
+        self.assertEqual(nest_ball["effect_specs"][0]["search_filters"], ["basic_pokemon"])
+        self.assertEqual(nest_ball["effect_specs"][0]["choose_count"], 1)
+
+        nest_ball_actions = [
+            action
+            for action in snapshot["legal_actions"]
+            if action["type"] == "play_item"
+            and action["source"]["instance_id"] == nest_ball_id
+            and isinstance(action["action"].get("search_deck_ids"), list)
+        ]
+        self.assertGreater(len(nest_ball_actions), 0)
+
+        selected_action = next(
+            action
+            for action in nest_ball_actions
+            if action["action"]["search_deck_ids"] == [chosen_basic_id]
+        )
+
+        updated = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": selected_action["action"],
+            }
+        )
+
+        self.assertIn(
+            chosen_basic_name,
+            [card["name"] for card in updated["players"][0]["bench"]],
+        )
+        self.assertNotIn(
+            chosen_basic_name,
+            [card["name"] for card in updated["players"][0]["hand"]],
+        )
+        self.assertEqual(updated["players"][0]["discard_top"]["name"], "Nest Ball")
+
+    def test_standard_nest_ball_is_not_legal_when_the_bench_is_full(self) -> None:
+        state = self.app.new_game(
+            {
+                "game_mode": "standard",
+                "human_first": True,
+                "human_deck_id": "ampharos-ex-battle-deck",
+                "seed": 1,
+            }
+        )
+        session = self.app.sessions.get(state["session_id"])
+        from backend.tcg_ai.game_modes.standard.engine import apply_action, list_legal_actions
+
+        active_action = next(
+            action for action in list_legal_actions(session.state) if action["type"] == "play_basic_to_active"
+        )
+        apply_action(session.state, active_action)
+        end_setup = next(action for action in list_legal_actions(session.state) if action["type"] == "end_setup")
+        apply_action(session.state, end_setup)
+
+        bench_ids = [
+            self._move_standard_named_card_to_hand(session.state, 0, card_name)
+            for card_name in ("Mareep", "Mareep", "Wattrel", "Starly", "Rotom")
+        ]
+        self._set_standard_exact_hand(session.state, 0, bench_ids)
+        for _ in range(5):
+            bench_action = next(
+                action for action in list_legal_actions(session.state) if action["type"] == "bench_basic"
+            )
+            apply_action(session.state, bench_action)
+
+        nest_ball_id = self._move_standard_named_card_to_hand(session.state, 0, "Nest Ball")
+        self._set_standard_exact_hand(session.state, 0, [nest_ball_id])
+
+        snapshot = self.app.get_game(state["session_id"])
+        nest_ball_actions = [
+            action
+            for action in snapshot["legal_actions"]
+            if action["type"] == "play_item" and action["source"]["instance_id"] == nest_ball_id
+        ]
+
+        self.assertEqual(len(snapshot["players"][0]["bench"]), 5)
+        self.assertEqual(nest_ball_actions, [])
+
+    def test_standard_pokegear_exposes_top_seven_supporter_search_metadata_and_adds_the_selected_supporter(self) -> None:
+        state = self.app.new_game(
+            {
+                "game_mode": "standard",
+                "human_first": True,
+                "human_deck_id": "ampharos-ex-battle-deck",
+                "seed": 1,
+            }
+        )
+        session = self.app.sessions.get(state["session_id"])
+        from backend.tcg_ai.game_modes.standard.engine import apply_action, card_definition, list_legal_actions
+
+        active_action = next(
+            action for action in list_legal_actions(session.state) if action["type"] == "play_basic_to_active"
+        )
+        apply_action(session.state, active_action)
+        end_setup = next(action for action in list_legal_actions(session.state) if action["type"] == "end_setup")
+        apply_action(session.state, end_setup)
+
+        pokegear_id = self._move_standard_named_card_to_hand(session.state, 0, "Pok\u00e9gear 3.0")
+        self._set_standard_exact_hand(session.state, 0, [pokegear_id])
+
+        player = session.state.players[0]
+        top_supporter_id = self._find_standard_instance_id(session.state, 0, "Nemona")
+        outside_supporter_id = self._find_standard_instance_id(session.state, 0, "Youngster")
+        filler_ids = [
+            self._find_standard_instance_id(session.state, 0, card_name)
+            for card_name in ("Mareep", "Wattrel", "Rotom", "Starly", "Switch", "Potion")
+        ]
+        ordered_top_cards = [
+            filler_ids[0],
+            filler_ids[1],
+            top_supporter_id,
+            filler_ids[2],
+            filler_ids[3],
+            filler_ids[4],
+            filler_ids[5],
+        ]
+        prioritized_ids = set(ordered_top_cards + [outside_supporter_id])
+        player.deck = ordered_top_cards + [
+            instance_id
+            for instance_id in player.deck
+            if instance_id not in prioritized_ids
+        ] + [outside_supporter_id]
+
+        snapshot = self.app.get_game(state["session_id"])
+        pokegear = next(card for card in snapshot["players"][0]["hand"] if card["instance_id"] == pokegear_id)
+        self.assertEqual(pokegear["effect_specs"][0]["effect_type"], "search_deck")
+        self.assertEqual(pokegear["effect_specs"][0]["count"], 7)
+        self.assertEqual(pokegear["effect_specs"][0]["destination_zone"], "hand")
+        self.assertEqual(pokegear["effect_specs"][0]["search_filters"], ["supporter"])
+        self.assertEqual(pokegear["effect_specs"][0]["choose_count"], 1)
+
+        pokegear_actions = [
+            action
+            for action in snapshot["legal_actions"]
+            if action["type"] == "play_item"
+            and action["source"]["instance_id"] == pokegear_id
+            and isinstance(action["action"].get("search_deck_ids"), list)
+        ]
+        self.assertIn(
+            [],
+            [action["action"]["search_deck_ids"] for action in pokegear_actions],
+        )
+        self.assertIn(
+            [top_supporter_id],
+            [action["action"]["search_deck_ids"] for action in pokegear_actions],
+        )
+        self.assertNotIn(
+            [outside_supporter_id],
+            [action["action"]["search_deck_ids"] for action in pokegear_actions],
+        )
+
+        selected_action = next(
+            action
+            for action in pokegear_actions
+            if action["action"]["search_deck_ids"] == [top_supporter_id]
+        )
+        selected_supporter_name = card_definition(session.state, top_supporter_id).name
+
+        updated = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": selected_action["action"],
+            }
+        )
+
+        self.assertIn(
+            selected_supporter_name,
+            [card["name"] for card in updated["players"][0]["hand"]],
+        )
+        self.assertEqual(updated["players"][0]["discard_top"]["name"], "Pok\u00e9gear 3.0")
+
+    def test_standard_pokegear_is_still_playable_when_the_top_seven_has_no_supporter(self) -> None:
+        state = self.app.new_game(
+            {
+                "game_mode": "standard",
+                "human_first": True,
+                "human_deck_id": "ampharos-ex-battle-deck",
+                "seed": 1,
+            }
+        )
+        session = self.app.sessions.get(state["session_id"])
+        from backend.tcg_ai.game_modes.standard.engine import apply_action, list_legal_actions
+
+        active_action = next(
+            action for action in list_legal_actions(session.state) if action["type"] == "play_basic_to_active"
+        )
+        apply_action(session.state, active_action)
+        end_setup = next(action for action in list_legal_actions(session.state) if action["type"] == "end_setup")
+        apply_action(session.state, end_setup)
+
+        pokegear_id = self._move_standard_named_card_to_hand(session.state, 0, "Pok\u00e9gear 3.0")
+        self._set_standard_exact_hand(session.state, 0, [pokegear_id])
+
+        top_cards = [
+            self._find_standard_instance_id(session.state, 0, card_name)
+            for card_name in ("Mareep", "Wattrel", "Rotom", "Starly", "Switch", "Potion", "Nest Ball")
+        ]
+        trailing_supporter_id = self._find_standard_instance_id(session.state, 0, "Nemona")
+        self._reorder_standard_deck(session.state, 0, top_cards, [trailing_supporter_id])
+
+        snapshot = self.app.get_game(state["session_id"])
+        pokegear_actions = [
+            action
+            for action in snapshot["legal_actions"]
+            if action["type"] == "play_item"
+            and action["source"]["instance_id"] == pokegear_id
+            and isinstance(action["action"].get("search_deck_ids"), list)
+        ]
+        self.assertEqual(
+            [action["action"]["search_deck_ids"] for action in pokegear_actions],
+            [[]],
+        )
+
+        updated = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": pokegear_actions[0]["action"],
+            }
+        )
+
+        self.assertEqual(updated["players"][0]["hand"], [])
+        self.assertEqual(updated["players"][0]["discard_top"]["name"], "Pok\u00e9gear 3.0")
+        self.assertIn("did not add a card to hand", updated["log"][-1]["text"].lower())
+
     def test_standard_potion_exposes_targeted_item_actions_and_heals_the_selected_pokemon(self) -> None:
         state = self.app.new_game(
             {
@@ -653,6 +910,33 @@ class ApiTests(unittest.TestCase):
         extras = [instance_id for instance_id in player.hand if instance_id not in kept]
         player.hand = list(ordered_instance_ids)
         player.deck.extend(extras)
+
+    def _find_standard_instance_id(self, state, player_index: int, card_name: str) -> str:
+        from backend.tcg_ai.game_modes.standard.engine import card_definition
+
+        player = state.players[player_index]
+        for zone_name in ("hand", "deck", "discard"):
+            zone = getattr(player, zone_name)
+            for instance_id in zone:
+                if card_definition(state, instance_id).name == card_name:
+                    return instance_id
+        self.fail(f"Could not find {card_name} for player {player_index}")
+
+    def _reorder_standard_deck(
+        self,
+        state,
+        player_index: int,
+        leading_instance_ids: list[str],
+        trailing_instance_ids: list[str] | None = None,
+    ) -> None:
+        player = state.players[player_index]
+        trailing_instance_ids = trailing_instance_ids or []
+        prioritized_ids = set(leading_instance_ids + trailing_instance_ids)
+        player.deck = list(leading_instance_ids) + [
+            instance_id
+            for instance_id in player.deck
+            if instance_id not in prioritized_ids
+        ] + list(trailing_instance_ids)
 
     def test_standard_can_play_a_basic_from_hand_into_the_active_spot(self) -> None:
         state = self.app.new_game(
