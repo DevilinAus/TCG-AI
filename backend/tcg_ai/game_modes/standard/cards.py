@@ -75,6 +75,32 @@ TRAINER_EFFECT_SPECS: dict[str, tuple[EffectSpec, ...]] = {
             selection_count=1,
         ),
     ),
+    "sv1-186": (
+        EffectSpec(
+            effect_type="search_deck",
+            count=7,
+            source_zone="deck",
+            destination_zone="hand",
+            choose_count=1,
+            search_filters=("supporter",),
+            optional=True,
+            shuffle_destination=True,
+            revealed_to="all",
+            changes_hidden_information=True,
+        ),
+    ),
+    "sv1-181": (
+        EffectSpec(
+            effect_type="search_deck",
+            source_zone="deck",
+            destination_zone="bench",
+            choose_count=1,
+            search_filters=("basic_pokemon",),
+            shuffle_destination=True,
+            revealed_to="all",
+            changes_hidden_information=True,
+        ),
+    ),
     "sv1-180": (
         EffectSpec(
             effect_type="draw",

@@ -387,6 +387,7 @@ def _serialize_effect_spec(effect_spec: EffectSpec) -> dict[str, Any]:
         "choose_count": effect_spec.choose_count,
         "search_filters": list(effect_spec.search_filters),
         "options": [_serialize_effect_option(option) for option in effect_spec.options],
+        "optional": effect_spec.optional,
         "shuffle_destination": effect_spec.shuffle_destination,
         "exclude_source_card": effect_spec.exclude_source_card,
         "revealed_to": effect_spec.revealed_to,

@@ -1191,24 +1191,24 @@ function resolveDeckBrowseRequest(state, sourceCardId = uiState.selectedCardId) 
       actionByDeckCardId.set(selectedDeckId, actionView);
     }
   }
-  if (!actionByDeckCardId.size) {
-    return null;
-  }
-
   const visibleCount = Number.isInteger(searchEffect.count) && searchEffect.count > 0
     ? searchEffect.count
     : null;
+  const chooseCount = Number.isInteger(searchEffect.choose_count) ? searchEffect.choose_count : 1;
+  const actionBySelectionKey = buildSearchActionSelectionMap(searchActions);
+  const minimumChooseCount = actionBySelectionKey.has(selectionKeyForDeckIds([])) ? 0 : chooseCount;
   return {
     sourceCardId,
     sourceCardName: handCard.name,
     sourceZone: searchEffect.source_zone || "deck",
     scope: visibleCount ? "top_cards" : "full_deck",
     visibleCount,
-    chooseCount: Number.isInteger(searchEffect.choose_count) ? searchEffect.choose_count : 1,
+    chooseCount,
+    minimumChooseCount,
     destinationZone: searchEffect.destination_zone || "hand",
     searchFilters: Array.isArray(searchEffect.search_filters) ? searchEffect.search_filters : [],
     actionByDeckCardId,
-    actionBySelectionKey: buildSearchActionSelectionMap(searchActions),
+    actionBySelectionKey,
     selectableDeckCardIds: [...actionByDeckCardId.keys()],
   };
 }
@@ -1255,8 +1255,11 @@ function buildSearchActionSelectionMap(searchActions) {
 }
 
 function selectionKeyForDeckIds(deckIds) {
-  if (!Array.isArray(deckIds) || !deckIds.length) {
+  if (!Array.isArray(deckIds)) {
     return "";
+  }
+  if (!deckIds.length) {
+    return "__empty__";
   }
   return [...deckIds].sort().join("|");
 }
@@ -1358,6 +1361,9 @@ function cardMatchesSearchFilters(card, searchFilters) {
     if (filter === "basic_pokemon") {
       return card.kind === "pokemon" && card.is_basic;
     }
+    if (filter === "supporter") {
+      return card.kind === "trainer" && Array.isArray(card.card_tags) && card.card_tags.includes("supporter");
+    }
     return true;
   });
 }
@@ -1417,7 +1423,13 @@ function attachDeckBrowserDragBehavior(track) {
 }
 
 function buildDeckBrowserSelectionMetaText(activeRequest) {
-  return `Choose ${String(activeRequest.chooseCount)} card${activeRequest.chooseCount === 1 ? "" : "s"} to place into ${String((activeRequest.destinationZone || "hand").replaceAll("_", " "))}. Selected: ${String(uiState.deckBrowseSelectedIds.length)}/${String(activeRequest.chooseCount)}.`;
+  const minimumChooseCount = Number.isInteger(activeRequest.minimumChooseCount)
+    ? activeRequest.minimumChooseCount
+    : activeRequest.chooseCount;
+  const actionText = minimumChooseCount === 0 && activeRequest.chooseCount > 0
+    ? `Choose up to ${String(activeRequest.chooseCount)} card${activeRequest.chooseCount === 1 ? "" : "s"}`
+    : `Choose ${String(activeRequest.chooseCount)} card${activeRequest.chooseCount === 1 ? "" : "s"}`;
+  return `${actionText} to place into ${String((activeRequest.destinationZone || "hand").replaceAll("_", " "))}. Selected: ${String(uiState.deckBrowseSelectedIds.length)}/${String(activeRequest.chooseCount)}.`;
 }
 
 function buildDiscardBrowserSelectionMetaText(activeRequest) {
@@ -1432,7 +1444,11 @@ function syncDeckBrowserSelectionUi(overlay, activeRequest) {
 
   const confirmButton = overlay.querySelector(".deck-browser__confirm");
   if (confirmButton) {
-    confirmButton.disabled = uiState.deckBrowseSelectedIds.length !== activeRequest.chooseCount;
+    const minimumChooseCount = Number.isInteger(activeRequest.minimumChooseCount)
+      ? activeRequest.minimumChooseCount
+      : activeRequest.chooseCount;
+    const selectedCount = uiState.deckBrowseSelectedIds.length;
+    confirmButton.disabled = selectedCount < minimumChooseCount || selectedCount > activeRequest.chooseCount;
   }
 
   for (const cardElement of overlay.querySelectorAll(".deck-browser-card")) {
