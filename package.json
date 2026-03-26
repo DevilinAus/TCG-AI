@@ -1,6 +1,6 @@
 {
   "scripts": {
-    "preflight": "node --test tests/test_selection_state.js tests/test_pokegear_popup.js tests/test_ultra_ball_popup.js tests/test_call_for_family_popup.js tests/test_ultra_ball_popup_playwright.js && ./.venv/bin/pytest -q"
+    "preflight": "node --test tests/test_selection_state.js tests/test_pokegear_popup.js tests/test_ultra_ball_popup.js tests/test_call_for_family_popup.js tests/test_standard_ai_toggle.js tests/test_ultra_ball_popup_playwright.js && ./.venv/bin/pytest -q"
   },
   "devDependencies": {
     "@playwright/test": "^1.58.2",

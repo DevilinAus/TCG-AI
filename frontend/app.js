@@ -27,6 +27,9 @@ const uiState = {
   selectedGameModeId: null,
   selectedTrainerId: null,
   selectedHumanDeckId: null,
+  selectedStandardAiMode: null,
+  standardAiModePending: false,
+  standardMlStatus: null,
 };
 
 const pointerState = {
@@ -208,6 +211,7 @@ async function refreshGame() {
     uiState.selectedGameModeId = uiState.selectedGameModeId || currentState.game_mode || null;
     uiState.selectedTrainerId = uiState.selectedTrainerId || currentState.ai_trainer?.id || null;
     uiState.selectedHumanDeckId = uiState.selectedHumanDeckId || currentState.human_deck_id || null;
+    uiState.selectedStandardAiMode = currentState.standard_ai_mode || "local";
     sanitizeSelections(currentState);
     render(currentState);
     maybeRunAiTurn(currentState);
@@ -241,6 +245,9 @@ async function loadLobby(requestedGameModeId = null) {
     aiAutoRunPaused = false;
     resetSelections();
     uiState.selectedGameModeId = lobbyState.game_mode || null;
+    if (!uiState.selectedStandardAiMode) {
+      uiState.selectedStandardAiMode = lobbyState.standard_ai_mode || "local";
+    }
 
     const availableTrainerIds = new Set((lobbyState.available_trainers || []).map((trainer) => trainer.id));
     if (!availableTrainerIds.has(uiState.selectedTrainerId)) {
@@ -264,7 +271,7 @@ async function loadLobby(requestedGameModeId = null) {
   }
 }
 
-async function newGame() {
+async function newGame(payloadOverrides = null) {
   const requestEpoch = stateRequestEpoch;
   try {
     const payloadBody = {};
@@ -281,6 +288,12 @@ async function newGame() {
     if (humanDeckId) {
       payloadBody.human_deck_id = humanDeckId;
     }
+    if (gameMode === "standard") {
+      payloadBody.standard_ai_mode = resolveStandardAiMode(selectionState);
+    }
+    if (payloadOverrides && typeof payloadOverrides === "object") {
+      Object.assign(payloadBody, payloadOverrides);
+    }
     const payload = await requestJson("/api/new-game", {
       method: "POST",
       body: JSON.stringify(payloadBody),
@@ -295,15 +308,18 @@ async function newGame() {
     uiState.selectedGameModeId = payload.game_mode || uiState.selectedGameModeId;
     uiState.selectedTrainerId = payload.ai_trainer?.id || uiState.selectedTrainerId;
     uiState.selectedHumanDeckId = payload.human_deck_id || uiState.selectedHumanDeckId;
+    uiState.selectedStandardAiMode = payload.standard_ai_mode || "local";
     resetSelections();
     setStoredSessionId(payload.session_id);
     render(currentState);
     maybeRunAiTurn(currentState);
+    return true;
   } catch (error) {
     if (requestEpoch !== stateRequestEpoch) {
-      return;
+      return false;
     }
     updateStatus(error.message);
+    return false;
   }
 }
 
@@ -476,6 +492,14 @@ function resolveGameMode(state) {
   );
 }
 
+function resolveStandardAiMode(state) {
+  return (
+    uiState.selectedStandardAiMode ||
+    state?.standard_ai_mode ||
+    "local"
+  );
+}
+
 function resolveGameModeMetadata(state) {
   const gameMode = resolveGameMode(state);
   return (
@@ -552,6 +576,63 @@ function handleDeckChange(event) {
     render(currentState);
   } else if (lobbyState) {
     renderLobby(lobbyState);
+  }
+}
+
+async function handleStandardAiModeToggle(event) {
+  const toggle = event.target;
+  const selectionState = currentState || lobbyState;
+  const gameMode = resolveGameMode(selectionState);
+  const previousMode = resolveStandardAiMode(selectionState);
+  const requestedMode = toggle.checked ? "remote" : "local";
+  let finalStatusMessage = null;
+  if (gameMode !== "standard") {
+    toggle.checked = false;
+    renderActiveView();
+    return;
+  }
+  if (requestedMode === previousMode && currentState?.standard_ai_mode === requestedMode) {
+    renderActiveView();
+    return;
+  }
+
+  uiState.standardAiModePending = true;
+  renderActiveView();
+  try {
+    if (requestedMode === "remote") {
+      const status = await requestJson("/api/standard-ml-status");
+      uiState.standardMlStatus = status;
+      if (!(status.configured && status.ready && status.model_loaded)) {
+        throw new Error(status.error || "Remote Standard NN mode is unavailable.");
+      }
+    } else {
+      uiState.standardMlStatus = null;
+    }
+
+    const hasActiveGame = !!currentState && currentState.winner === null;
+    if (
+      hasActiveGame &&
+      !window.confirm("Switching NN mode will reset the current game and start a new one. Continue?")
+    ) {
+      finalStatusMessage = "NN mode unchanged.";
+      return;
+    }
+
+    uiState.selectedStandardAiMode = requestedMode;
+    const started = await newGame({ standard_ai_mode: requestedMode });
+    if (!started) {
+      uiState.selectedStandardAiMode = previousMode;
+      renderActiveView();
+    }
+  } catch (error) {
+    uiState.selectedStandardAiMode = previousMode;
+    finalStatusMessage = error.message;
+  } finally {
+    uiState.standardAiModePending = false;
+    renderActiveView();
+    if (finalStatusMessage) {
+      updateStatus(finalStatusMessage);
+    }
   }
 }
 
@@ -701,6 +782,7 @@ function render(state) {
 
   renderAppIdentity(state);
   renderMatchMeta(state);
+  renderStandardAiModeToggle(state);
   renderTrainerPicker(state);
   renderDeckPicker(state);
   renderOpponentIdentity(state);
@@ -849,6 +931,7 @@ function render(state) {
 function renderLobby(state) {
   renderAppIdentity(state);
   renderLobbyMatchMeta();
+  renderStandardAiModeToggle(state);
   renderTrainerPicker(state);
   renderDeckPicker(state);
   renderOpponentIdentity(state);
@@ -2616,6 +2699,43 @@ function renderMatchMeta(state) {
         : "session-chip";
 }
 
+function renderStandardAiModeToggle(state) {
+  const toggle = document.getElementById("standard-ai-mode-toggle");
+  const toggleChip = document.getElementById("standard-ai-mode-chip");
+  const toggleText = document.getElementById("standard-ai-mode-text");
+  if (!toggle || !toggleChip || !toggleText) {
+    return;
+  }
+
+  const isStandardMode = resolveGameMode(state) === "standard";
+  const selectedMode = isStandardMode ? resolveStandardAiMode(state) : "local";
+  const remoteEnabled = selectedMode === "remote";
+  const status = uiState.standardMlStatus;
+  let description = remoteEnabled ? "Remote NN" : "Local AI";
+  if (!isStandardMode) {
+    description = "Standard only";
+  } else if (uiState.standardAiModePending) {
+    description = "Checking...";
+  } else if (remoteEnabled && status?.model_loaded) {
+    description = "Remote ready";
+  } else if (remoteEnabled) {
+    description = "Remote NN";
+  } else if (status && !status.ready) {
+    description = "Remote offline";
+  }
+
+  toggle.checked = remoteEnabled;
+  toggle.disabled = aiIsRunning || uiState.standardAiModePending || !isStandardMode;
+  toggleText.textContent = description;
+  toggleChip.classList.toggle("is-enabled", remoteEnabled);
+  toggleChip.classList.toggle("is-disabled", toggle.disabled);
+  toggleChip.title =
+    status?.error ||
+    (remoteEnabled
+      ? `Remote inference${status?.backend ? ` via ${status.backend}` : ""}`
+      : "Use the local Standard AI.");
+}
+
 function renderTrainerPicker(state) {
   const trainerSelect = document.getElementById("trainer-select");
   const trainerMeta = document.getElementById("trainer-meta");
@@ -2694,6 +2814,16 @@ function renderLobbyMatchMeta() {
   sessionChip.title = "";
   phaseChip.textContent = "Lobby";
   phaseChip.className = "session-chip session-chip-muted";
+}
+
+function renderActiveView() {
+  if (currentState) {
+    render(currentState);
+    return;
+  }
+  if (lobbyState) {
+    renderLobby(lobbyState);
+  }
 }
 
 function renderOpponentIdentity(state) {
@@ -3338,13 +3468,18 @@ function escapeHtml(text) {
     .replaceAll("'", "&#39;");
 }
 
-document.getElementById("new-game-button").addEventListener("click", newGame);
+document.getElementById("new-game-button").addEventListener("click", () => {
+  void newGame();
+});
 document
   .getElementById("player-bench-zone")
   .addEventListener("click", handlePlayerBenchZoneClick, true);
 document.getElementById("player-board-panel").addEventListener("click", handleBoardBackgroundClick);
 document.getElementById("trainer-select").addEventListener("change", handleTrainerChange);
 document.getElementById("deck-select").addEventListener("change", handleDeckChange);
+document.getElementById("standard-ai-mode-toggle").addEventListener("change", (event) => {
+  void handleStandardAiModeToggle(event);
+});
 document.querySelector(".dev-panel")?.addEventListener("toggle", syncDevPanelToggleLabel);
 window.addEventListener("pointermove", handlePointerMove);
 window.addEventListener("pointerleave", handlePointerLeaveWindow);
@@ -3352,10 +3487,16 @@ syncDevPanelToggleLabel();
 window.addEventListener("load", refreshGame);
 
 globalThis.__TCG_APP_TEST_API__ = {
+  handleStandardAiModeToggle,
+  newGame,
   openDeckBrowserForSelection,
   render,
+  renderActiveView,
   setCurrentState(state) {
     currentState = state;
+  },
+  setLobbyState(state) {
+    lobbyState = state;
   },
   setSubmitActionOverride(override) {
     submitActionOverride = override;

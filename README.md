@@ -77,6 +77,38 @@ python3 -m backend.tcg_ai.server
 
 Then open [http://127.0.0.1:8000](http://127.0.0.1:8000).
 
+## Remote Standard ML Worker
+
+The Standard AI can now call a remote policy/value worker over HTTP while the main game continues to run locally.
+
+Backend environment variables:
+
+```bash
+export TCG_AI_STANDARD_REMOTE_ENABLED=1
+export TCG_AI_STANDARD_REMOTE_URL=http://<linux-box>:8100/api/standard-ml/decision
+export TCG_AI_STANDARD_REMOTE_BATCH_EVAL_URL=http://<linux-box>:8100/api/standard-ml/batch-eval
+export TCG_AI_STANDARD_REMOTE_TIMEOUT_MS=1500
+export TCG_AI_STANDARD_REMOTE_API_TOKEN=<shared-token>
+```
+
+Worker launch options:
+
+```bash
+python3 -m backend.tcg_ai.game_modes.standard.ml_server
+```
+
+Or, with the optional `standard-ml` extras installed:
+
+```bash
+python3 -m backend.tcg_ai.game_modes.standard.ml_fastapi
+```
+
+Quick launcher for the Linux NN box:
+
+```bash
+bash scripts/start_standard_ml_worker.sh --checkpoint /home/<you>/models/champion.pt --token <shared-token>
+```
+
 ## How To Test
 
 ```bash

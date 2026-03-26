@@ -4,5 +4,16 @@ version = "0.1.0"
 description = "A starter project for a simple Pokemon TCG My First Battle AI."
 requires-python = ">=3.13"
 
+[project.optional-dependencies]
+standard-ml = [
+  "fastapi>=0.115,<1.0",
+  "numpy>=2.0,<3.0",
+  "polars>=1.0,<2.0",
+  "pyarrow>=17.0,<19.0",
+  "tensorboard>=2.18,<3.0",
+  "torch>=2.4,<3.0",
+  "uvicorn>=0.30,<1.0",
+]
+
 [tool.pytest.ini_options]
 pythonpath = ["."]

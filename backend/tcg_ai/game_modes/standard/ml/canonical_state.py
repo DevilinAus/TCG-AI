@@ -150,6 +150,7 @@ def _serialize_player(player: PlayerState) -> dict[str, Any]:
         "deck": list(player.deck),
         "hand": list(player.hand),
         "discard": list(player.discard),
+        "prizes": list(player.prizes),
         "active": _serialize_pokemon(player.active),
         "bench": [_serialize_pokemon(pokemon) for pokemon in player.bench],
         "prize_cards_remaining": player.prize_cards_remaining,
@@ -157,6 +158,7 @@ def _serialize_player(player: PlayerState) -> dict[str, Any]:
         "supporter_played_this_turn": player.supporter_played_this_turn,
         "energy_attached_this_turn": player.energy_attached_this_turn,
         "turns_taken": player.turns_taken,
+        "deck_inspected_this_game": player.deck_inspected_this_game,
     }
 
 
@@ -168,6 +170,7 @@ def _deserialize_player(payload: dict[str, Any]) -> PlayerState:
         deck=[str(card_id) for card_id in payload.get("deck", [])],
         hand=[str(card_id) for card_id in payload.get("hand", [])],
         discard=[str(card_id) for card_id in payload.get("discard", [])],
+        prizes=[str(card_id) for card_id in payload.get("prizes", [])],
         active=_deserialize_pokemon(payload.get("active")),
         bench=[_deserialize_pokemon(pokemon) for pokemon in payload.get("bench", [])],
         prize_cards_remaining=int(payload.get("prize_cards_remaining", 6)),
@@ -175,6 +178,7 @@ def _deserialize_player(payload: dict[str, Any]) -> PlayerState:
         supporter_played_this_turn=bool(payload.get("supporter_played_this_turn", False)),
         energy_attached_this_turn=bool(payload.get("energy_attached_this_turn", False)),
         turns_taken=int(payload.get("turns_taken", 0)),
+        deck_inspected_this_game=bool(payload.get("deck_inspected_this_game", False)),
     )
 
 

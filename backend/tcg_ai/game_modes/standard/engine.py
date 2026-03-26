@@ -48,6 +48,8 @@ def create_game(
     _ensure_deck_has_basic(ai_player, ai_instances, ai_definitions)
     while not _hand_has_basic(ai_player, ai_instances, ai_definitions):
         _redraw_opening_hand(ai_player, rng)
+    _deal_prizes(human_player)
+    _deal_prizes(ai_player)
 
     state = GameState(
         cards={**human_instances, **ai_instances},
@@ -74,7 +76,12 @@ def create_game(
     return state
 
 
-def choose_action(state: GameState, player_index: int, learner: Any | None = None) -> dict[str, Any] | None:
+def choose_action(
+    state: GameState,
+    player_index: int,
+    learner: Any | None = None,
+    runtime: Any | None = None,
+) -> dict[str, Any] | None:
     del learner
     if state.current_player != player_index or state.winner is not None:
         return None
@@ -85,13 +92,39 @@ def choose_action(state: GameState, player_index: int, learner: Any | None = Non
 
     if player_index == 1 and state.setup_phase is None:
         from .ml.planner import StandardTurnPlanner
+        from .ml.remote_oracle import RemotePolicyValueOracle, RemotePolicyValueOracleError
 
-        planner = StandardTurnPlanner()
-        decision = planner.plan(
-            state,
-            acting_player_index=player_index,
-            legal_actions=legal_actions,
-        )
+        remote_oracle = None
+        provider = getattr(runtime, "provider", None)
+        config = getattr(provider, "config", None)
+        batch_eval_url = config.resolved_remote_batch_eval_url() if config is not None else None
+        if (
+            config is not None
+            and getattr(config, "remote_enabled", False)
+            and isinstance(batch_eval_url, str)
+            and batch_eval_url
+        ):
+            remote_oracle = RemotePolicyValueOracle(
+                batch_eval_url=batch_eval_url,
+                timeout_ms=int(config.remote_timeout_ms),
+                api_token=getattr(config, "remote_api_token", None),
+                session_id=getattr(provider, "session_id", None),
+            )
+
+        planner = StandardTurnPlanner(oracle=remote_oracle)
+        try:
+            decision = planner.plan(
+                state,
+                acting_player_index=player_index,
+                legal_actions=legal_actions,
+            )
+        except RemotePolicyValueOracleError:
+            fallback_planner = StandardTurnPlanner()
+            decision = fallback_planner.plan(
+                state,
+                acting_player_index=player_index,
+                legal_actions=legal_actions,
+            )
         return decision["chosen_action"]
     return legal_actions[0]
 
@@ -470,11 +503,24 @@ def _draw_opening_hand(player: PlayerState) -> None:
     del player.deck[:OPENING_HAND_SIZE]
 
 
+def _deal_prizes(player: PlayerState) -> None:
+    if player.prizes:
+        return
+    player.prizes = player.deck[:6]
+    del player.deck[: len(player.prizes)]
+    player.prize_cards_remaining = len(player.prizes)
+
+
 def _redraw_opening_hand(player: PlayerState, rng: random.Random) -> None:
+    player.deck.extend(player.prizes)
     player.deck.extend(player.hand)
+    player.prizes.clear()
     player.hand.clear()
+    player.prize_cards_remaining = 6
+    player.deck_inspected_this_game = False
     rng.shuffle(player.deck)
     _draw_opening_hand(player)
+    _deal_prizes(player)
     player.mulligans_taken += 1
 
 
@@ -662,6 +708,8 @@ def _resolve_search_deck_effect(
             )
         else:
             raise ValueError(f"Unsupported search destination zone: {destination_zone}")
+    if int(effect_spec.count or 0) <= 0:
+        player.deck_inspected_this_game = True
     if effect_spec.shuffle_destination:
         state.rng.shuffle(player.deck)
     if not chosen_ids:
@@ -1658,8 +1706,11 @@ def _pokemon_is_knocked_out(state: GameState, pokemon: PokemonInPlay | None) -> 
 
 def _award_prize_for_knockout(state: GameState, winner_index: int) -> None:
     player = state.players[winner_index]
-    if player.prize_cards_remaining > 0:
-        player.prize_cards_remaining -= 1
+    if player.prizes:
+        prize_card_id = state.rng.choice(player.prizes)
+        player.prizes.remove(prize_card_id)
+        player.hand.append(prize_card_id)
+        player.prize_cards_remaining = len(player.prizes)
         actor_name = "You" if winner_index == 0 else player.name
         state.log.append(
             f"{actor_name} took a Prize card. {player.prize_cards_remaining} Prize"
