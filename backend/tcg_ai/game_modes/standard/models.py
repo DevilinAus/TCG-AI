@@ -13,11 +13,21 @@ EffectCountMode = Literal["fixed", "all"]
 class AttackEffectSpec:
     effect_type: str
     amount: int | None = None
+    count: int | None = None
+    count_mode: EffectCountMode = "fixed"
+    source_zone: str | None = None
+    destination_zone: str | None = None
+    destination_position: str | None = None
     target_player: str = "self"
     target_zone: str | None = None
     selection_count: int | None = None
+    choose_count: int | None = None
+    search_filters: tuple[str, ...] = ()
     energy_type: str | None = None
     optional: bool = False
+    shuffle_destination: bool = False
+    revealed_to: str | None = None
+    changes_hidden_information: bool = False
     bonus_damage: int | None = None
     condition: str | None = None
     duration: str | None = None
@@ -139,3 +149,6 @@ class GameState:
     log: list[str] = field(default_factory=list)
     seed: int = 0
     setup_phase: SetupPhase | None = "choose_active"
+    pending_promotion_for: int | None = None
+    pending_promotion_queue: list[int] = field(default_factory=list)
+    pending_promotion_attacker_index: int | None = None

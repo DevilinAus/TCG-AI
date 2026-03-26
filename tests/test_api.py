@@ -210,6 +210,153 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(supporter_action["effect_specs"][0]["effect_type"], "draw")
         self.assertTrue(supporter_action["changes_hidden_information"])
 
+    def test_standard_jacq_exposes_evolution_search_metadata_and_adds_selected_cards_to_hand(self) -> None:
+        state = self.app.new_game(
+            {
+                "game_mode": "standard",
+                "human_first": True,
+                "human_deck_id": "ampharos-ex-battle-deck",
+                "seed": 1,
+            }
+        )
+
+        session = self.app.sessions.get(state["session_id"])
+        from backend.tcg_ai.game_modes.standard.engine import apply_action, list_legal_actions
+
+        active_action = next(
+            action for action in list_legal_actions(session.state) if action["type"] == "play_basic_to_active"
+        )
+        apply_action(session.state, active_action)
+        end_setup = next(action for action in list_legal_actions(session.state) if action["type"] == "end_setup")
+        apply_action(session.state, end_setup)
+        session.state.turn_number = 2
+
+        player = session.state.players[0]
+        jacq_id = self._move_standard_named_card_to_hand(session.state, 0, "Jacq")
+        player.hand = [jacq_id]
+
+        ampharos_id = self._find_standard_instance_id(session.state, 0, "Ampharos ex")
+        staraptor_id = self._find_standard_instance_id(session.state, 0, "Staraptor")
+        mareep_id = self._find_standard_instance_id(session.state, 0, "Mareep")
+        self._reorder_standard_deck(session.state, 0, [mareep_id, ampharos_id, staraptor_id])
+
+        snapshot = self.app.get_game(state["session_id"])
+        jacq = snapshot["players"][0]["hand"][0]
+        jacq_actions = [
+            action
+            for action in snapshot["legal_actions"]
+            if action["type"] == "play_supporter" and action["source"]["instance_id"] == jacq_id
+        ]
+
+        self.assertEqual(jacq["card_tags"], ["supporter"])
+        self.assertEqual(jacq["effect_specs"][0]["effect_type"], "search_deck")
+        self.assertEqual(jacq["effect_specs"][0]["destination_zone"], "hand")
+        self.assertEqual(jacq["effect_specs"][0]["search_filters"], ["evolution_pokemon"])
+        self.assertEqual(jacq["effect_specs"][0]["choose_count"], 2)
+        self.assertTrue(jacq["effect_specs"][0]["optional"])
+        self.assertIn([], [action["action"]["search_deck_ids"] for action in jacq_actions])
+        self.assertIn([ampharos_id], [action["action"]["search_deck_ids"] for action in jacq_actions])
+        self.assertIn([staraptor_id], [action["action"]["search_deck_ids"] for action in jacq_actions])
+        self.assertIn(
+            [ampharos_id, staraptor_id],
+            [action["action"]["search_deck_ids"] for action in jacq_actions],
+        )
+        self.assertNotIn([mareep_id], [action["action"]["search_deck_ids"] for action in jacq_actions])
+
+        chosen_action = next(
+            action
+            for action in jacq_actions
+            if action["action"]["search_deck_ids"] == [ampharos_id, staraptor_id]
+        )
+        updated = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": chosen_action["action"],
+            }
+        )
+
+        self.assertIn("Ampharos ex", [card["name"] for card in updated["players"][0]["hand"]])
+        self.assertIn("Staraptor", [card["name"] for card in updated["players"][0]["hand"]])
+        self.assertEqual(updated["players"][0]["discard_top"]["name"], "Jacq")
+        self.assertIn("added 2 cards to hand", updated["log"][-1]["text"])
+
+    def test_standard_call_for_family_exposes_bench_search_metadata_and_benches_two_basics(self) -> None:
+        state = self.app.new_game(
+            {
+                "game_mode": "standard",
+                "human_first": True,
+                "human_deck_id": "lucario-ex-battle-deck",
+                "seed": 1,
+            }
+        )
+
+        session = self.app.sessions.get(state["session_id"])
+        session.state.setup_phase = None
+        session.state.current_player = 0
+        session.state.turn_number = 2
+        session.state.players[0].turns_taken = 2
+        session.state.players[1].turns_taken = 2
+        self._set_standard_named_active_pokemon(session.state, 0, "Squawkabilly")
+        self._set_standard_named_active_pokemon(session.state, 1, "Mareep")
+        session.state.players[0].active.attached_energy = [
+            self._find_standard_instance_id(session.state, 0, "Basic Fighting Energy"),
+        ]
+
+        riolu_id = self._find_standard_instance_id(session.state, 0, "Riolu")
+        lechonk_id = self._find_standard_instance_id(session.state, 0, "Lechonk")
+        oinkologne_id = self._find_standard_instance_id(session.state, 0, "Oinkologne")
+        self._reorder_standard_deck(session.state, 0, [riolu_id, oinkologne_id, lechonk_id])
+
+        snapshot = self.app.get_game(state["session_id"])
+        call_for_family = snapshot["players"][0]["active"]["attacks"][0]
+        call_for_family_actions = [
+            action
+            for action in snapshot["legal_actions"]
+            if action["type"] == "attack"
+            and action["source"]["instance_id"] == snapshot["players"][0]["active"]["instance_id"]
+            and action["action"]["attack_index"] == 0
+            and isinstance(action["action"].get("search_deck_ids"), list)
+        ]
+
+        self.assertEqual(call_for_family["name"], "Call for Family")
+        self.assertEqual(call_for_family["effect_specs"][0]["effect_type"], "search_deck")
+        self.assertEqual(call_for_family["effect_specs"][0]["destination_zone"], "bench")
+        self.assertEqual(call_for_family["effect_specs"][0]["search_filters"], ["basic_pokemon"])
+        self.assertEqual(call_for_family["effect_specs"][0]["choose_count"], 2)
+        self.assertTrue(call_for_family["effect_specs"][0]["optional"])
+        self.assertIn([], [action["action"]["search_deck_ids"] for action in call_for_family_actions])
+        self.assertIn([riolu_id], [action["action"]["search_deck_ids"] for action in call_for_family_actions])
+        self.assertIn([lechonk_id], [action["action"]["search_deck_ids"] for action in call_for_family_actions])
+        self.assertIn(
+            [riolu_id, lechonk_id],
+            [action["action"]["search_deck_ids"] for action in call_for_family_actions],
+        )
+        self.assertNotIn([oinkologne_id], [action["action"]["search_deck_ids"] for action in call_for_family_actions])
+
+        selected_action = next(
+            action
+            for action in call_for_family_actions
+            if action["action"]["search_deck_ids"] == [riolu_id, lechonk_id]
+        )
+
+        updated = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": selected_action["action"],
+            }
+        )
+
+        bench_names = [card["name"] for card in updated["players"][0]["bench"]]
+        bench_ids = [card["instance_id"] for card in updated["players"][0]["bench"]]
+        self.assertIn("Riolu", bench_names)
+        self.assertIn("Lechonk", bench_names)
+        self.assertNotIn("Oinkologne", bench_names)
+        self.assertIn(riolu_id, bench_ids)
+        self.assertIn(lechonk_id, bench_ids)
+        self.assertTrue(
+            any("put 2 cards onto the bench" in entry["text"].lower() for entry in updated["log"]),
+        )
+
     def test_standard_ultra_ball_exposes_deck_search_metadata_and_viewer_deck_cards(self) -> None:
         state = self.app.new_game(
             {
@@ -694,6 +841,58 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(updated["players"][0]["bench"][0]["instance_id"], expected_active_name)
         self.assertEqual(updated["players"][0]["discard_top"]["name"], "Switch")
 
+    def test_standard_knock_out_prompts_the_human_to_choose_a_new_active_pokemon(self) -> None:
+        state = self.app.new_game(
+            {
+                "game_mode": "standard",
+                "human_first": True,
+                "human_deck_id": "ampharos-ex-battle-deck",
+                "seed": 1,
+            }
+        )
+        session = self.app.sessions.get(state["session_id"])
+        from backend.tcg_ai.game_modes.standard.engine import apply_action, list_legal_actions
+
+        session.state.setup_phase = None
+        session.state.current_player = 1
+        session.state.turn_number = 2
+        session.state.players[0].turns_taken = 2
+        session.state.players[1].turns_taken = 2
+        self._set_standard_named_active_pokemon(session.state, 0, "Mareep")
+        self._set_standard_named_bench_pokemon(session.state, 0, "Wattrel")
+        self._set_standard_named_active_pokemon(session.state, 1, "Mankey")
+        session.state.players[0].active.damage = 30
+        session.state.players[1].active.attached_energy = [
+            self._find_standard_instance_id(session.state, 1, "Basic Fighting Energy"),
+        ]
+
+        attack_action = next(action for action in list_legal_actions(session.state) if action["type"] == "attack")
+        apply_action(session.state, attack_action)
+
+        snapshot = self.app.get_game(state["session_id"])
+        promote_action = self._find_action(snapshot, "promote")
+
+        self.assertEqual(snapshot["current_player"], 0)
+        self.assertEqual(snapshot["turn_number"], 2)
+        self.assertEqual(snapshot["pending_promotion_for"], 0)
+        self.assertIsNone(snapshot["players"][0]["active"])
+        self.assertEqual(promote_action["source"]["zone"], "bench")
+        self.assertEqual(promote_action["source"]["name"], "Wattrel")
+        self.assertEqual(promote_action["target"]["zone"], "active")
+        self.assertIsNone(promote_action["target"]["instance_id"])
+
+        updated = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": promote_action["action"],
+            }
+        )
+
+        self.assertEqual(updated["current_player"], 0)
+        self.assertEqual(updated["turn_number"], 3)
+        self.assertIsNone(updated["pending_promotion_for"])
+        self.assertEqual(updated["players"][0]["active"]["name"], "Wattrel")
+
     def test_standard_energy_attachment_actions_expose_targets_and_update_state(self) -> None:
         state = self.app.new_game(
             {
@@ -910,6 +1109,30 @@ class ApiTests(unittest.TestCase):
         extras = [instance_id for instance_id in player.hand if instance_id not in kept]
         player.hand = list(ordered_instance_ids)
         player.deck.extend(extras)
+
+    def _set_standard_named_active_pokemon(self, state, player_index: int, card_name: str) -> None:
+        from backend.tcg_ai.game_modes.standard.models import PokemonInPlay
+
+        instance_id = self._find_standard_instance_id(state, player_index, card_name)
+        player = state.players[player_index]
+        for zone_name in ("hand", "deck", "discard"):
+            zone = getattr(player, zone_name)
+            if instance_id in zone:
+                zone.remove(instance_id)
+                break
+        player.active = PokemonInPlay(stack=[instance_id])
+
+    def _set_standard_named_bench_pokemon(self, state, player_index: int, card_name: str) -> None:
+        from backend.tcg_ai.game_modes.standard.models import PokemonInPlay
+
+        instance_id = self._find_standard_instance_id(state, player_index, card_name)
+        player = state.players[player_index]
+        for zone_name in ("hand", "deck", "discard"):
+            zone = getattr(player, zone_name)
+            if instance_id in zone:
+                zone.remove(instance_id)
+                break
+        player.bench.append(PokemonInPlay(stack=[instance_id]))
 
     def _find_standard_instance_id(self, state, player_index: int, card_name: str) -> str:
         from backend.tcg_ai.game_modes.standard.engine import card_definition

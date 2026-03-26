@@ -106,6 +106,19 @@ TRAINER_EFFECT_SPECS: dict[str, tuple[EffectSpec, ...]] = {
             changes_hidden_information=True,
         ),
     ),
+    "sv1-175": (
+        EffectSpec(
+            effect_type="search_deck",
+            source_zone="deck",
+            destination_zone="hand",
+            choose_count=2,
+            search_filters=("evolution_pokemon",),
+            optional=True,
+            shuffle_destination=True,
+            revealed_to="all",
+            changes_hidden_information=True,
+        ),
+    ),
     "sv1-180": (
         EffectSpec(
             effect_type="draw",
@@ -286,6 +299,19 @@ ATTACK_EFFECT_SPECS: dict[tuple[str, str], tuple[AttackEffectSpec, ...]] = {
         AttackEffectSpec(
             effect_type="draw_cards",
             amount=2,
+        ),
+    ),
+    ("sv1-162", "Call for Family"): (
+        AttackEffectSpec(
+            effect_type="search_deck",
+            source_zone="deck",
+            destination_zone="bench",
+            choose_count=2,
+            search_filters=("basic_pokemon",),
+            optional=True,
+            shuffle_destination=True,
+            revealed_to="all",
+            changes_hidden_information=True,
         ),
     ),
     ("sv1-165", "Nosedive"): (

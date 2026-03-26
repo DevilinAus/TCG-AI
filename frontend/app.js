@@ -3,6 +3,7 @@ const AI_HUMAN_DELAY_MIN_MS = 5000;
 const AI_HUMAN_DELAY_MAX_MS = 8000;
 const FALLBACK_AI_STEP_DELAY_MS = 6500;
 const FACE_DOWN_CARD_IMAGE_URL = "/assets/cards/shared/card-back.png";
+const BENCH_LIMIT = 5;
 
 let currentState = null;
 let lobbyState = null;
@@ -647,16 +648,18 @@ function sanitizeSelections(state) {
         refsMatch(actionView.source, uiState.selectedBoardTarget),
     ),
   );
-  if (!resolveDeckBrowseRequest(state, uiState.selectedCardId)) {
+  const deckBrowseRequest = resolveDeckBrowseRequest(state);
+  if (!deckBrowseRequest) {
     uiState.deckBrowseRequest = null;
     uiState.deckBrowseSelectedIds = [];
     return;
   }
-  const deckBrowseSelectableIds = new Set(uiState.deckBrowseRequest?.selectableDeckCardIds || []);
+  uiState.deckBrowseRequest = deckBrowseRequest;
+  const deckBrowseSelectableIds = new Set(deckBrowseRequest.selectableDeckCardIds || []);
   uiState.deckBrowseSelectedIds = (uiState.deckBrowseSelectedIds || []).filter((instanceId) =>
     deckBrowseSelectableIds.has(instanceId),
   );
-  const chooseCount = uiState.deckBrowseRequest?.chooseCount || 1;
+  const chooseCount = deckBrowseRequest.chooseCount || 1;
   if (uiState.deckBrowseSelectedIds.length > chooseCount) {
     uiState.deckBrowseSelectedIds = uiState.deckBrowseSelectedIds.slice(0, chooseCount);
   }
@@ -1142,7 +1145,98 @@ function renderSelectedCardPreview(state) {
   previewElement.appendChild(card);
 }
 
-function resolveDeckBrowseRequest(state, sourceCardId = uiState.selectedCardId) {
+function boardRefKey(ref) {
+  if (!ref) {
+    return "";
+  }
+  return [
+    String(ref.player_index ?? "x"),
+    String(ref.zone || "unknown"),
+    Number.isInteger(ref.bench_index) ? String(ref.bench_index) : "x",
+    String(ref.instance_id || "x"),
+  ].join(":");
+}
+
+function findPokemonForRef(state, ref) {
+  if (!state || !ref) {
+    return null;
+  }
+
+  const player = state.players?.[ref.player_index];
+  if (!player) {
+    return null;
+  }
+  if (ref.zone === "active") {
+    return player.active || null;
+  }
+  if (ref.zone === "bench" && Number.isInteger(ref.bench_index)) {
+    return player.bench?.[ref.bench_index] || null;
+  }
+  return null;
+}
+
+function buildDeckBrowseRequest({
+  sourceKey,
+  sourceKind = "hand",
+  sourceCardId = null,
+  sourceRef = null,
+  attackIndex = null,
+  sourceCardName,
+  searchEffect,
+  searchActions,
+}) {
+  if (!sourceKey || !sourceCardName || !searchEffect || !searchActions.length) {
+    return null;
+  }
+
+  const actionByDeckCardId = new Map();
+  const selectableDeckCardIds = new Set();
+  for (const actionView of searchActions) {
+    const selectedDeckIds = Array.isArray(actionView.action?.search_deck_ids)
+      ? actionView.action.search_deck_ids
+      : [];
+    for (const selectedDeckId of selectedDeckIds) {
+      selectableDeckCardIds.add(selectedDeckId);
+      if (!actionByDeckCardId.has(selectedDeckId)) {
+        actionByDeckCardId.set(selectedDeckId, actionView);
+      }
+    }
+  }
+
+  const visibleCount = Number.isInteger(searchEffect.count) && searchEffect.count > 0
+    ? searchEffect.count
+    : null;
+  const maximumSelectableCount = searchActions.reduce(
+    (maxCount, actionView) =>
+      Math.max(maxCount, Array.isArray(actionView.action?.search_deck_ids) ? actionView.action.search_deck_ids.length : 0),
+    0,
+  );
+  const configuredChooseCount = Number.isInteger(searchEffect.choose_count) ? searchEffect.choose_count : 1;
+  const chooseCount = maximumSelectableCount > 0 ? maximumSelectableCount : configuredChooseCount;
+  const actionBySelectionKey = buildSearchActionSelectionMap(searchActions);
+  const minimumChooseCount = actionBySelectionKey.has(selectionKeyForDeckIds([])) ? 0 : chooseCount;
+
+  return {
+    requestKey: sourceKey,
+    sourceKind,
+    sourceCardId,
+    sourceRef: sourceRef ? { ...sourceRef } : null,
+    attackIndex,
+    sourceCardName,
+    sourceZone: searchEffect.source_zone || "deck",
+    scope: visibleCount ? "top_cards" : "full_deck",
+    visibleCount,
+    chooseCount,
+    minimumChooseCount,
+    destinationZone: searchEffect.destination_zone || "hand",
+    searchFilters: Array.isArray(searchEffect.search_filters) ? searchEffect.search_filters : [],
+    actionByDeckCardId,
+    actionBySelectionKey,
+    selectableDeckCardIds: [...selectableDeckCardIds],
+  };
+}
+
+function resolveHandDeckBrowseRequest(state, sourceCardId = uiState.selectedCardId) {
   const player = state?.players?.[0];
   if (!player || !sourceCardId) {
     return null;
@@ -1173,37 +1267,91 @@ function resolveDeckBrowseRequest(state, sourceCardId = uiState.selectedCardId) 
   if (!searchActions.length) {
     return null;
   }
-  const actionByDeckCardId = new Map();
-  for (const actionView of searchActions) {
-    const selectedDeckIds = actionView.action?.search_deck_ids || [];
-    if (selectedDeckIds.length !== 1) {
-      continue;
-    }
-    const selectedDeckId = selectedDeckIds[0];
-    if (!actionByDeckCardId.has(selectedDeckId)) {
-      actionByDeckCardId.set(selectedDeckId, actionView);
-    }
-  }
-  const visibleCount = Number.isInteger(searchEffect.count) && searchEffect.count > 0
-    ? searchEffect.count
-    : null;
-  const chooseCount = Number.isInteger(searchEffect.choose_count) ? searchEffect.choose_count : 1;
-  const actionBySelectionKey = buildSearchActionSelectionMap(searchActions);
-  const minimumChooseCount = actionBySelectionKey.has(selectionKeyForDeckIds([])) ? 0 : chooseCount;
-  return {
+  return buildDeckBrowseRequest({
+    sourceKey: `hand:${sourceCardId}`,
+    sourceKind: "hand",
     sourceCardId,
     sourceCardName: handCard.name,
-    sourceZone: searchEffect.source_zone || "deck",
-    scope: visibleCount ? "top_cards" : "full_deck",
-    visibleCount,
-    chooseCount,
-    minimumChooseCount,
-    destinationZone: searchEffect.destination_zone || "hand",
-    searchFilters: Array.isArray(searchEffect.search_filters) ? searchEffect.search_filters : [],
-    actionByDeckCardId,
-    actionBySelectionKey,
-    selectableDeckCardIds: [...actionByDeckCardId.keys()],
-  };
+    searchEffect,
+    searchActions,
+  });
+}
+
+function findAttackSearchActions(state, sourceRef, attackIndex = null) {
+  if (!state || !sourceRef) {
+    return [];
+  }
+
+  return state.legal_actions.filter(
+    (actionView) =>
+      actionView.type === "attack" &&
+      refsMatch(actionView.source, sourceRef) &&
+      (!Number.isInteger(attackIndex) || actionView.action?.attack_index === attackIndex) &&
+      Array.isArray(actionView.action?.search_deck_ids),
+  );
+}
+
+function resolveAttackDeckBrowseRequest(
+  state,
+  {
+    sourceRef = uiState.selectedBoardTarget,
+    attackIndex = null,
+  } = {},
+) {
+  const pokemon = findPokemonForRef(state, sourceRef);
+  if (!pokemon) {
+    return null;
+  }
+
+  const searchActions = findAttackSearchActions(state, sourceRef, attackIndex);
+  if (!searchActions.length) {
+    return null;
+  }
+
+  const resolvedAttackIndex = Number.isInteger(attackIndex)
+    ? attackIndex
+    : searchActions[0].action?.attack_index;
+  const attack = Number.isInteger(resolvedAttackIndex) ? pokemon.attacks?.[resolvedAttackIndex] : null;
+  if (!attack) {
+    return null;
+  }
+
+  const searchEffect = (attack.effect_specs || []).find(
+    (effectSpec) =>
+      effectSpec.effect_type === "search_deck" &&
+      effectSpec.source_zone === "deck" &&
+      effectSpec.destination_zone,
+  );
+  if (!searchEffect) {
+    return null;
+  }
+
+  return buildDeckBrowseRequest({
+    sourceKey: `attack:${boardRefKey(sourceRef)}:${String(resolvedAttackIndex)}`,
+    sourceKind: "attack",
+    sourceRef,
+    attackIndex: resolvedAttackIndex,
+    sourceCardName: attack.name,
+    searchEffect,
+    searchActions,
+  });
+}
+
+function resolveDeckBrowseRequest(state) {
+  if (uiState.selectedCardId) {
+    return resolveHandDeckBrowseRequest(state, uiState.selectedCardId);
+  }
+  const activeRequest = uiState.deckBrowseRequest;
+  if (activeRequest?.sourceKind === "attack" && activeRequest.sourceRef) {
+    return resolveAttackDeckBrowseRequest(state, {
+      sourceRef: activeRequest.sourceRef,
+      attackIndex: activeRequest.attackIndex,
+    });
+  }
+  if (uiState.selectedBoardTarget) {
+    return resolveAttackDeckBrowseRequest(state, { sourceRef: uiState.selectedBoardTarget });
+  }
+  return null;
 }
 
 function resolveDiscardBrowseRequest(state, sourceCardId = uiState.selectedCardId) {
@@ -1260,7 +1408,7 @@ function selectionKeyForDeckIds(deckIds) {
 function openDeckBrowserForSelection(state) {
   const sourceCardId = uiState.selectedCardId;
   const sourceCard = findHandCardById(state, sourceCardId);
-  const request = resolveDeckBrowseRequest(state, sourceCardId);
+  const request = resolveDeckBrowseRequest(state);
   const discardRequirement = resolveDiscardFromHandRequirement(state, sourceCardId);
   if (sourceCard && discardRequirement && !request) {
     const discardRequest = resolveDiscardBrowseRequest(state, sourceCardId);
@@ -1353,6 +1501,9 @@ function cardMatchesSearchFilters(card, searchFilters) {
     }
     if (filter === "basic_pokemon") {
       return card.kind === "pokemon" && card.is_basic;
+    }
+    if (filter === "evolution_pokemon") {
+      return card.kind === "pokemon" && !card.is_basic;
     }
     if (filter === "supporter") {
       return card.kind === "trainer" && Array.isArray(card.card_tags) && card.card_tags.includes("supporter");
@@ -1627,7 +1778,7 @@ function renderDeckBrowserOverlay(state) {
 
   const activeRequest = uiState.deckBrowseRequest;
   const selectedRequest = resolveDeckBrowseRequest(state);
-  if (!activeRequest || !selectedRequest || activeRequest.sourceCardId !== selectedRequest.sourceCardId) {
+  if (!activeRequest || !selectedRequest || activeRequest.requestKey !== selectedRequest.requestKey) {
     overlay.hidden = true;
     overlay.innerHTML = "";
     return;
@@ -2357,6 +2508,56 @@ function handleAttackButtonClick(pokemon, attackIndex) {
     return;
   }
 
+  const searchActions = attackActions.filter((actionView) =>
+    Array.isArray(actionView.action?.search_deck_ids),
+  );
+  if (searchActions.length) {
+    const searchEffect = (pokemon.attacks?.[attackIndex]?.effect_specs || []).find(
+      (effectSpec) =>
+        effectSpec.effect_type === "search_deck" &&
+        effectSpec.source_zone === "deck" &&
+        effectSpec.destination_zone,
+    );
+    const chooseCount = Number.isInteger(searchEffect?.choose_count) ? searchEffect.choose_count : 1;
+    const playerBench = currentState?.players?.[pokemon.ref?.player_index || 0]?.bench || [];
+    const remainingBenchSlots = Math.max(0, BENCH_LIMIT - playerBench.length);
+    if (
+      searchEffect?.destination_zone === "bench" &&
+      remainingBenchSlots === 0
+    ) {
+      const emptySearchAction = searchActions.find(
+        (actionView) => (actionView.action?.search_deck_ids || []).length === 0,
+      ) || searchActions[0];
+      uiState.selectedCardId = null;
+      uiState.selectedDiscardIds = [];
+      uiState.selectedBoardTarget = null;
+      uiState.pendingAttackActionIds = [];
+      submitAction(emptySearchAction);
+      return;
+    }
+
+    const searchRequest = resolveAttackDeckBrowseRequest(currentState, {
+      sourceRef: pokemon.ref ? { ...pokemon.ref } : null,
+      attackIndex,
+    });
+    if (!searchRequest) {
+      uiState.pendingAttackActionIds = [];
+      submitAction(searchActions[0]);
+      return;
+    }
+
+    uiState.selectedCardId = null;
+    uiState.selectedDiscardIds = [];
+    uiState.discardBrowseRequest = null;
+    uiState.discardBrowseSelectedIds = [];
+    uiState.selectedBoardTarget = null;
+    uiState.pendingAttackActionIds = [];
+    uiState.deckBrowseRequest = searchRequest;
+    uiState.deckBrowseSelectedIds = [];
+    render(currentState);
+    return;
+  }
+
   const targetedActions = attackActions.filter(
     (actionView) =>
       actionView.target &&
@@ -2992,7 +3193,10 @@ function resolvePendingAttackTargetingInfo(state) {
       effectSpec.target_player === "opponent" &&
       Number(effectSpec.selection_count || 0) === 1,
   );
-  const damageAmount = targetedEffect?.amount ?? attack.damage ?? "";
+  if (!targetedEffect) {
+    return null;
+  }
+  const damageAmount = targetedEffect.amount ?? attack.damage ?? "";
   const damageLabel = String(damageAmount || "?");
   return {
     attackName: attack.name,

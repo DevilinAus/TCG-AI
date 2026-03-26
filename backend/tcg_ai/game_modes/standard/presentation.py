@@ -27,7 +27,7 @@ def serialize_state(
         "current_player": state.current_player,
         "setup_phase": state.setup_phase,
         "winner": state.winner,
-        "pending_promotion_for": None,
+        "pending_promotion_for": state.pending_promotion_for,
         "human_player": viewer,
         "matchup_label": f"{state.players[0].deck_name} vs {state.players[1].deck_name}",
         "shared_assets": {
@@ -81,7 +81,7 @@ def _serialize_player_state(
             "face_down": True,
             "image_url": None,
         },
-        "requires_promotion": False,
+        "requires_promotion": state.pending_promotion_for == player_index,
         "active": _serialize_pokemon(
             state,
             player.active,
@@ -253,7 +253,7 @@ def _serialize_pokemon(
         "target_action_types": target_action_types,
         "interactive": bool(source_action_types or target_action_types),
         "can_attack": "attack" in source_action_types,
-        "requires_promotion": False,
+        "requires_promotion": "promote" in source_action_types,
         "face_down": False,
     }
 
@@ -316,6 +316,17 @@ def _serialize_action_source(
             "zone": "hand",
             **card,
         }
+    if action["type"] == "promote":
+        bench_index = action["bench_index"]
+        pokemon = state.players[player_index].bench[bench_index]
+        instance_id = pokemon.stack[-1]
+        card = _serialize_card_instance(state, instance_id)
+        return {
+            "player_index": player_index,
+            "zone": "bench",
+            "bench_index": bench_index,
+            **card,
+        }
     if action["type"] in {"mulligan", "end_setup", "end_turn"}:
         return {
             "player_index": player_index,
@@ -341,6 +352,14 @@ def _serialize_action_target(
     action: dict[str, Any],
 ) -> dict[str, Any] | None:
     if action["type"] == "play_basic_to_active":
+        return {
+            "player_index": player_index,
+            "zone": "active",
+            "instance_id": None,
+            "bench_index": None,
+            "name": "Active Spot",
+        }
+    if action["type"] == "promote":
         return {
             "player_index": player_index,
             "zone": "active",
@@ -407,11 +426,21 @@ def _serialize_attack_effect_spec(effect_spec: Any) -> dict[str, Any]:
     return {
         "effect_type": effect_spec.effect_type,
         "amount": effect_spec.amount,
+        "count": effect_spec.count,
+        "count_mode": effect_spec.count_mode,
+        "source_zone": effect_spec.source_zone,
+        "destination_zone": effect_spec.destination_zone,
+        "destination_position": effect_spec.destination_position,
         "target_player": effect_spec.target_player,
         "target_zone": effect_spec.target_zone,
         "selection_count": effect_spec.selection_count,
+        "choose_count": effect_spec.choose_count,
+        "search_filters": list(effect_spec.search_filters),
         "energy_type": effect_spec.energy_type,
         "optional": effect_spec.optional,
+        "shuffle_destination": effect_spec.shuffle_destination,
+        "revealed_to": effect_spec.revealed_to,
+        "changes_hidden_information": effect_spec.changes_hidden_information,
         "bonus_damage": effect_spec.bonus_damage,
         "condition": effect_spec.condition,
         "duration": effect_spec.duration,
