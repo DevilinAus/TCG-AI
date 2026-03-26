@@ -11,6 +11,7 @@ import os
 from pathlib import Path
 import random
 import shutil
+import threading
 import sys
 import time
 from typing import Any
@@ -39,6 +40,7 @@ EVAL_ASSIGNMENTS = (
     {"player0_deck_id": "lucario-ex-battle-deck", "candidate_player_index": 0},
     {"player0_deck_id": "ampharos-ex-battle-deck", "candidate_player_index": 1},
 )
+_PROGRESS_LOG_LOCK = threading.Lock()
 
 
 def parse_args() -> argparse.Namespace:
@@ -59,6 +61,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--opponent-branch-width", type=int, default=2)
     parser.add_argument("--disable-opponent-turn", action="store_true")
     parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument(
+        "--progress-log",
+        type=Path,
+        default=None,
+        help="Optional append-only log file for per-game evaluation progress.",
+    )
     parser.add_argument("--promote-path", type=Path, default=None)
     parser.add_argument("--promotion-threshold", type=float, default=0.55)
     parser.add_argument("--seed", type=int, default=random.randint(1, 999_999))
@@ -134,6 +142,7 @@ def main() -> int:
                 "max_actions_per_game": args.max_actions_per_game,
                 "candidate_spec": candidate_spec,
                 "baseline_spec": baseline_spec,
+                "progress_log": str(args.progress_log.resolve()) if args.progress_log else None,
             }
         )
 
@@ -224,6 +233,7 @@ def _run_evaluation_chunk(task: dict[str, Any]) -> dict[str, Any]:
     planner_config = PlannerConfig(**dict(task["planner_config"]))
     candidate_spec = dict(task["candidate_spec"])
     baseline_spec = dict(task["baseline_spec"])
+    progress_log = Path(str(task["progress_log"])) if task.get("progress_log") else None
     candidate_oracle = _build_oracle(candidate_spec)
     baseline_oracle = _build_oracle(baseline_spec)
 
@@ -291,6 +301,18 @@ def _run_evaluation_chunk(task: dict[str, Any]) -> dict[str, Any]:
         game_payload["candidate_label"] = candidate_spec["label"]
         game_payload["baseline_label"] = baseline_spec["label"]
         game_lines.append(json.dumps(game_payload, sort_keys=True))
+        _log_worker_progress(
+            progress_log,
+            (
+                "[eval-worker] "
+                f"run={task['run_id']} shard={int(task['task_index']):06d} "
+                f"local_game={offset + 1}/{int(task['game_count'])} "
+                f"global_game={global_index + 1} "
+                f"candidate={candidate_spec['label']} baseline={baseline_spec['label']} "
+                f"result={candidate_result} turns={game_summary.turn_number} "
+                f"actions={game_summary.action_count} truncated={game_summary.truncated}"
+            ),
+        )
 
         summary["games"] += 1
         summary["truncated"] += 1 if game_summary.truncated else 0
@@ -400,6 +422,16 @@ def _print_progress(aggregate: dict[str, Any], *, total_games: int, start_time: 
         f"avg_turns={avg_turns:.1f} "
         f"eta={eta_display}"
     )
+
+
+def _log_worker_progress(progress_log: Path | None, line: str) -> None:
+    if progress_log is None:
+        return
+    progress_log.parent.mkdir(parents=True, exist_ok=True)
+    with _PROGRESS_LOG_LOCK:
+        with progress_log.open("a", encoding="utf-8") as handle:
+            handle.write(line)
+            handle.write("\n")
 
 
 if __name__ == "__main__":
