@@ -153,6 +153,8 @@ The self-play script prints rolling console progress, the training script prints
 
 ## Distributed Standard Self-Play
 
+If you just want the shortest launch instructions, start with [START_HERE.md](/Users/andrew/Documents/projects/TCG-AI/START_HERE.md).
+
 If one machine is handling accelerated training/inference and several others are mostly idle CPUs, the best MVP scale-up path is distributed self-play:
 
 - one main machine runs the coordinator and stores shards
