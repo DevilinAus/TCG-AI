@@ -7,6 +7,8 @@ from typing import Protocol
 from ..engine import action_id_for
 from ..models import GameState
 from .evaluator import evaluate_state, score_action_prior
+from .knowledge_state import serialize_knowledge_actions, serialize_knowledge_state
+from .neural_policy import PolicyValueBackend
 
 
 @dataclass(frozen=True)
@@ -32,6 +34,41 @@ class PolicyValueOracle(Protocol):
 class HeuristicPolicyValueOracle:
     def evaluate_batch(self, requests: list[PolicyValueRequest]) -> list[PolicyValueResult]:
         return [_evaluate_request(request) for request in requests]
+
+
+class BackendPolicyValueOracle:
+    def __init__(self, backend: PolicyValueBackend | None = None) -> None:
+        self.backend = backend or PolicyValueBackend()
+
+    def evaluate_batch(self, requests: list[PolicyValueRequest]) -> list[PolicyValueResult]:
+        payload = [
+            {
+                "acting_player_index": request.acting_player_index,
+                "root_player_index": request.root_player_index,
+                "belief_state": serialize_knowledge_state(
+                    request.state,
+                    perspective_player_index=request.acting_player_index,
+                ),
+                "legal_actions": serialize_knowledge_actions(
+                    request.state,
+                    acting_player_index=request.acting_player_index,
+                    legal_actions=request.legal_actions,
+                ),
+            }
+            for request in requests
+        ]
+        responses = self.backend.evaluate_batch(payload)
+        return [
+            PolicyValueResult(
+                value=float(response.get("value", 0.0)),
+                action_priors={
+                    str(action_id): float(prior)
+                    for action_id, prior in (response.get("action_priors") or {}).items()
+                },
+                diagnostics=dict(response.get("diagnostics") or {}),
+            )
+            for response in responses
+        ]
 
 
 def _evaluate_request(request: PolicyValueRequest) -> PolicyValueResult:
