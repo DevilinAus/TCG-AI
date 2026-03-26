@@ -1,0 +1,440 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+from collections.abc import Iterable
+from datetime import UTC, datetime
+import json
+from pathlib import Path
+import shutil
+import sys
+import time
+from typing import Any
+import zlib
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+
+from backend.tcg_ai.game_modes.standard.ml.neural_policy import (
+    ACTION_VECTOR_SIZE,
+    STATE_VECTOR_SIZE,
+    ActionConditionedPolicyValueNet,
+    DEFAULT_CHECKPOINT_PATH,
+    encode_action_vector,
+    encode_state_vector,
+)
+
+DEFAULT_SELF_PLAY_ROOT = PROJECT_ROOT / "standard_ml_data" / "self_play"
+DEFAULT_CHECKPOINT_ROOT = PROJECT_ROOT / "standard_ml_data" / "checkpoints"
+torch = None
+F = None
+DataLoader = None
+
+
+def _require_torch_modules():
+    global torch, F, DataLoader
+    if torch is not None and F is not None and DataLoader is not None:
+        return
+    try:
+        import torch as torch_module
+        from torch.nn import functional as functional_module
+        from torch.utils.data import DataLoader as dataloader_class
+    except Exception as exc:  # pragma: no cover - runtime dependency path
+        raise SystemExit(
+            "PyTorch is required for training. Install the optional standard-ml dependencies before running this script."
+        ) from exc
+    torch = torch_module
+    F = functional_module
+    DataLoader = dataloader_class
+
+
+class SelfPlayDecisionDataset:
+    def __init__(
+        self,
+        decision_paths: list[Path],
+        *,
+        split: str,
+        validation_mod: int,
+        validation_bucket: int,
+        max_records: int | None = None,
+    ) -> None:
+        super().__init__()
+        self.decision_paths = decision_paths
+        self.split = split
+        self.validation_mod = max(2, validation_mod)
+        self.validation_bucket = validation_bucket % self.validation_mod
+        self.max_records = max_records
+
+    def __iter__(self):
+        yielded = 0
+        for path in self.decision_paths:
+            with path.open("r", encoding="utf-8") as handle:
+                for line in handle:
+                    payload = json.loads(line)
+                    if not _record_in_split(
+                        payload,
+                        split=self.split,
+                        validation_mod=self.validation_mod,
+                        validation_bucket=self.validation_bucket,
+                    ):
+                        continue
+                    encoded = _encode_training_record(payload)
+                    if encoded is None:
+                        continue
+                    yield encoded
+                    yielded += 1
+                    if self.max_records is not None and yielded >= self.max_records:
+                        return
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Train the Standard action-conditioned model from self-play shards.")
+    parser.add_argument(
+        "--input-dir",
+        type=Path,
+        default=None,
+        help="Self-play run directory. Defaults to the newest run under standard_ml_data/self_play.",
+    )
+    parser.add_argument("--output-dir", type=Path, default=None, help="Checkpoint output directory.")
+    parser.add_argument("--resume-from", type=Path, default=None)
+    parser.add_argument("--promote-path", type=Path, default=None)
+    parser.add_argument("--epochs", type=int, default=1)
+    parser.add_argument("--batch-size", type=int, default=64)
+    parser.add_argument("--learning-rate", type=float, default=3e-4)
+    parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument("--value-loss-weight", type=float, default=0.5)
+    parser.add_argument("--log-every", type=int, default=50)
+    parser.add_argument("--save-every", type=int, default=500)
+    parser.add_argument("--eval-batches", type=int, default=20)
+    parser.add_argument("--validation-mod", type=int, default=20)
+    parser.add_argument("--validation-bucket", type=int, default=0)
+    parser.add_argument("--max-train-records", type=int, default=None)
+    parser.add_argument("--max-eval-records", type=int, default=None)
+    parser.add_argument("--device", choices=("auto", "cuda", "cpu"), default="auto")
+    return parser.parse_args()
+
+
+def main() -> int:
+    args = parse_args()
+    _require_torch_modules()
+    input_dir = _resolve_input_dir(args.input_dir)
+    decision_paths = sorted((input_dir / "decisions").glob("*.jsonl"))
+    if not decision_paths:
+        raise SystemExit(f"No decision shards found under {input_dir / 'decisions'}")
+
+    output_dir = _resolve_output_dir(args.output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    device = _resolve_device(args.device)
+
+    model = ActionConditionedPolicyValueNet().to(device)
+    if args.resume_from is not None:
+        checkpoint = torch.load(args.resume_from, map_location=device)
+        state_dict = checkpoint.get("state_dict") if isinstance(checkpoint, dict) else checkpoint
+        model.load_state_dict(state_dict)
+
+    optimizer = torch.optim.AdamW(
+        model.parameters(),
+        lr=args.learning_rate,
+        weight_decay=args.weight_decay,
+    )
+
+    train_dataset = SelfPlayDecisionDataset(
+        decision_paths,
+        split="train",
+        validation_mod=args.validation_mod,
+        validation_bucket=args.validation_bucket,
+        max_records=args.max_train_records,
+    )
+    eval_dataset = SelfPlayDecisionDataset(
+        decision_paths,
+        split="eval",
+        validation_mod=args.validation_mod,
+        validation_bucket=args.validation_bucket,
+        max_records=args.max_eval_records,
+    )
+    train_loader = DataLoader(
+        train_dataset,
+        batch_size=max(1, args.batch_size),
+        collate_fn=_collate_training_batch,
+    )
+    eval_loader = DataLoader(
+        eval_dataset,
+        batch_size=max(1, args.batch_size),
+        collate_fn=_collate_training_batch,
+    )
+
+    print(
+        "[train] "
+        f"input={input_dir} output={output_dir} device={device} "
+        f"files={len(decision_paths)} batch_size={args.batch_size}"
+    )
+
+    global_step = 0
+    latest_checkpoint_path: Path | None = None
+    for epoch in range(1, max(1, args.epochs) + 1):
+        epoch_start = time.perf_counter()
+        epoch_metrics = {
+            "policy_loss": 0.0,
+            "value_loss": 0.0,
+            "total_loss": 0.0,
+            "batches": 0,
+            "samples": 0,
+        }
+        for batch in train_loader:
+            if batch is None:
+                continue
+            global_step += 1
+            batch = _move_batch_to_device(batch, device)
+            optimizer.zero_grad(set_to_none=True)
+            policy_logits, values = model(batch["state_vectors"], batch["action_vectors"])
+            policy_logits = policy_logits.masked_fill(~batch["action_mask"], -1e9)
+            policy_loss = F.cross_entropy(policy_logits, batch["chosen_indices"])
+            value_loss = F.smooth_l1_loss(values, batch["value_targets"])
+            total_loss = policy_loss + value_loss * args.value_loss_weight
+            total_loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
+            optimizer.step()
+
+            batch_size = int(batch["state_vectors"].shape[0])
+            epoch_metrics["policy_loss"] += float(policy_loss.detach().cpu().item()) * batch_size
+            epoch_metrics["value_loss"] += float(value_loss.detach().cpu().item()) * batch_size
+            epoch_metrics["total_loss"] += float(total_loss.detach().cpu().item()) * batch_size
+            epoch_metrics["batches"] += 1
+            epoch_metrics["samples"] += batch_size
+
+            if global_step % max(1, args.log_every) == 0:
+                elapsed = max(time.perf_counter() - epoch_start, 1e-6)
+                samples_per_second = epoch_metrics["samples"] / elapsed
+                print(
+                    "[train] "
+                    f"epoch={epoch} step={global_step} "
+                    f"loss={total_loss.detach().cpu().item():.4f} "
+                    f"policy={policy_loss.detach().cpu().item():.4f} "
+                    f"value={value_loss.detach().cpu().item():.4f} "
+                    f"lr={optimizer.param_groups[0]['lr']:.2e} "
+                    f"samples/s={samples_per_second:.1f}"
+                )
+
+            if global_step % max(1, args.save_every) == 0:
+                latest_checkpoint_path = _save_checkpoint(
+                    model=model,
+                    output_dir=output_dir,
+                    step=global_step,
+                    epoch=epoch,
+                    args=args,
+                )
+                print(f"[train] saved checkpoint: {latest_checkpoint_path}")
+
+        if epoch_metrics["samples"] == 0:
+            raise SystemExit("No training records were available after filtering.")
+
+        train_policy = epoch_metrics["policy_loss"] / epoch_metrics["samples"]
+        train_value = epoch_metrics["value_loss"] / epoch_metrics["samples"]
+        train_total = epoch_metrics["total_loss"] / epoch_metrics["samples"]
+        print(
+            "[train] "
+            f"epoch={epoch} complete "
+            f"policy={train_policy:.4f} value={train_value:.4f} total={train_total:.4f}"
+        )
+
+        eval_metrics = _run_eval(
+            model=model,
+            eval_loader=eval_loader,
+            device=device,
+            max_batches=max(0, args.eval_batches),
+            value_loss_weight=args.value_loss_weight,
+        )
+        if eval_metrics["samples"] > 0:
+            print(
+                "[eval] "
+                f"epoch={epoch} "
+                f"policy={eval_metrics['policy_loss'] / eval_metrics['samples']:.4f} "
+                f"value={eval_metrics['value_loss'] / eval_metrics['samples']:.4f} "
+                f"total={eval_metrics['total_loss'] / eval_metrics['samples']:.4f}"
+            )
+
+    latest_checkpoint_path = _save_checkpoint(
+        model=model,
+        output_dir=output_dir,
+        step=global_step,
+        epoch=max(1, args.epochs),
+        args=args,
+        latest_name="final.pt",
+    )
+    latest_alias = output_dir / "latest.pt"
+    shutil.copy2(latest_checkpoint_path, latest_alias)
+    print(f"[train] final checkpoint: {latest_checkpoint_path}")
+    print(f"[train] latest checkpoint alias: {latest_alias}")
+
+    if args.promote_path is not None:
+        args.promote_path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copy2(latest_checkpoint_path, args.promote_path)
+        print(f"[train] promoted checkpoint copy: {args.promote_path}")
+    else:
+        default_hint = args.resume_from or DEFAULT_CHECKPOINT_PATH
+        print(f"[train] to play against this model, point TCG_AI_STANDARD_MODEL_CHECKPOINT at {latest_alias}")
+        print(f"[train] current default checkpoint location is {default_hint}")
+    return 0
+
+
+def _record_in_split(
+    payload: dict[str, object],
+    *,
+    split: str,
+    validation_mod: int,
+    validation_bucket: int,
+) -> bool:
+    game_id = str(payload.get("game_id", ""))
+    step_index = int(payload.get("step_index", 0) or 0)
+    bucket = zlib.crc32(f"{game_id}:{step_index}".encode("utf-8")) % validation_mod
+    is_eval = bucket == validation_bucket
+    return is_eval if split == "eval" else not is_eval
+
+
+def _encode_training_record(payload: dict[str, object]) -> dict[str, object] | None:
+    belief_state = payload.get("belief_state")
+    legal_actions = payload.get("legal_actions")
+    chosen_action_id = payload.get("chosen_action_id")
+    value_target = payload.get("value_target")
+    if not isinstance(belief_state, dict) or not isinstance(legal_actions, list):
+        return None
+    if not isinstance(chosen_action_id, str):
+        return None
+    if not isinstance(value_target, (int, float)):
+        return None
+    action_ids = [str(action.get("action_id", "")) for action in legal_actions if isinstance(action, dict)]
+    if chosen_action_id not in action_ids:
+        return None
+    return {
+        "state_vector": encode_state_vector(belief_state),
+        "action_vectors": [
+            encode_action_vector(action)
+            for action in legal_actions
+            if isinstance(action, dict)
+        ],
+        "chosen_action_index": action_ids.index(chosen_action_id),
+        "value_target": float(value_target),
+    }
+
+
+def _collate_training_batch(samples: list[dict[str, object]]):
+    if not samples:
+        return None
+    batch_size = len(samples)
+    max_actions = max(len(sample["action_vectors"]) for sample in samples)
+    state_vectors = torch.zeros(batch_size, STATE_VECTOR_SIZE, dtype=torch.float32)
+    action_vectors = torch.zeros(batch_size, max_actions, ACTION_VECTOR_SIZE, dtype=torch.float32)
+    action_mask = torch.zeros(batch_size, max_actions, dtype=torch.bool)
+    chosen_indices = torch.zeros(batch_size, dtype=torch.long)
+    value_targets = torch.zeros(batch_size, dtype=torch.float32)
+
+    for sample_index, sample in enumerate(samples):
+        state_vectors[sample_index] = torch.tensor(sample["state_vector"], dtype=torch.float32)
+        encoded_actions = torch.tensor(sample["action_vectors"], dtype=torch.float32)
+        action_count = encoded_actions.shape[0]
+        action_vectors[sample_index, :action_count] = encoded_actions
+        action_mask[sample_index, :action_count] = True
+        chosen_indices[sample_index] = int(sample["chosen_action_index"])
+        value_targets[sample_index] = float(sample["value_target"])
+
+    return {
+        "state_vectors": state_vectors,
+        "action_vectors": action_vectors,
+        "action_mask": action_mask,
+        "chosen_indices": chosen_indices,
+        "value_targets": value_targets,
+    }
+
+
+def _move_batch_to_device(batch: dict[str, torch.Tensor], device: torch.device) -> dict[str, torch.Tensor]:
+    return {key: value.to(device) for key, value in batch.items()}
+
+
+def _run_eval(
+    *,
+    model: ActionConditionedPolicyValueNet,
+    eval_loader: Iterable,
+    device: torch.device,
+    max_batches: int,
+    value_loss_weight: float,
+) -> dict[str, float]:
+    if max_batches <= 0:
+        return {"policy_loss": 0.0, "value_loss": 0.0, "total_loss": 0.0, "samples": 0}
+    metrics = {"policy_loss": 0.0, "value_loss": 0.0, "total_loss": 0.0, "samples": 0}
+    model.eval()
+    with torch.no_grad():
+        for batch_index, batch in enumerate(eval_loader, start=1):
+            if batch is None:
+                continue
+            batch = _move_batch_to_device(batch, device)
+            policy_logits, values = model(batch["state_vectors"], batch["action_vectors"])
+            policy_logits = policy_logits.masked_fill(~batch["action_mask"], -1e9)
+            policy_loss = F.cross_entropy(policy_logits, batch["chosen_indices"])
+            value_loss = F.smooth_l1_loss(values, batch["value_targets"])
+            total_loss = policy_loss + value_loss * value_loss_weight
+            batch_size = int(batch["state_vectors"].shape[0])
+            metrics["policy_loss"] += float(policy_loss.detach().cpu().item()) * batch_size
+            metrics["value_loss"] += float(value_loss.detach().cpu().item()) * batch_size
+            metrics["total_loss"] += float(total_loss.detach().cpu().item()) * batch_size
+            metrics["samples"] += batch_size
+            if batch_index >= max_batches:
+                break
+    model.train()
+    return metrics
+
+
+def _save_checkpoint(
+    *,
+    model: ActionConditionedPolicyValueNet,
+    output_dir: Path,
+    step: int,
+    epoch: int,
+    args: argparse.Namespace,
+    latest_name: str | None = None,
+) -> Path:
+    checkpoint_path = output_dir / f"step_{step:07d}.pt"
+    torch.save(
+        {
+            "state_dict": model.state_dict(),
+            "epoch": epoch,
+            "step": step,
+            "saved_at": datetime.now(UTC).isoformat(),
+            "training_config": vars(args),
+        },
+        checkpoint_path,
+    )
+    if latest_name is not None:
+        latest_path = output_dir / latest_name
+        shutil.copy2(checkpoint_path, latest_path)
+    return checkpoint_path
+
+
+def _resolve_input_dir(input_dir: Path | None) -> Path:
+    if input_dir is not None:
+        return input_dir.resolve()
+    candidates = sorted(DEFAULT_SELF_PLAY_ROOT.glob("run_*"))
+    if not candidates:
+        raise SystemExit("No self-play runs found. Generate self-play data first.")
+    return candidates[-1].resolve()
+
+
+def _resolve_output_dir(output_dir: Path | None) -> Path:
+    if output_dir is not None:
+        return output_dir.resolve()
+    run_name = datetime.now(UTC).strftime("run_%Y%m%dT%H%M%SZ")
+    return (DEFAULT_CHECKPOINT_ROOT / run_name).resolve()
+
+
+def _resolve_device(device_arg: str) -> torch.device:
+    if device_arg == "cpu":
+        return torch.device("cpu")
+    if device_arg == "cuda":
+        if not torch.cuda.is_available():
+            raise SystemExit("CUDA was requested, but no CUDA device is available.")
+        return torch.device("cuda")
+    return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

@@ -3,5 +3,6 @@ __pycache__/
 .DS_Store
 trainer_progress.txt
 standard_policy_progress.json
+standard_ml_data/
 node_modules/
 .playwright-browsers/

@@ -12,7 +12,18 @@ from backend.tcg_ai.game_modes.standard.ml.knowledge_state import (
     serialize_knowledge_actions,
     serialize_knowledge_state,
 )
+from backend.tcg_ai.game_modes.standard.ml.neural_policy import PolicyValueBackend
+from backend.tcg_ai.game_modes.standard.ml.oracle import (
+    BackendPolicyValueOracle,
+    PolicyValueRequest,
+)
 from backend.tcg_ai.game_modes.standard.ml.planner import PlannerConfig, StandardTurnPlanner
+from backend.tcg_ai.game_modes.standard.ml.self_play import (
+    SelfPlayConfig,
+    _build_player_planners,
+    _should_record_decision,
+    play_self_play_game,
+)
 from backend.tcg_ai.game_modes.standard.ml.service import StandardMlService
 
 
@@ -161,6 +172,85 @@ class StandardMlTests(unittest.TestCase):
         self.assertEqual(
             set(response["evaluations"][0]["action_priors"]),
             {action_id_for(action) for action in legal_actions},
+        )
+
+    def test_backend_policy_value_oracle_evaluates_in_process_requests(self) -> None:
+        state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck", ai_name="Brock")
+        legal_actions = list_legal_actions(state, player_index=0)
+        backend = PolicyValueBackend(checkpoint_path=Path(self.temp_dir.name) / "missing.pt")
+        oracle = BackendPolicyValueOracle(backend=backend)
+
+        results = oracle.evaluate_batch(
+            [
+                PolicyValueRequest(
+                    state=state,
+                    acting_player_index=0,
+                    root_player_index=0,
+                    legal_actions=legal_actions,
+                )
+            ]
+        )
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(set(results[0].action_priors), {action_id_for(action) for action in legal_actions})
+        self.assertEqual(results[0].diagnostics["backend"], "heuristic")
+
+    def test_self_play_game_produces_completed_training_records(self) -> None:
+        summary, records = play_self_play_game(
+            game_id="self-play-test",
+            seed=5,
+            config=SelfPlayConfig(
+                player0_deck_id="ampharos-ex-battle-deck",
+                planner_config=PlannerConfig(max_depth=1, beam_width=2, opponent_branch_width=1),
+                max_actions_per_game=120,
+                include_setup_decisions=True,
+                record_forced_actions=True,
+            ),
+        )
+
+        self.assertFalse(summary.truncated)
+        self.assertIn(summary.winner, {0, 1})
+        self.assertEqual(summary.decision_samples, len(records))
+        self.assertGreater(len(records), 0)
+        self.assertTrue(all(record["winner"] == summary.winner for record in records))
+        self.assertTrue(all(record["value_target"] in {-100.0, 100.0} for record in records))
+        self.assertTrue(
+            all(
+                record["chosen_action_id"] in {action["action_id"] for action in record["legal_actions"]}
+                for record in records
+            )
+        )
+
+    def test_self_play_builds_player_specific_planners_and_honors_collect_flag(self) -> None:
+        class TaggedOracle:
+            def __init__(self, tag: str) -> None:
+                self.tag = tag
+
+        default_oracle = TaggedOracle("default")
+        player0_oracle = TaggedOracle("player0")
+        player1_oracle = TaggedOracle("player1")
+
+        planners = _build_player_planners(
+            planner_config=PlannerConfig(max_depth=1, beam_width=1, opponent_branch_width=1),
+            default_oracle=default_oracle,
+            oracle_by_player={
+                0: player0_oracle,
+                1: player1_oracle,
+            },
+        )
+
+        self.assertIs(planners[0].oracle, player0_oracle)
+        self.assertIs(planners[1].oracle, player1_oracle)
+        self.assertFalse(
+            _should_record_decision(
+                legal_actions=[{"type": "end_turn"}],
+                setup_phase="opening",
+                config=SelfPlayConfig(
+                    collect_training_records=False,
+                    include_setup_decisions=True,
+                    record_forced_actions=True,
+                ),
+            )
         )
 
     def _finish_opening_setup(self, state) -> None:

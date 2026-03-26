@@ -109,6 +109,42 @@ Quick launcher for the Linux NN box:
 bash scripts/start_standard_ml_worker.sh --checkpoint /home/<you>/models/champion.pt --token <shared-token>
 ```
 
+## Standard Self-Play And Training
+
+The first self-play/training scripts on this branch target only the current `Ampharos ex Battle Deck` vs `Lucario ex Battle Deck` matchup.
+
+Generate self-play data locally on the Linux box:
+
+```bash
+python3 scripts/run_standard_self_play.py --games 100000 --workers 8 --chunk-size 250
+```
+
+Or run the whole pipeline in one go:
+
+```bash
+bash scripts/run_standard_training_pipeline.sh --games 100000 --workers 8 --train-device cuda --epochs 1
+```
+
+Train a checkpoint from the newest self-play run:
+
+```bash
+python3 scripts/train_standard_model.py --device cuda --batch-size 128 --epochs 1
+```
+
+Evaluate a new checkpoint against the current champion and promote it if it clears the threshold:
+
+```bash
+python3 scripts/evaluate_standard_checkpoints.py --candidate standard_ml_data/checkpoints/run_20260326T010203Z/final.pt --promote-path standard_ml_data/champion.pt
+```
+
+If you want the trained model to become the worker's default checkpoint immediately:
+
+```bash
+python3 scripts/train_standard_model.py --device cuda --promote-path standard_ml_data/champion.pt
+```
+
+The self-play script prints rolling console progress, the training script prints live loss/checkpoint updates, and the evaluation script prints live head-to-head win-rate progress before optionally promoting a new champion checkpoint.
+
 ## How To Test
 
 ```bash

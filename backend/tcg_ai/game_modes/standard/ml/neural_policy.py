@@ -51,10 +51,19 @@ class ActionConditionedPolicyValueNet(_TORCH_BASE):  # type: ignore[misc]
     def forward(self, state_vector: torch.Tensor, action_vectors: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         state_hidden = self.state_encoder(state_vector)
         action_hidden = self.action_encoder(action_vectors)
-        repeated_state = state_hidden.unsqueeze(0).expand(action_hidden.shape[0], -1)
-        policy_logits = self.policy_head(torch.cat([repeated_state, action_hidden], dim=1)).squeeze(-1)
-        value = torch.tanh(self.value_head(state_hidden)).squeeze(-1) * 100.0
-        return policy_logits, value
+        if state_hidden.ndim == 1:
+            repeated_state = state_hidden.unsqueeze(0).expand(action_hidden.shape[0], -1)
+            policy_logits = self.policy_head(torch.cat([repeated_state, action_hidden], dim=1)).squeeze(-1)
+            value = torch.tanh(self.value_head(state_hidden)).squeeze(-1) * 100.0
+            return policy_logits, value
+        if state_hidden.ndim == 2:
+            repeated_state = state_hidden.unsqueeze(1).expand(-1, action_hidden.shape[1], -1)
+            policy_logits = self.policy_head(
+                torch.cat([repeated_state, action_hidden], dim=-1)
+            ).squeeze(-1)
+            value = torch.tanh(self.value_head(state_hidden)).squeeze(-1) * 100.0
+            return policy_logits, value
+        raise ValueError("Unsupported ActionConditionedPolicyValueNet input shape.")
 
 
 class PolicyValueBackend:
@@ -98,7 +107,7 @@ class PolicyValueBackend:
 
     def _model_evaluation(self, evaluation: dict[str, Any]) -> dict[str, Any]:
         state_vector = torch.tensor(
-            _encode_state_vector(evaluation.get("belief_state", {})),
+            encode_state_vector(evaluation.get("belief_state", {})),
             dtype=torch.float32,
             device=next(self._model.parameters()).device,
         )
@@ -116,7 +125,7 @@ class PolicyValueBackend:
                 },
             }
         action_vectors = torch.tensor(
-            [_encode_action_vector(action) for action in legal_actions],
+            [encode_action_vector(action) for action in legal_actions],
             dtype=torch.float32,
             device=state_vector.device,
         )
@@ -210,7 +219,7 @@ def _heuristic_action_priors(legal_actions: list[dict[str, Any]]) -> dict[str, f
     return _softmax_logits(logits)
 
 
-def _encode_state_vector(belief_state: dict[str, Any]) -> list[float]:
+def encode_state_vector(belief_state: dict[str, Any]) -> list[float]:
     players = belief_state.get("players", [{}, {}])
     player = players[0] if len(players) > 0 else {}
     opponent = players[1] if len(players) > 1 else {}
@@ -255,7 +264,7 @@ def _encode_state_vector(belief_state: dict[str, Any]) -> list[float]:
     return vector[:STATE_VECTOR_SIZE]
 
 
-def _encode_action_vector(action: dict[str, Any]) -> list[float]:
+def encode_action_vector(action: dict[str, Any]) -> list[float]:
     source_card = action.get("source_card") or {}
     action_type = str(action.get("type", ""))
     vector = [
