@@ -165,15 +165,38 @@ Why this shape:
 - CPU workers are still useful for generating lots of games
 - the 4070 is better used for training now, and later for batched model inference
 
-Start the coordinator on the main machine:
+### What Runs Where
+
+Coordinator / training box:
+
+- Linux machine with the RTX 4070
+- full repo checkout and Python environment
+- runs the coordinator
+- serves the dashboard
+- stores the self-play shards
+- later runs training and evaluation
+
+Worker machines:
+
+- any Mac or Linux machine with the repo checkout and Python environment
+- no GPU required
+- run self-play workers only
+- request chunk leases from the coordinator and upload results back
+
+### How To Launch A Distributed Run
+
+1. On the Linux coordinator machine, start the coordinator.
+
+Minimal:
 
 ```bash
 bash scripts/start_standard_self_play_coordinator.sh
 ```
 
-Or with explicit values:
+Recommended first run:
 
 ```bash
+export TCG_AI_STANDARD_SELF_PLAY_RUN_ID=run_$(date -u '+%Y%m%dT%H%M%SZ')
 TCG_AI_STANDARD_SELF_PLAY_GAMES=20000 \
 TCG_AI_STANDARD_SELF_PLAY_CHUNK_SIZE=50 \
 TCG_AI_STANDARD_SELF_PLAY_HOST=0.0.0.0 \
@@ -181,7 +204,28 @@ TCG_AI_STANDARD_SELF_PLAY_PORT=8787 \
 bash scripts/start_standard_self_play_coordinator.sh
 ```
 
-Start a worker on each extra machine:
+The coordinator prints:
+
+- the server URL
+- the dashboard URL
+- the status endpoint
+- the output directory for this run
+
+2. Open the dashboard in your browser.
+
+```text
+http://<linux-box>:8787/dashboard
+```
+
+3. Optionally open a second terminal on the coordinator machine for the text status watcher.
+
+```bash
+bash scripts/watch_standard_self_play_status.sh http://<linux-box>:8787
+```
+
+4. On each worker machine, launch a worker.
+
+Minimal worker setup:
 
 ```bash
 export TCG_AI_STANDARD_SELF_PLAY_COORDINATOR_URL=http://<linux-box>:8787
@@ -189,25 +233,51 @@ export TCG_AI_STANDARD_SELF_PLAY_WORKER_ID=<unique-worker-name>
 bash scripts/start_standard_self_play_worker.sh
 ```
 
-Open the live dashboard in a browser:
+Recommended worker setup:
 
-```text
-http://<linux-box>:8787/dashboard
+```bash
+export TCG_AI_STANDARD_SELF_PLAY_COORDINATOR_URL=http://<linux-box>:8787
+export TCG_AI_STANDARD_SELF_PLAY_WORKER_ID=macbook-m1
+export TCG_AI_STANDARD_SELF_PLAY_POLL_SECONDS=2
+export TCG_AI_STANDARD_SELF_PLAY_HEARTBEAT_INTERVAL_SECONDS=15
+export TCG_AI_STANDARD_SELF_PLAY_PROGRESS_LOG=standard_ml_data/progress/self_play_worker.log
+bash scripts/start_standard_self_play_worker.sh
 ```
 
-The dashboard shows:
+Important:
 
-- which workers are online, busy, idle, stalled, or offline
+- every worker should use a unique `TCG_AI_STANDARD_SELF_PLAY_WORKER_ID`
+- every worker should be on the same repo revision
+- every worker needs the Python dependencies installed
+- if a worker disappears, the coordinator will eventually reclaim the lease and reissue that chunk
+
+5. Confirm the machines appear in the dashboard.
+
+What you should see:
+
+- workers marked as `busy`, `idle`, `stalled`, or `offline`
 - current shard progress per machine
 - total distributed throughput and recent games-per-minute
 - per-worker pace so you can compare machines against each other
 - dropout visibility when a worker stops checking in
 
-Watch cluster progress from a second terminal:
+### Dashboard Notes
 
-```bash
-bash scripts/watch_standard_self_play_status.sh http://<linux-box>:8787
-```
+The dashboard shows two slightly different progress views:
+
+- `reported` totals update as soon as a worker finishes a game and reports progress
+- `aggregate` totals update only after a full shard is submitted and written to disk
+
+So during an active run it is normal for `reported.games` to be slightly ahead of `aggregate.games`.
+
+Worker states mean:
+
+- `busy`: worker is alive and currently holds a shard lease
+- `idle`: worker is alive but waiting for work
+- `stalled`: worker still holds a lease but has stopped checking in
+- `offline`: worker has no active lease and has stopped checking in
+
+### Output Layout
 
 The coordinator writes a normal self-play dataset under `standard_ml_data/distributed_self_play/<run_id>`:
 
@@ -217,6 +287,12 @@ The coordinator writes a normal self-play dataset under `standard_ml_data/distri
 - `games/shard_XXXXXX.jsonl`
 
 That output is intentionally compatible with the training/evaluation scripts that already exist.
+
+If you want to control the output folder explicitly:
+
+```bash
+export TCG_AI_STANDARD_SELF_PLAY_OUTPUT_DIR=standard_ml_data/distributed_self_play/<run_id>
+```
 
 ### Parameter Guidance
 
@@ -239,11 +315,24 @@ Good early coordinator defaults:
 - `chunk-size=25` or `50` so work is rebalanced often and progress appears quickly
 - keep the current search defaults until the distributed loop is stable
 
-Once the run is complete, train and evaluate on the Linux 4070 machine:
+### After The Run Finishes
+
+Train on the Linux 4070 machine using the completed distributed run folder:
 
 ```bash
 python3 scripts/train_standard_model.py --input-dir standard_ml_data/distributed_self_play/<run_id> --device cuda --epochs 1
+```
+
+Evaluate the candidate checkpoint and promote it if it wins:
+
+```bash
 python3 scripts/evaluate_standard_checkpoints.py --candidate standard_ml_data/checkpoints/<run_id>/final.pt --promote-path standard_ml_data/champion.pt
+```
+
+If you want to play against the promoted model in the UI afterward, launch the remote NN worker against the champion checkpoint:
+
+```bash
+bash scripts/start_standard_ml_worker.sh --checkpoint standard_ml_data/champion.pt --token <shared-token>
 ```
 
 ## How To Test
