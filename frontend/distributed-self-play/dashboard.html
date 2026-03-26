@@ -1,0 +1,65 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Distributed Standard Self-Play</title>
+    <link rel="stylesheet" href="/dashboard.css">
+  </head>
+  <body>
+    <div class="ambient ambient-left"></div>
+    <div class="ambient ambient-right"></div>
+    <main class="shell">
+      <header class="masthead">
+        <div>
+          <p class="eyebrow">Standard ML Cluster</p>
+          <h1>Distributed Self-Play Dashboard</h1>
+          <p class="subtitle">Live coordinator view for Ampharos vs Lucario training runs.</p>
+        </div>
+        <div class="run-badge">
+          <span class="run-badge-label">Run</span>
+          <span id="run-id">Loading…</span>
+        </div>
+      </header>
+
+      <section class="overview-grid" id="overview-grid"></section>
+
+      <section class="panel-grid">
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Throughput</p>
+              <h2>Games Per Minute</h2>
+            </div>
+            <p class="panel-meta" id="last-refresh">Waiting for status…</p>
+          </div>
+          <div class="chart" id="throughput-chart"></div>
+          <div class="metric-row" id="throughput-breakdown"></div>
+        </article>
+
+        <article class="panel">
+          <div class="panel-head">
+            <div>
+              <p class="eyebrow">Leaderboard</p>
+              <h2>Machine Race</h2>
+            </div>
+            <p class="panel-meta" id="leaderboard-summary">No workers yet</p>
+          </div>
+          <div class="leaderboard" id="leaderboard"></div>
+        </article>
+      </section>
+
+      <section class="panel workers-panel">
+        <div class="panel-head">
+          <div>
+            <p class="eyebrow">Workers</p>
+            <h2>Live Machines</h2>
+          </div>
+          <p class="panel-meta" id="worker-summary">No workers connected</p>
+        </div>
+        <div class="workers-grid" id="workers-grid"></div>
+      </section>
+    </main>
+    <script src="/dashboard.js"></script>
+  </body>
+</html>

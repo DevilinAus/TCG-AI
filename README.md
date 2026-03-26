@@ -151,6 +151,101 @@ python3 scripts/train_standard_model.py --device cuda --promote-path standard_ml
 
 The self-play script prints rolling console progress, the training script prints live loss/checkpoint updates, and the evaluation script prints live head-to-head win-rate progress before optionally promoting a new champion checkpoint.
 
+## Distributed Standard Self-Play
+
+If one machine is training on the 4070 and several others are mostly idle CPUs, the best MVP scale-up path is distributed self-play:
+
+- one main Linux machine runs the coordinator and stores shards
+- extra machines poll for chunks and simulate games locally
+- the Linux machine trains and evaluates checkpoints after the run
+
+Why this shape:
+
+- the Standard simulator is symbolic Python logic and is a poor fit for "move the whole engine onto the GPU"
+- CPU workers are still useful for generating lots of games
+- the 4070 is better used for training now, and later for batched model inference
+
+Start the coordinator on the main machine:
+
+```bash
+bash scripts/start_standard_self_play_coordinator.sh
+```
+
+Or with explicit values:
+
+```bash
+TCG_AI_STANDARD_SELF_PLAY_GAMES=20000 \
+TCG_AI_STANDARD_SELF_PLAY_CHUNK_SIZE=50 \
+TCG_AI_STANDARD_SELF_PLAY_HOST=0.0.0.0 \
+TCG_AI_STANDARD_SELF_PLAY_PORT=8787 \
+bash scripts/start_standard_self_play_coordinator.sh
+```
+
+Start a worker on each extra machine:
+
+```bash
+export TCG_AI_STANDARD_SELF_PLAY_COORDINATOR_URL=http://<linux-box>:8787
+export TCG_AI_STANDARD_SELF_PLAY_WORKER_ID=<unique-worker-name>
+bash scripts/start_standard_self_play_worker.sh
+```
+
+Open the live dashboard in a browser:
+
+```text
+http://<linux-box>:8787/dashboard
+```
+
+The dashboard shows:
+
+- which workers are online, busy, idle, stalled, or offline
+- current shard progress per machine
+- total distributed throughput and recent games-per-minute
+- per-worker pace so you can compare machines against each other
+- dropout visibility when a worker stops checking in
+
+Watch cluster progress from a second terminal:
+
+```bash
+bash scripts/watch_standard_self_play_status.sh http://<linux-box>:8787
+```
+
+The coordinator writes a normal self-play dataset under `standard_ml_data/distributed_self_play/<run_id>`:
+
+- `manifest.json`
+- `summary.json`
+- `decisions/shard_XXXXXX.jsonl`
+- `games/shard_XXXXXX.jsonl`
+
+That output is intentionally compatible with the training/evaluation scripts that already exist.
+
+### Parameter Guidance
+
+These are not fixed:
+
+- `games`
+- `chunk-size`
+- `workers`
+
+Practical guidance:
+
+- `games` mostly changes how much data you collect
+- `chunk-size` mostly changes scheduler behavior, time-to-visible-progress, and shard count
+- `chunk-size` does not make the model smarter by itself
+- `max-depth`, `beam-width`, and `opponent-branch-width` affect teacher quality much more directly
+
+Good early coordinator defaults:
+
+- `games=5000` for the first end-to-end distributed smoke run
+- `chunk-size=25` or `50` so work is rebalanced often and progress appears quickly
+- keep the current search defaults until the distributed loop is stable
+
+Once the run is complete, train and evaluate on the Linux 4070 machine:
+
+```bash
+python3 scripts/train_standard_model.py --input-dir standard_ml_data/distributed_self_play/<run_id> --device cuda --epochs 1
+python3 scripts/evaluate_standard_checkpoints.py --candidate standard_ml_data/checkpoints/<run_id>/final.pt --promote-path standard_ml_data/champion.pt
+```
+
 ## How To Test
 
 ```bash
