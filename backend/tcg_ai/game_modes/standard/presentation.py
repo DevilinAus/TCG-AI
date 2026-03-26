@@ -72,6 +72,9 @@ def _serialize_player_state(
         ] if player_index == viewer else [],
         "discard_count": len(player.discard),
         "discard_top": _serialize_discard_top(state, player),
+        "discard_cards": [
+            _serialize_card_instance(state, instance_id) for instance_id in player.discard
+        ] if player_index == viewer else [],
         "energy_count": _count_attached_energy(player),
         "energy_zone": [],
         "energy_attachment_available": not player.energy_attached_this_turn,
@@ -151,6 +154,8 @@ def _serialize_card_instance(state: GameState, instance_id: str) -> dict[str, An
         "image_url": card.image_url,
         "card_tags": list(card.card_tags),
         "rules_text": list(card.rules_text),
+        "is_basic_energy": card.is_basic_energy,
+        "prize_card_value": card.prize_card_value,
         "effect_specs": [_serialize_effect_spec(effect_spec) for effect_spec in card.effect_specs],
     }
 
@@ -455,7 +460,9 @@ def _serialize_attack_effect_state(effect: Any) -> dict[str, Any]:
         "effect_type": effect.effect_type,
         "source_player": effect.source_player,
         "expires_end_of_player_turn": effect.expires_end_of_player_turn,
+        "activation_turn": effect.activation_turn,
         "condition": effect.condition,
+        "blocked_attack_index": effect.blocked_attack_index,
     }
 
 

@@ -21,6 +21,7 @@ const uiState = {
   discardBrowseSelectedIds: [],
   selectedBoardTarget: null,
   pendingAttackActionIds: [],
+  attackOptionRequest: null,
   availableContextActions: [],
   deckBrowseRequest: null,
   deckBrowseSelectedIds: [],
@@ -686,6 +687,7 @@ function resetSelections() {
   uiState.discardBrowseSelectedIds = [];
   uiState.selectedBoardTarget = null;
   uiState.pendingAttackActionIds = [];
+  uiState.attackOptionRequest = null;
   uiState.availableContextActions = [];
   uiState.deckBrowseRequest = null;
   uiState.deckBrowseSelectedIds = [];
@@ -729,6 +731,21 @@ function sanitizeSelections(state) {
         refsMatch(actionView.source, uiState.selectedBoardTarget),
     ),
   );
+  if (!uiState.attackOptionRequest) {
+    // no-op
+  } else {
+    const actionViews = state.legal_actions.filter((actionView) =>
+      uiState.attackOptionRequest.actionIds.includes(actionView.action_id),
+    );
+    if (!actionViews.length) {
+      uiState.attackOptionRequest = null;
+    } else {
+      uiState.attackOptionRequest = {
+        ...uiState.attackOptionRequest,
+        actionIds: actionViews.map((actionView) => actionView.action_id),
+      };
+    }
+  }
   const deckBrowseRequest = resolveDeckBrowseRequest(state);
   if (!deckBrowseRequest) {
     uiState.deckBrowseRequest = null;
@@ -1267,6 +1284,7 @@ function buildDeckBrowseRequest({
   sourceCardName,
   searchEffect,
   searchActions,
+  selectionField = "search_deck_ids",
 }) {
   if (!sourceKey || !sourceCardName || !searchEffect || !searchActions.length) {
     return null;
@@ -1275,8 +1293,8 @@ function buildDeckBrowseRequest({
   const actionByDeckCardId = new Map();
   const selectableDeckCardIds = new Set();
   for (const actionView of searchActions) {
-    const selectedDeckIds = Array.isArray(actionView.action?.search_deck_ids)
-      ? actionView.action.search_deck_ids
+    const selectedDeckIds = Array.isArray(actionView.action?.[selectionField])
+      ? actionView.action[selectionField]
       : [];
     for (const selectedDeckId of selectedDeckIds) {
       selectableDeckCardIds.add(selectedDeckId);
@@ -1291,12 +1309,12 @@ function buildDeckBrowseRequest({
     : null;
   const maximumSelectableCount = searchActions.reduce(
     (maxCount, actionView) =>
-      Math.max(maxCount, Array.isArray(actionView.action?.search_deck_ids) ? actionView.action.search_deck_ids.length : 0),
+      Math.max(maxCount, Array.isArray(actionView.action?.[selectionField]) ? actionView.action[selectionField].length : 0),
     0,
   );
   const configuredChooseCount = Number.isInteger(searchEffect.choose_count) ? searchEffect.choose_count : 1;
   const chooseCount = maximumSelectableCount > 0 ? maximumSelectableCount : configuredChooseCount;
-  const actionBySelectionKey = buildSearchActionSelectionMap(searchActions);
+  const actionBySelectionKey = buildActionSelectionMap(searchActions, selectionField);
   const minimumChooseCount = actionBySelectionKey.has(selectionKeyForDeckIds([])) ? 0 : chooseCount;
 
   return {
@@ -1307,6 +1325,7 @@ function buildDeckBrowseRequest({
     attackIndex,
     sourceCardName,
     sourceZone: searchEffect.source_zone || "deck",
+    selectionField,
     scope: visibleCount ? "top_cards" : "full_deck",
     visibleCount,
     chooseCount,
@@ -1357,6 +1376,57 @@ function resolveHandDeckBrowseRequest(state, sourceCardId = uiState.selectedCard
     sourceCardName: handCard.name,
     searchEffect,
     searchActions,
+  });
+}
+
+function findRecoverFromDiscardActionsForSelection(state, sourceCardId = uiState.selectedCardId) {
+  if (!state || !sourceCardId) {
+    return [];
+  }
+  return state.legal_actions.filter(
+    (actionView) =>
+      actionView.source?.zone === "hand" &&
+      actionView.source.instance_id === sourceCardId &&
+      !actionView.target &&
+      Array.isArray(actionView.action?.recover_from_discard_ids) &&
+      actionMatchesSelectedDiscardIds(actionView),
+  );
+}
+
+function resolveHandDiscardRecoveryRequest(state, sourceCardId = uiState.selectedCardId) {
+  const player = state?.players?.[0];
+  if (!player || !sourceCardId) {
+    return null;
+  }
+
+  const handCard = player.hand?.find((card) => card.instance_id === sourceCardId);
+  if (!handCard) {
+    return null;
+  }
+
+  const recoverEffect = (handCard.effect_specs || []).find(
+    (effectSpec) =>
+      effectSpec.effect_type === "recover_from_discard" &&
+      effectSpec.source_zone === "discard" &&
+      effectSpec.destination_zone === "hand",
+  );
+  if (!recoverEffect) {
+    return null;
+  }
+
+  const recoveryActions = findRecoverFromDiscardActionsForSelection(state, sourceCardId);
+  if (!recoveryActions.length) {
+    return null;
+  }
+
+  return buildDeckBrowseRequest({
+    sourceKey: `discard:${sourceCardId}`,
+    sourceKind: "hand",
+    sourceCardId,
+    sourceCardName: handCard.name,
+    searchEffect: recoverEffect,
+    searchActions: recoveryActions,
+    selectionField: "recover_from_discard_ids",
   });
 }
 
@@ -1422,7 +1492,10 @@ function resolveAttackDeckBrowseRequest(
 
 function resolveDeckBrowseRequest(state) {
   if (uiState.selectedCardId) {
-    return resolveHandDeckBrowseRequest(state, uiState.selectedCardId);
+    return (
+      resolveHandDiscardRecoveryRequest(state, uiState.selectedCardId) ||
+      resolveHandDeckBrowseRequest(state, uiState.selectedCardId)
+    );
   }
   const activeRequest = uiState.deckBrowseRequest;
   if (activeRequest?.sourceKind === "attack" && activeRequest.sourceRef) {
@@ -1465,11 +1538,11 @@ function resolveDiscardBrowseRequest(state, sourceCardId = uiState.selectedCardI
   };
 }
 
-function buildSearchActionSelectionMap(searchActions) {
+function buildActionSelectionMap(actionViews, selectionField = "search_deck_ids") {
   const actionMap = new Map();
-  for (const actionView of searchActions) {
-    const selectedDeckIds = actionView.action?.search_deck_ids || [];
-    const key = selectionKeyForDeckIds(selectedDeckIds);
+  for (const actionView of actionViews) {
+    const selectedIds = actionView.action?.[selectionField] || [];
+    const key = selectionKeyForDeckIds(selectedIds);
     if (!key || actionMap.has(key)) {
       continue;
     }
@@ -1590,6 +1663,9 @@ function cardMatchesSearchFilters(card, searchFilters) {
     }
     if (filter === "supporter") {
       return card.kind === "trainer" && Array.isArray(card.card_tags) && card.card_tags.includes("supporter");
+    }
+    if (filter === "basic_energy") {
+      return !!card.is_basic_energy;
     }
     return true;
   });
@@ -1749,6 +1825,81 @@ function renderDeckBrowserOverlay(state) {
     return;
   }
 
+  const attackOptionRequest = uiState.attackOptionRequest;
+  if (attackOptionRequest) {
+    const actionViews = (state?.legal_actions || []).filter((actionView) =>
+      attackOptionRequest.actionIds.includes(actionView.action_id),
+    );
+    if (actionViews.length) {
+      overlay.hidden = false;
+      overlay.innerHTML = "";
+
+      const browser = document.createElement("div");
+      browser.className = "deck-browser";
+
+      const header = document.createElement("div");
+      header.className = "deck-browser__header";
+
+      const copy = document.createElement("div");
+      copy.className = "deck-browser__copy";
+
+      const eyebrow = document.createElement("p");
+      eyebrow.className = "deck-browser__eyebrow";
+      eyebrow.textContent = "Choose Attack Effect";
+
+      const title = document.createElement("h3");
+      title.textContent = attackOptionRequest.attackName;
+
+      const meta = document.createElement("p");
+      meta.className = "deck-browser__meta";
+      meta.textContent = "Choose which opposing attack to block.";
+
+      copy.appendChild(eyebrow);
+      copy.appendChild(title);
+      copy.appendChild(meta);
+
+      const controls = document.createElement("div");
+      controls.className = "deck-browser__controls";
+
+      const closeButton = document.createElement("button");
+      closeButton.type = "button";
+      closeButton.className = "deck-browser__close";
+      closeButton.setAttribute("aria-label", "Close attack effect chooser");
+      closeButton.textContent = "Close";
+      controls.appendChild(closeButton);
+
+      header.appendChild(copy);
+      header.appendChild(controls);
+
+      const track = document.createElement("div");
+      track.className = "deck-browser__track";
+      track.setAttribute("aria-label", "Attack effect options");
+
+      for (const actionView of actionViews) {
+        const button = document.createElement("button");
+        button.type = "button";
+        button.className = "action-button";
+        button.textContent = actionView.label;
+        button.addEventListener("click", () => {
+          uiState.attackOptionRequest = null;
+          submitAction(actionView);
+        });
+        track.appendChild(button);
+      }
+
+      browser.appendChild(header);
+      browser.appendChild(track);
+      overlay.appendChild(browser);
+
+      closeButton.addEventListener("click", () => {
+        uiState.attackOptionRequest = null;
+        render(currentState);
+      });
+      return;
+    }
+    uiState.attackOptionRequest = null;
+  }
+
   const activeDiscardRequest = uiState.discardBrowseRequest;
   const selectedDiscardRequest = resolveDiscardBrowseRequest(state);
   if (
@@ -1868,13 +2019,17 @@ function renderDeckBrowserOverlay(state) {
   }
 
   const player = state?.players?.[0];
-  const deckCards = Array.isArray(player?.deck_cards) ? player.deck_cards : [];
+  const sourceCards = activeRequest.sourceZone === "discard"
+    ? (Array.isArray(player?.discard_cards) ? player.discard_cards : [])
+    : (Array.isArray(player?.deck_cards) ? player.deck_cards : []);
   const visibleCards = activeRequest.visibleCount
-    ? deckCards.slice(0, activeRequest.visibleCount)
-    : deckCards;
-  const scopeLabel = activeRequest.scope === "top_cards"
-    ? `Top ${activeRequest.visibleCount}`
-    : "Full Deck";
+    ? sourceCards.slice(0, activeRequest.visibleCount)
+    : sourceCards;
+  const scopeLabel = activeRequest.sourceZone === "discard"
+    ? "Discard Pile"
+    : activeRequest.scope === "top_cards"
+      ? `Top ${activeRequest.visibleCount}`
+      : "Full Deck";
 
   overlay.hidden = false;
   overlay.innerHTML = "";
@@ -1890,7 +2045,9 @@ function renderDeckBrowserOverlay(state) {
 
   const eyebrow = document.createElement("p");
   eyebrow.className = "deck-browser__eyebrow";
-  eyebrow.textContent = `${scopeLabel} Search`;
+  eyebrow.textContent = activeRequest.sourceZone === "discard"
+    ? scopeLabel
+    : `${scopeLabel} Search`;
 
   const title = document.createElement("h3");
   title.textContent = activeRequest.sourceCardName;
@@ -1927,7 +2084,10 @@ function renderDeckBrowserOverlay(state) {
 
   const track = document.createElement("div");
   track.className = "deck-browser__track";
-  track.setAttribute("aria-label", "Deck cards carousel");
+  track.setAttribute(
+    "aria-label",
+    activeRequest.sourceZone === "discard" ? "Discard pile cards carousel" : "Deck cards carousel",
+  );
 
   for (const card of visibleCards) {
     const isMatch = cardMatchesSearchFilters(card, activeRequest.searchFilters);
@@ -2587,6 +2747,7 @@ function handleAttackButtonClick(pokemon, attackIndex) {
 
   if (attackActions.length === 1) {
     uiState.pendingAttackActionIds = [];
+    uiState.attackOptionRequest = null;
     submitAction(attackActions[0]);
     return;
   }
@@ -2615,6 +2776,7 @@ function handleAttackButtonClick(pokemon, attackIndex) {
       uiState.selectedDiscardIds = [];
       uiState.selectedBoardTarget = null;
       uiState.pendingAttackActionIds = [];
+      uiState.attackOptionRequest = null;
       submitAction(emptySearchAction);
       return;
     }
@@ -2625,6 +2787,7 @@ function handleAttackButtonClick(pokemon, attackIndex) {
     });
     if (!searchRequest) {
       uiState.pendingAttackActionIds = [];
+      uiState.attackOptionRequest = null;
       submitAction(searchActions[0]);
       return;
     }
@@ -2635,8 +2798,24 @@ function handleAttackButtonClick(pokemon, attackIndex) {
     uiState.discardBrowseSelectedIds = [];
     uiState.selectedBoardTarget = null;
     uiState.pendingAttackActionIds = [];
+    uiState.attackOptionRequest = null;
     uiState.deckBrowseRequest = searchRequest;
     uiState.deckBrowseSelectedIds = [];
+    render(currentState);
+    return;
+  }
+
+  const optionActions = attackActions.filter((actionView) =>
+    Number.isInteger(actionView.action?.blocked_attack_index),
+  );
+  if (optionActions.length) {
+    uiState.selectedCardId = null;
+    uiState.selectedBoardTarget = null;
+    uiState.pendingAttackActionIds = [];
+    uiState.attackOptionRequest = {
+      attackName: pokemon.attacks?.[attackIndex]?.name || optionActions[0].label,
+      actionIds: optionActions.map((actionView) => actionView.action_id),
+    };
     render(currentState);
     return;
   }
@@ -2651,11 +2830,21 @@ function handleAttackButtonClick(pokemon, attackIndex) {
     uiState.selectedCardId = null;
     uiState.selectedBoardTarget = pokemon.ref ? { ...pokemon.ref } : null;
     uiState.pendingAttackActionIds = targetedActions.map((actionView) => actionView.action_id);
+    uiState.attackOptionRequest = null;
     render(currentState);
     return;
   }
 
   uiState.pendingAttackActionIds = [];
+  if (attackActions.length > 1) {
+    uiState.attackOptionRequest = {
+      attackName: pokemon.attacks?.[attackIndex]?.name || attackActions[0].label,
+      actionIds: attackActions.map((actionView) => actionView.action_id),
+    };
+    render(currentState);
+    return;
+  }
+  uiState.attackOptionRequest = null;
   submitAction(attackActions[0]);
 }
 

@@ -303,6 +303,7 @@ def apply_action_for_player(
         target = _resolve_board_target(player, action)
         previous_name = _board_target_name(state, target)
         target.stack.append(card_id)
+        _clear_pokemon_temporary_effects(target)
         target.entered_play_turn = player.turns_taken
         state.log.append(f"{actor_name} evolved {previous_name} into {card.name}.")
         return state
@@ -383,27 +384,29 @@ def action_id_for(action: dict[str, Any]) -> str:
     if action["type"] == "play_item":
         target_zone = action.get("target_zone")
         discard_suffix = _discard_action_id_suffix(action)
+        recover_suffix = _recover_action_id_suffix(action)
         search_suffix = _search_action_id_suffix(action)
         if target_zone == "bench":
             return (
                 f"play_item:{action['hand_card_id']}:bench:{action['target_bench_index']}"
-                f"{discard_suffix}{search_suffix}"
+                f"{discard_suffix}{recover_suffix}{search_suffix}"
             )
         if target_zone == "active":
-            return f"play_item:{action['hand_card_id']}:active{discard_suffix}{search_suffix}"
-        return f"play_item:{action['hand_card_id']}{discard_suffix}{search_suffix}"
+            return f"play_item:{action['hand_card_id']}:active{discard_suffix}{recover_suffix}{search_suffix}"
+        return f"play_item:{action['hand_card_id']}{discard_suffix}{recover_suffix}{search_suffix}"
     if action["type"] == "play_supporter":
         target_zone = action.get("target_zone")
         discard_suffix = _discard_action_id_suffix(action)
+        recover_suffix = _recover_action_id_suffix(action)
         search_suffix = _search_action_id_suffix(action)
         if target_zone == "bench":
             return (
                 f"play_supporter:{action['hand_card_id']}:bench:{action['target_bench_index']}"
-                f"{discard_suffix}{search_suffix}"
+                f"{discard_suffix}{recover_suffix}{search_suffix}"
             )
         if target_zone == "active":
-            return f"play_supporter:{action['hand_card_id']}:active{discard_suffix}{search_suffix}"
-        return f"play_supporter:{action['hand_card_id']}{discard_suffix}{search_suffix}"
+            return f"play_supporter:{action['hand_card_id']}:active{discard_suffix}{recover_suffix}{search_suffix}"
+        return f"play_supporter:{action['hand_card_id']}{discard_suffix}{recover_suffix}{search_suffix}"
     if action["type"] == "attack":
         suffix_parts = [f"attack:{action['attack_index']}"]
         target_player_index = action.get("target_player_index")
@@ -411,6 +414,9 @@ def action_id_for(action: dict[str, Any]) -> str:
             suffix_parts.append(f"p{target_player_index}:bench:{action['target_bench_index']}")
         elif action.get("target_zone") == "active":
             suffix_parts.append(f"p{target_player_index}:active")
+        blocked_attack_index = action.get("blocked_attack_index")
+        if isinstance(blocked_attack_index, int):
+            suffix_parts.append(f"block:{blocked_attack_index}")
         if action.get("bonus_damage"):
             suffix_parts.append(f"bonus:{action['bonus_damage']}")
         discard_ids = action.get("discard_attached_energy_ids")
@@ -428,6 +434,13 @@ def _discard_action_id_suffix(action: dict[str, Any]) -> str:
     if not discard_ids:
         return ""
     return f":discard:{','.join(discard_ids)}"
+
+
+def _recover_action_id_suffix(action: dict[str, Any]) -> str:
+    recover_ids = action.get("recover_from_discard_ids")
+    if not recover_ids:
+        return ""
+    return f":recover:{','.join(recover_ids)}"
 
 
 def _search_action_id_suffix(action: dict[str, Any]) -> str:
@@ -494,6 +507,8 @@ def _to_card_definition(entry: DeckCardDefinition) -> CardDefinition:
         image_url=entry.image_url,
         card_tags=entry.card_tags,
         rules_text=entry.rules_text,
+        is_basic_energy=entry.is_basic_energy,
+        prize_card_value=entry.prize_card_value,
         effect_specs=entry.effect_specs,
     )
 
@@ -632,6 +647,7 @@ def _resolve_effect_specs(
             except IndexError as exc:
                 raise ValueError("Switch target is out of range.") from exc
             previous_active = player.active
+            _clear_pokemon_temporary_effects(previous_active)
             player.active = bench_pokemon
             player.bench.append(previous_active)
             state.log.append(f"{actor_name} switched to {_board_target_name(state, player.active)}.")
@@ -664,6 +680,10 @@ def _resolve_effect_specs(
 
         if effect_spec.effect_type == "search_deck":
             _resolve_search_deck_effect(state, player_index, effect_spec, action)
+            continue
+
+        if effect_spec.effect_type == "recover_from_discard":
+            _resolve_recover_from_discard_effect(state, player_index, effect_spec, action)
             continue
 
         raise ValueError(f"Unsupported Standard effect type: {effect_spec.effect_type}")
@@ -726,6 +746,43 @@ def _resolve_search_deck_effect(
         state.log.append(
             f"{actor_name} searched the deck and put {len(chosen_ids)} card"
             f"{'' if len(chosen_ids) == 1 else 's'} onto the Bench."
+        )
+
+
+def _resolve_recover_from_discard_effect(
+    state: GameState,
+    player_index: int,
+    effect_spec: EffectSpec,
+    action: dict[str, Any] | None = None,
+) -> None:
+    player = state.players[player_index]
+    actor_name = "You" if player_index == 0 else player.name
+    if effect_spec.source_zone != "discard" or effect_spec.destination_zone != "hand":
+        raise ValueError(f"Unsupported discard recovery configuration: {effect_spec}")
+
+    choose_count = max(0, int(effect_spec.choose_count or 1))
+    chosen_ids = list(action.get("recover_from_discard_ids") or []) if action else []
+    minimum_choose_count = 0 if effect_spec.optional else choose_count
+    if not minimum_choose_count <= len(chosen_ids) <= choose_count:
+        raise ValueError("Discard recovery effect is missing required selected cards.")
+    if len(set(chosen_ids)) != len(chosen_ids):
+        raise ValueError("Discard recovery selection contains duplicate cards.")
+
+    recoverable_ids = _recoverable_discard_ids(state, player, effect_spec)
+    for chosen_id in chosen_ids:
+        if chosen_id not in recoverable_ids:
+            raise ValueError("Discard recovery selection contains a card that is not recoverable.")
+
+    for chosen_id in chosen_ids:
+        player.discard.remove(chosen_id)
+        player.hand.append(chosen_id)
+
+    if not chosen_ids:
+        state.log.append(f"{actor_name} recovered no cards from the discard pile.")
+    else:
+        state.log.append(
+            f"{actor_name} recovered {len(chosen_ids)} card"
+            f"{'' if len(chosen_ids) == 1 else 's'} from the discard pile."
         )
 
 
@@ -906,6 +963,7 @@ def _supports_trainer_effect_specs(effect_specs: tuple[EffectSpec, ...]) -> bool
         "heal_damage",
         "switch_active_with_bench",
         "discard_from_hand",
+        "recover_from_discard",
         "search_deck",
     }
     return all(effect_spec.effect_type in supported_effect_types for effect_spec in effect_specs)
@@ -957,12 +1015,52 @@ def _expand_trainer_actions_for_search_choices(
     card: CardDefinition,
     base_actions: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    base_actions = _expand_trainer_actions_for_discard_recovery_choices(state, player, card, base_actions)
+    if not base_actions:
+        return []
     search_effects = [
         effect_spec
         for effect_spec in card.effect_specs
         if effect_spec.effect_type == "search_deck"
     ]
     return _expand_actions_for_search_choices(state, player, search_effects, base_actions)
+
+
+def _expand_trainer_actions_for_discard_recovery_choices(
+    state: GameState,
+    player: PlayerState,
+    card: CardDefinition,
+    base_actions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    recovery_effects = [
+        effect_spec
+        for effect_spec in card.effect_specs
+        if effect_spec.effect_type == "recover_from_discard"
+    ]
+    expanded_actions = list(base_actions)
+    for recovery_effect in recovery_effects:
+        if recovery_effect.source_zone != "discard" or recovery_effect.destination_zone != "hand":
+            return []
+        choose_count = max(0, int(recovery_effect.choose_count or 1))
+        minimum_choose_count = 0 if recovery_effect.optional else choose_count
+        candidate_ids = _recoverable_discard_ids(state, player, recovery_effect)
+        if not candidate_ids:
+            return []
+        if len(candidate_ids) < minimum_choose_count:
+            return []
+        combination_sizes = range(minimum_choose_count, min(len(candidate_ids), choose_count) + 1)
+        expanded_actions = [
+            {
+                **action,
+                "recover_from_discard_ids": list(recovery_combo),
+            }
+            for action in expanded_actions
+            for combo_size in combination_sizes
+            for recovery_combo in combinations(candidate_ids, combo_size)
+        ]
+        if not expanded_actions:
+            return []
+    return expanded_actions
 
 
 def _expand_actions_for_search_choices(
@@ -1021,6 +1119,8 @@ def _card_matches_search_filters(
             return False
         if search_filter == "evolution_pokemon" and (card.kind != "pokemon" or card.is_basic):
             return False
+        if search_filter == "basic_energy" and not card.is_basic_energy:
+            return False
         if search_filter == "supporter" and (card.kind != "trainer" or "supporter" not in card.card_tags):
             return False
     return True
@@ -1036,6 +1136,18 @@ def _searchable_deck_ids(
     return [
         instance_id
         for instance_id in visible_ids
+        if _card_matches_search_filters(state, instance_id, effect_spec.search_filters)
+    ]
+
+
+def _recoverable_discard_ids(
+    state: GameState,
+    player: PlayerState,
+    effect_spec: EffectSpec,
+) -> list[str]:
+    return [
+        instance_id
+        for instance_id in player.discard
         if _card_matches_search_filters(state, instance_id, effect_spec.search_filters)
     ]
 
@@ -1117,6 +1229,8 @@ def _list_attack_actions(
     attached_energy = len(player.active.attached_energy)
     actions: list[dict[str, Any]] = []
     for attack_index, attack in enumerate(active_card.attacks):
+        if _attack_is_unavailable(player.active, attack_index, player.turns_taken):
+            continue
         if attached_energy < attack.cost:
             continue
         attack_actions = _build_attack_actions_for_definition(
@@ -1196,7 +1310,53 @@ def _build_attack_actions_for_definition(
                 return []
             continue
 
+        if effect_spec.effect_type == "block_selected_opponent_attack":
+            actions = _expand_attack_actions_for_blocked_attack_choices(
+                state,
+                player_index,
+                actions,
+                attack,
+            )
+            if not actions:
+                return []
+            continue
+
     return actions
+
+
+def _attack_is_unavailable(pokemon: PokemonInPlay, attack_index: int, turns_taken: int) -> bool:
+    for effect in pokemon.lingering_effects:
+        if effect.activation_turn is not None and turns_taken < effect.activation_turn:
+            continue
+        if effect.effect_type == "cannot_attack":
+            return True
+        if effect.effect_type == "blocked_attack_index" and effect.blocked_attack_index == attack_index:
+            return True
+    return False
+
+
+def _expand_attack_actions_for_blocked_attack_choices(
+    state: GameState,
+    player_index: int,
+    actions: list[dict[str, Any]],
+    attack: AttackDefinition,
+) -> list[dict[str, Any]]:
+    opponent = state.players[1 - player_index]
+    opponent_card = get_top_card_definition(state, opponent.active)
+    if opponent.active is None or opponent_card is None or not opponent_card.attacks:
+        return []
+
+    expanded_actions: list[dict[str, Any]] = []
+    for action in actions:
+        for blocked_attack_index, blocked_attack in enumerate(opponent_card.attacks):
+            expanded_actions.append(
+                {
+                    **action,
+                    "blocked_attack_index": blocked_attack_index,
+                    "label": f"Use {attack.name} and block {blocked_attack.name}",
+                }
+            )
+    return expanded_actions
 
 
 def _expand_attack_actions_for_targeted_damage(
@@ -1360,22 +1520,61 @@ def _attack_damage_value(damage_text: str) -> int:
     return sum(int(match) for match in matches)
 
 
+def _resolve_attack_coin_flip_result(
+    state: GameState,
+    player_index: int,
+    attack: AttackDefinition,
+) -> bool | None:
+    requires_coin_flip = any(
+        effect_spec.effect_type in {
+            "coin_flip_damage_on_heads_only",
+            "self_attack_lock_on_tails",
+            "self_protection_on_heads",
+        }
+        for effect_spec in attack.effect_specs
+    )
+    if not requires_coin_flip:
+        return None
+
+    heads = _flip_coin(state)
+    actor_name = "You" if player_index == 0 else state.players[player_index].name
+    state.log.append(f"{actor_name} flipped {'heads' if heads else 'tails'}.")
+    return heads
+
+
 def _resolve_attack(
     state: GameState,
     player_index: int,
     attack: AttackDefinition,
     action: dict[str, Any],
 ) -> None:
-    player = state.players[player_index]
+    coin_flip_result = _resolve_attack_coin_flip_result(state, player_index, attack)
+    ignore_resistance = any(
+        effect_spec.effect_type == "ignore_resistance"
+        for effect_spec in attack.effect_specs
+    )
 
     for effect_spec in attack.effect_specs:
         if effect_spec.effect_type in {
             "discard_attached_energy",
             "optional_discard_attached_energy_for_bonus_damage",
         }:
-            _resolve_attack_effect_spec(state, player_index, attack, effect_spec, action)
+            _resolve_attack_effect_spec(
+                state,
+                player_index,
+                attack,
+                effect_spec,
+                action,
+                coin_flip_result=coin_flip_result,
+            )
 
-    damage = _resolve_attack_damage_amount(state, player_index, attack, action)
+    damage = _resolve_attack_damage_amount(
+        state,
+        player_index,
+        attack,
+        action,
+        coin_flip_result=coin_flip_result,
+    )
     if damage > 0:
         _apply_attack_damage(
             state,
@@ -1384,6 +1583,7 @@ def _resolve_attack(
             target_zone="active",
             target_bench_index=None,
             damage=damage,
+            ignore_resistance=ignore_resistance,
         )
 
     for effect_spec in attack.effect_specs:
@@ -1391,7 +1591,14 @@ def _resolve_attack(
             "discard_attached_energy",
             "optional_discard_attached_energy_for_bonus_damage",
         }:
-            _resolve_attack_effect_spec(state, player_index, attack, effect_spec, action)
+            _resolve_attack_effect_spec(
+                state,
+                player_index,
+                attack,
+                effect_spec,
+                action,
+                coin_flip_result=coin_flip_result,
+            )
 
 
 def _resolve_attack_effect_spec(
@@ -1400,6 +1607,8 @@ def _resolve_attack_effect_spec(
     attack: AttackDefinition,
     effect_spec: Any,
     action: dict[str, Any],
+    *,
+    coin_flip_result: bool | None = None,
 ) -> None:
     player = state.players[player_index]
     actor_name = "You" if player_index == 0 else player.name
@@ -1442,6 +1651,9 @@ def _resolve_attack_effect_spec(
         )
         return
 
+    if effect_spec.effect_type == "ignore_resistance":
+        return
+
     if effect_spec.effect_type == "search_deck":
         _resolve_search_deck_effect(state, player_index, effect_spec, action)
         return
@@ -1461,15 +1673,84 @@ def _resolve_attack_effect_spec(
             state.log.append(f"{_board_target_name(state, player.active)} is shielded from Basic Pokemon next turn.")
         return
 
+    if effect_spec.effect_type == "self_protection_on_heads":
+        if player.active is None or coin_flip_result is not True:
+            return
+        player.active.lingering_effects.append(
+            LingeringEffect(
+                effect_type="prevent_attack_damage_and_effects",
+                source_player=player_index,
+                expires_end_of_player_turn=1 - player_index,
+                condition=effect_spec.condition,
+            )
+        )
+        state.log.append(f"{_board_target_name(state, player.active)} is protected from attacks next turn.")
+        return
+
+    if effect_spec.effect_type == "self_attack_lock_on_tails":
+        if player.active is None or coin_flip_result is not False:
+            return
+        player.active.lingering_effects.append(
+            LingeringEffect(
+                effect_type="cannot_attack",
+                source_player=player_index,
+                expires_end_of_player_turn=player_index,
+                activation_turn=player.turns_taken + 1,
+                condition=effect_spec.condition,
+            )
+        )
+        state.log.append(f"{_board_target_name(state, player.active)} can't attack during your next turn.")
+        return
+
+    if effect_spec.effect_type == "block_selected_opponent_attack":
+        blocked_attack_index = action.get("blocked_attack_index")
+        if not isinstance(blocked_attack_index, int):
+            raise ValueError("Attack-blocking effect requires a blocked attack index.")
+        target = _resolve_attack_effect_target(state, player_index, effect_spec, action)
+        if target is None:
+            return
+        target_player_index, target_zone, target_bench_index = target
+        target_pokemon = _resolve_attack_damage_target(
+            state,
+            target_player_index=target_player_index,
+            target_zone=target_zone,
+            target_bench_index=target_bench_index,
+        )
+        attacker_card = get_top_card_definition(state, state.players[player_index].active)
+        if (
+            target_pokemon is None
+            or _is_attack_effect_prevented(
+                attacker_index=player_index,
+                target_player_index=target_player_index,
+                target_pokemon=target_pokemon,
+                attacker_card=attacker_card,
+            )
+        ):
+            if target_pokemon is not None:
+                state.log.append(f"Effects on {_board_target_name(state, target_pokemon)} were prevented.")
+            return
+        target_pokemon.lingering_effects.append(
+            LingeringEffect(
+                effect_type="blocked_attack_index",
+                source_player=player_index,
+                expires_end_of_player_turn=1 - player_index,
+                blocked_attack_index=blocked_attack_index,
+            )
+        )
+        blocked_attack_name = _attack_name_for_pokemon(state, target_pokemon, blocked_attack_index) or "that attack"
+        state.log.append(f"{_board_target_name(state, target_pokemon)} can't use {blocked_attack_name} next turn.")
+        return
+
 
 def _resolve_attack_damage_amount(
     state: GameState,
     player_index: int,
     attack: AttackDefinition,
     action: dict[str, Any],
+    *,
+    coin_flip_result: bool | None = None,
 ) -> int:
     damage = _attack_damage_value(attack.damage) + int(action.get("bonus_damage", 0) or 0)
-    actor_name = "You" if player_index == 0 else state.players[player_index].name
 
     for effect_spec in attack.effect_specs:
         if effect_spec.effect_type == "damage_per_opponent_prizes_taken":
@@ -1479,9 +1760,7 @@ def _resolve_attack_damage_amount(
             continue
 
         if effect_spec.effect_type == "coin_flip_damage_on_heads_only":
-            heads = _flip_coin(state)
-            state.log.append(f"{actor_name} flipped {'heads' if heads else 'tails'}.")
-            if not heads:
+            if coin_flip_result is False:
                 state.log.append(f"{attack.name} did no damage.")
                 return 0
 
@@ -1539,6 +1818,7 @@ def _apply_attack_damage(
     target_zone: str,
     target_bench_index: int | None,
     damage: int,
+    ignore_resistance: bool = False,
 ) -> None:
     if damage <= 0:
         return
@@ -1568,6 +1848,7 @@ def _apply_attack_damage(
             damage=damage,
             attacker_card=attacker_card,
             target_card=target_card,
+            ignore_resistance=ignore_resistance,
         )
         state.log.extend(modifier_log_lines)
         if damage <= 0:
@@ -1605,10 +1886,31 @@ def _is_attack_damage_prevented(
 ) -> bool:
     if attacker_index == target_player_index or attacker_card is None:
         return False
+    if any(
+        effect.effect_type == "prevent_attack_damage_and_effects"
+        for effect in target_pokemon.lingering_effects
+    ):
+        return True
     if not attacker_card.is_basic:
         return False
     return any(
         effect.effect_type == "prevent_damage_from_basic_pokemon_attacks"
+        for effect in target_pokemon.lingering_effects
+    )
+
+
+def _is_attack_effect_prevented(
+    *,
+    attacker_index: int,
+    target_player_index: int,
+    target_pokemon: PokemonInPlay,
+    attacker_card: CardDefinition | None,
+) -> bool:
+    del attacker_card
+    if attacker_index == target_player_index:
+        return False
+    return any(
+        effect.effect_type == "prevent_attack_damage_and_effects"
         for effect in target_pokemon.lingering_effects
     )
 
@@ -1618,6 +1920,7 @@ def _apply_weakness_and_resistance(
     damage: int,
     attacker_card: CardDefinition,
     target_card: CardDefinition,
+    ignore_resistance: bool = False,
 ) -> tuple[int, list[str]]:
     if damage <= 0 or attacker_card.element is None:
         return max(0, damage), []
@@ -1630,13 +1933,31 @@ def _apply_weakness_and_resistance(
             adjusted_damage *= weakness.value
             log_lines.append(f"Weakness applied: {previous_damage} -> {adjusted_damage}.")
 
-    for resistance in target_card.resistances:
-        if resistance.element == attacker_card.element:
-            previous_damage = adjusted_damage
-            adjusted_damage += resistance.value
-            log_lines.append(f"Resistance applied: {previous_damage} -> {max(0, adjusted_damage)}.")
+    if not ignore_resistance:
+        for resistance in target_card.resistances:
+            if resistance.element == attacker_card.element:
+                previous_damage = adjusted_damage
+                adjusted_damage += resistance.value
+                log_lines.append(f"Resistance applied: {previous_damage} -> {max(0, adjusted_damage)}.")
 
     return max(0, adjusted_damage), log_lines
+
+
+def _attack_name_for_pokemon(
+    state: GameState,
+    pokemon: PokemonInPlay,
+    attack_index: int,
+) -> str | None:
+    card = get_top_card_definition(state, pokemon)
+    if card is None or not 0 <= attack_index < len(card.attacks):
+        return None
+    return card.attacks[attack_index].name
+
+
+def _clear_pokemon_temporary_effects(pokemon: PokemonInPlay | None) -> None:
+    if pokemon is None:
+        return
+    pokemon.lingering_effects = []
 
 
 def _resolve_knockouts_after_attack(state: GameState, attacker_index: int) -> None:
@@ -1671,19 +1992,20 @@ def _resolve_player_knockouts(state: GameState, knocked_player_index: int) -> bo
         player.discard.extend(knocked_out.stack)
         player.discard.extend(knocked_out.attached_energy)
         state.log.append(f"{knocked_out_name} was Knocked Out.")
-        _award_prize_for_knockout(state, winner_index=opponent_index)
+        _award_prize_for_knockout(state, winner_index=opponent_index, knocked_out_pokemon=knocked_out)
         if state.winner is not None:
             return False
 
     if player.active is None or not _pokemon_is_knocked_out(state, player.active):
         return False
 
-    knocked_out_name = _board_target_name(state, player.active)
-    player.discard.extend(player.active.stack)
-    player.discard.extend(player.active.attached_energy)
+    knocked_out = player.active
+    knocked_out_name = _board_target_name(state, knocked_out)
+    player.discard.extend(knocked_out.stack)
+    player.discard.extend(knocked_out.attached_energy)
     player.active = None
     state.log.append(f"{knocked_out_name} was Knocked Out.")
-    _award_prize_for_knockout(state, winner_index=opponent_index)
+    _award_prize_for_knockout(state, winner_index=opponent_index, knocked_out_pokemon=knocked_out)
     if state.winner is not None:
         return False
 
@@ -1704,16 +2026,28 @@ def _pokemon_is_knocked_out(state: GameState, pokemon: PokemonInPlay | None) -> 
     return pokemon.damage >= card.hp
 
 
-def _award_prize_for_knockout(state: GameState, winner_index: int) -> None:
+def _award_prize_for_knockout(
+    state: GameState,
+    winner_index: int,
+    knocked_out_pokemon: PokemonInPlay | None = None,
+) -> None:
     player = state.players[winner_index]
     if player.prizes:
-        prize_card_id = state.rng.choice(player.prizes)
-        player.prizes.remove(prize_card_id)
-        player.hand.append(prize_card_id)
+        prize_count = 1
+        if knocked_out_pokemon is not None:
+            knocked_out_card = get_top_card_definition(state, knocked_out_pokemon)
+            if knocked_out_card is not None:
+                prize_count = max(1, int(knocked_out_card.prize_card_value))
+        taken_count = min(prize_count, len(player.prizes))
+        for _ in range(taken_count):
+            prize_card_id = state.rng.choice(player.prizes)
+            player.prizes.remove(prize_card_id)
+            player.hand.append(prize_card_id)
         player.prize_cards_remaining = len(player.prizes)
         actor_name = "You" if winner_index == 0 else player.name
         state.log.append(
-            f"{actor_name} took a Prize card. {player.prize_cards_remaining} Prize"
+            f"{actor_name} took {taken_count} Prize card"
+            f"{'' if taken_count == 1 else 's'}. {player.prize_cards_remaining} Prize"
             f"{'' if player.prize_cards_remaining == 1 else 's'} remaining."
         )
     if player.prize_cards_remaining == 0:
@@ -1727,14 +2061,26 @@ def _expire_lingering_effects(state: GameState, ending_player_index: int) -> Non
             player.active.lingering_effects = [
                 effect
                 for effect in player.active.lingering_effects
-                if effect.expires_end_of_player_turn != ending_player_index
+                if not _should_expire_lingering_effect(state, effect, ending_player_index)
             ]
         for pokemon in player.bench:
             pokemon.lingering_effects = [
                 effect
                 for effect in pokemon.lingering_effects
-                if effect.expires_end_of_player_turn != ending_player_index
+                if not _should_expire_lingering_effect(state, effect, ending_player_index)
             ]
+
+
+def _should_expire_lingering_effect(
+    state: GameState,
+    effect: LingeringEffect,
+    ending_player_index: int,
+) -> bool:
+    if effect.expires_end_of_player_turn != ending_player_index:
+        return False
+    if effect.activation_turn is None:
+        return True
+    return state.players[ending_player_index].turns_taken >= effect.activation_turn
 
 
 def _advance_turn_after_attack(state: GameState, player_index: int) -> None:

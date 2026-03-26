@@ -122,6 +122,7 @@ def _serialize_knowledge_action(
 
     action_type = str(action.get("type", ""))
     discard_ids = [instance_id for instance_id in action.get("discard_from_hand_ids", []) if isinstance(instance_id, str)]
+    recover_ids = [instance_id for instance_id in action.get("recover_from_discard_ids", []) if isinstance(instance_id, str)]
     search_ids = [instance_id for instance_id in action.get("search_deck_ids", []) if isinstance(instance_id, str)]
     return {
         "action_id": action_id_for(action),
@@ -134,7 +135,9 @@ def _serialize_knowledge_action(
             "bench_index": action.get("target_bench_index"),
         },
         "discard_from_hand": [_serialize_card_instance(state, instance_id) for instance_id in discard_ids],
+        "recover_from_discard": [_serialize_card_instance(state, instance_id) for instance_id in recover_ids],
         "search_selection": [_serialize_card_instance(state, instance_id) for instance_id in search_ids],
+        "blocked_attack_index": action.get("blocked_attack_index"),
         "consumes_supporter_for_turn": action_type == "play_supporter",
         "consumes_attachment_for_turn": action_type == "play_energy",
         "reveals_hidden_cards": bool(search_ids),
@@ -183,8 +186,10 @@ def _serialize_card_instance(state: GameState, instance_id: str) -> dict[str, An
         "kind": card.kind,
         "stage": card.stage,
         "is_basic": card.is_basic,
+        "is_basic_energy": card.is_basic_energy,
         "element": card.element,
         "card_tags": list(card.card_tags),
+        "prize_card_value": card.prize_card_value,
         "effect_specs": [
             {
                 "effect_type": effect_spec.effect_type,

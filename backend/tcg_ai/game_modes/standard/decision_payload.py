@@ -126,8 +126,10 @@ def _serialize_card_instance(state: GameState, instance_id: str) -> dict[str, An
         "kind": card.kind,
         "stage": card.stage,
         "is_basic": card.is_basic,
+        "is_basic_energy": card.is_basic_energy,
         "element": card.element,
         "image_url": card.image_url,
+        "prize_card_value": card.prize_card_value,
     }
 
 
@@ -268,7 +270,9 @@ def _serialize_lingering_effect(effect: Any) -> dict[str, Any]:
         "effect_type": effect.effect_type,
         "source_player": effect.source_player,
         "expires_end_of_player_turn": effect.expires_end_of_player_turn,
+        "activation_turn": effect.activation_turn,
         "condition": effect.condition,
+        "blocked_attack_index": effect.blocked_attack_index,
     }
 
 

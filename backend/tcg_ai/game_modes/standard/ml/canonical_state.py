@@ -94,6 +94,8 @@ def _serialize_card_definition(definition: CardDefinition) -> dict[str, Any]:
         "element": definition.element,
         "stage": definition.stage,
         "is_basic": definition.is_basic,
+        "is_basic_energy": definition.is_basic_energy,
+        "prize_card_value": definition.prize_card_value,
         "evolves_from": definition.evolves_from,
         "hp": definition.hp,
         "image_url": definition.image_url,
@@ -122,6 +124,8 @@ def _deserialize_card_definition(payload: dict[str, Any]) -> CardDefinition:
         element=payload.get("element"),
         stage=payload.get("stage"),
         is_basic=bool(payload.get("is_basic", False)),
+        is_basic_energy=bool(payload.get("is_basic_energy", False)),
+        prize_card_value=int(payload.get("prize_card_value", 1) or 1),
         evolves_from=payload.get("evolves_from"),
         hp=None if payload.get("hp") is None else int(payload["hp"]),
         image_url=payload.get("image_url"),
@@ -273,7 +277,9 @@ def _serialize_lingering_effect(effect: LingeringEffect) -> dict[str, Any]:
         "effect_type": effect.effect_type,
         "source_player": effect.source_player,
         "expires_end_of_player_turn": effect.expires_end_of_player_turn,
+        "activation_turn": effect.activation_turn,
         "condition": effect.condition,
+        "blocked_attack_index": effect.blocked_attack_index,
     }
 
 
@@ -284,7 +290,13 @@ def _deserialize_lingering_effect(payload: dict[str, Any]) -> LingeringEffect:
         expires_end_of_player_turn=None
         if payload.get("expires_end_of_player_turn") is None
         else int(payload["expires_end_of_player_turn"]),
+        activation_turn=None
+        if payload.get("activation_turn") is None
+        else int(payload["activation_turn"]),
         condition=payload.get("condition"),
+        blocked_attack_index=None
+        if payload.get("blocked_attack_index") is None
+        else int(payload["blocked_attack_index"]),
     )
 
 
