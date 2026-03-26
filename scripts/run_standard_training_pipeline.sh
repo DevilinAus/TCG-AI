@@ -29,6 +29,9 @@ RUN_ID="$(date -u +run_%Y%m%dT%H%M%SZ)"
 SELF_PLAY_DIR="standard_ml_data/self_play/${RUN_ID}"
 CHECKPOINT_DIR="standard_ml_data/checkpoints/${RUN_ID}"
 EVAL_DIR="standard_ml_data/evaluations/${RUN_ID}"
+PROGRESS_DIR="standard_ml_data/progress"
+PROGRESS_LOG="${PROGRESS_DIR}/${RUN_ID}.log"
+LATEST_PROGRESS_LINK="${PROGRESS_DIR}/latest.log"
 
 GAMES=100000
 WORKERS=8
@@ -157,6 +160,8 @@ while [[ $# -gt 0 ]]; do
 done
 
 mkdir -p "${SELF_PLAY_DIR}" "${CHECKPOINT_DIR}" "${EVAL_DIR}"
+mkdir -p "${PROGRESS_DIR}"
+ln -sfn "${RUN_ID}.log" "${LATEST_PROGRESS_LINK}"
 
 SELF_PLAY_CMD=(
   python3 scripts/run_standard_self_play.py
@@ -168,6 +173,7 @@ SELF_PLAY_CMD=(
   --beam-width "${BEAM_WIDTH}"
   --opponent-branch-width "${OPPONENT_BRANCH_WIDTH}"
   --output-dir "${SELF_PLAY_DIR}"
+  --progress-log "${PROGRESS_LOG}"
 )
 if [[ -n "${SELF_PLAY_SEED}" ]]; then
   SELF_PLAY_CMD+=(--seed "${SELF_PLAY_SEED}")
@@ -208,6 +214,7 @@ EVAL_CMD=(
   --beam-width "${BEAM_WIDTH}"
   --opponent-branch-width "${OPPONENT_BRANCH_WIDTH}"
   --output-dir "${EVAL_DIR}"
+  --progress-log "${PROGRESS_LOG}"
   --promote-path "${PROMOTE_PATH}"
   --promotion-threshold "${PROMOTION_THRESHOLD}"
 )
@@ -223,16 +230,48 @@ echo "[pipeline] run_id=${RUN_ID}"
 echo "[pipeline] self_play_dir=${SELF_PLAY_DIR}"
 echo "[pipeline] checkpoint_dir=${CHECKPOINT_DIR}"
 echo "[pipeline] evaluation_dir=${EVAL_DIR}"
+echo "[pipeline] progress_log=${PROGRESS_LOG}"
 echo "[pipeline] promote_path=${PROMOTE_PATH}"
+echo "[pipeline] watch progress in another terminal with:"
+echo "tail -f ${PROGRESS_LOG}"
 
-echo "[pipeline] starting self-play"
-"${SELF_PLAY_CMD[@]}"
+{
+  echo "[pipeline-log] started_at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  echo "[pipeline-log] run_id=${RUN_ID}"
+  echo "[pipeline-log] project_root=${PROJECT_ROOT}"
+  echo "[pipeline-log] self_play_dir=${SELF_PLAY_DIR}"
+  echo "[pipeline-log] checkpoint_dir=${CHECKPOINT_DIR}"
+  echo "[pipeline-log] evaluation_dir=${EVAL_DIR}"
+  echo "[pipeline-log] promote_path=${PROMOTE_PATH}"
+  echo "[pipeline-log] self_play_cmd=${SELF_PLAY_CMD[*]}"
+  echo "[pipeline-log] train_cmd=${TRAIN_CMD[*]}"
+  echo "[pipeline-log] eval_cmd=${EVAL_CMD[*]}"
+} >> "${PROGRESS_LOG}"
 
-echo "[pipeline] starting training"
-"${TRAIN_CMD[@]}"
+run_phase() {
+  local phase_name="$1"
+  shift
+  echo "[pipeline] starting ${phase_name}"
+  {
+    echo "[pipeline-log] phase=${phase_name} status=started at=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "[pipeline-log] command=$*"
+  } >> "${PROGRESS_LOG}"
+  if "$@" >> "${PROGRESS_LOG}" 2>&1; then
+    echo "[pipeline] finished ${phase_name}"
+    echo "[pipeline-log] phase=${phase_name} status=finished at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${PROGRESS_LOG}"
+  else
+    local exit_code=$?
+    echo "[pipeline] ${phase_name} failed; inspect ${PROGRESS_LOG}"
+    echo "[pipeline-log] phase=${phase_name} status=failed exit_code=${exit_code} at=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "${PROGRESS_LOG}"
+    return "${exit_code}"
+  fi
+}
 
-echo "[pipeline] starting evaluation"
-"${EVAL_CMD[@]}"
+run_phase "self-play" "${SELF_PLAY_CMD[@]}"
+
+run_phase "training" "${TRAIN_CMD[@]}"
+
+run_phase "evaluation" "${EVAL_CMD[@]}"
 
 echo "[pipeline] complete"
 echo "[pipeline] candidate_checkpoint=${CANDIDATE_CHECKPOINT}"

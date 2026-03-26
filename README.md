@@ -125,6 +125,12 @@ Or run the whole pipeline in one go:
 bash scripts/run_standard_training_pipeline.sh --games 100000 --workers 8 --train-device cuda --epochs 1
 ```
 
+To watch detailed self-play/training/evaluation progress in a second terminal while the main pipeline terminal stays quiet:
+
+```bash
+bash scripts/tail_standard_training_progress.sh
+```
+
 Train a checkpoint from the newest self-play run:
 
 ```bash

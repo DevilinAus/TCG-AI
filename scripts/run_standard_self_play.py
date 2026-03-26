@@ -10,6 +10,7 @@ import math
 import os
 from pathlib import Path
 import random
+import threading
 import sys
 import time
 from typing import Any
@@ -32,6 +33,7 @@ MATCHUP_PLAYER0_DECKS = (
     "ampharos-ex-battle-deck",
     "lucario-ex-battle-deck",
 )
+_PROGRESS_LOG_LOCK = threading.Lock()
 
 
 def parse_args() -> argparse.Namespace:
@@ -49,6 +51,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--oracle", choices=("heuristic", "local-model"), default="heuristic")
     parser.add_argument("--checkpoint", type=Path, default=None, help="Checkpoint for --oracle local-model.")
     parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument(
+        "--progress-log",
+        type=Path,
+        default=None,
+        help="Optional append-only log file for per-game worker progress.",
+    )
     parser.add_argument("--seed", type=int, default=random.randint(1, 999_999))
     parser.add_argument("--log-every-seconds", type=float, default=5.0)
     return parser.parse_args()
@@ -125,6 +133,7 @@ def main() -> int:
                 "record_forced_actions": args.record_forced_actions,
                 "oracle": args.oracle,
                 "checkpoint": str(args.checkpoint) if args.checkpoint else None,
+                "progress_log": str(args.progress_log.resolve()) if args.progress_log else None,
             }
         )
 
@@ -177,6 +186,7 @@ def _run_self_play_chunk(task: dict[str, Any]) -> dict[str, Any]:
     games_path = output_dir / "games" / f"shard_{int(task['task_index']):06d}.jsonl"
     planner_config = PlannerConfig(**dict(task["planner_config"]))
     oracle = _build_oracle(task["oracle"], task.get("checkpoint"))
+    progress_log = Path(str(task["progress_log"])) if task.get("progress_log") else None
 
     decisions_lines: list[str] = []
     game_lines: list[str] = []
@@ -224,6 +234,18 @@ def _run_self_play_chunk(task: dict[str, Any]) -> dict[str, Any]:
             game_payload["winner_deck_id"] = None
         game_lines.append(json.dumps(game_payload, sort_keys=True))
         decisions_lines.extend(json.dumps(record, sort_keys=True) for record in decision_records)
+        _log_worker_progress(
+            progress_log,
+            (
+                "[self-play-worker] "
+                f"run={task['run_id']} shard={int(task['task_index']):06d} "
+                f"local_game={offset + 1}/{int(task['game_count'])} "
+                f"global_game={global_index + 1} "
+                f"winner_deck={game_payload['winner_deck_id']} "
+                f"turns={game_summary.turn_number} actions={game_summary.action_count} "
+                f"samples={len(decision_records)} truncated={game_summary.truncated}"
+            ),
+        )
         summary["games"] += 1
         summary["samples"] += len(decision_records)
         summary["truncated"] += 1 if game_summary.truncated else 0
@@ -262,6 +284,16 @@ def _resolve_oracle_status(args: argparse.Namespace) -> dict[str, Any]:
         "model_loaded": status.model_loaded,
         "checkpoint_path": status.checkpoint_path,
     }
+
+
+def _log_worker_progress(progress_log: Path | None, line: str) -> None:
+    if progress_log is None:
+        return
+    progress_log.parent.mkdir(parents=True, exist_ok=True)
+    with _PROGRESS_LOG_LOCK:
+        with progress_log.open("a", encoding="utf-8") as handle:
+            handle.write(line)
+            handle.write("\n")
 
 
 def _print_progress(aggregate: dict[str, Any], *, total_games: int, start_time: float) -> None:
