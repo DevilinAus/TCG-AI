@@ -12,7 +12,9 @@ def choose_action(
     state: GameState,
     player_index: int,
     learner: RewardLearner | None = None,
+    runtime: Any | None = None,
 ) -> dict[str, Any] | None:
+    del runtime
     if state.current_player != player_index or state.winner is not None:
         return None
 

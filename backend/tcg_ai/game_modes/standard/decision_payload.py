@@ -67,7 +67,7 @@ def _serialize_public_player_state(state: GameState, player_index: int) -> dict[
         "deck_count": len(player.deck),
         "discard_count": len(player.discard),
         "discard": [_serialize_card_instance(state, instance_id) for instance_id in player.discard],
-        "prize_cards_remaining": player.prize_cards_remaining,
+        "prize_cards_remaining": len(player.prizes),
         "active_missing": player.active is None,
         "active": _serialize_public_pokemon(state, player.active),
         "bench": [_serialize_public_pokemon(state, pokemon) for pokemon in player.bench],

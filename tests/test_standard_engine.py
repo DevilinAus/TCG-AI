@@ -5,6 +5,7 @@ import unittest
 from unittest.mock import patch
 
 from backend.tcg_ai.game_modes.standard.engine import (
+    _award_prize_for_knockout,
     apply_action,
     card_definition,
     choose_action,
@@ -16,6 +17,28 @@ from backend.tcg_ai.game_modes.standard.models import TypeModifier
 
 
 class StandardEngineTests(unittest.TestCase):
+    def test_opening_setup_sets_aside_six_prize_cards_per_player(self) -> None:
+        state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck")
+
+        self.assertEqual(len(state.players[0].prizes), 6)
+        self.assertEqual(len(state.players[1].prizes), 6)
+        self.assertEqual(state.players[0].prize_cards_remaining, 6)
+        self.assertEqual(state.players[1].prize_cards_remaining, 6)
+        self.assertEqual(len(state.players[0].deck), 47)
+        self.assertEqual(len(state.players[1].deck), 47)
+
+    def test_awarding_a_prize_moves_a_hidden_prize_card_into_hand(self) -> None:
+        state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck")
+        original_prizes = set(state.players[0].prizes)
+        original_hand_count = len(state.players[0].hand)
+
+        _award_prize_for_knockout(state, winner_index=0)
+
+        self.assertEqual(len(state.players[0].prizes), 5)
+        self.assertEqual(state.players[0].prize_cards_remaining, 5)
+        self.assertEqual(len(state.players[0].hand), original_hand_count + 1)
+        self.assertTrue(any(instance_id in original_prizes for instance_id in state.players[0].hand))
+
     def test_supported_supporters_are_playable(self) -> None:
         state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck")
         self._finish_opening_setup(state)
@@ -674,6 +697,7 @@ class StandardEngineTests(unittest.TestCase):
         state.turn_number = 2
         state.players[0].turns_taken = 2
         state.players[1].turns_taken = 2
+        state.players[0].prizes = state.players[0].prizes[:4]
         state.players[0].prize_cards_remaining = 4
         self._set_named_active_pokemon(state, 0, "Ampharos ex")
         self._set_named_active_pokemon(state, 1, "Annihilape")
@@ -1163,7 +1187,7 @@ class StandardEngineTests(unittest.TestCase):
 
     def _move_named_card_to_hand(self, state, player_index: int, card_name: str) -> str:
         player = state.players[player_index]
-        for zone_name in ("hand", "deck", "discard"):
+        for zone_name in ("hand", "deck", "discard", "prizes"):
             zone = getattr(player, zone_name)
             for instance_id in list(zone):
                 if card_definition(state, instance_id).name != card_name:
@@ -1186,7 +1210,7 @@ class StandardEngineTests(unittest.TestCase):
         if player.active is not None:
             return
 
-        for zone_name in ("hand", "deck", "discard"):
+        for zone_name in ("hand", "deck", "discard", "prizes"):
             zone = getattr(player, zone_name)
             for instance_id in list(zone):
                 if not card_definition(state, instance_id).is_basic:
@@ -1199,7 +1223,7 @@ class StandardEngineTests(unittest.TestCase):
     def _set_named_active_pokemon(self, state, player_index: int, card_name: str) -> None:
         instance_id = self._find_instance_id(state, player_index, card_name)
         player = state.players[player_index]
-        for zone_name in ("hand", "deck", "discard"):
+        for zone_name in ("hand", "deck", "discard", "prizes"):
             zone = getattr(player, zone_name)
             if instance_id in zone:
                 zone.remove(instance_id)
@@ -1209,7 +1233,7 @@ class StandardEngineTests(unittest.TestCase):
     def _set_named_bench_pokemon(self, state, player_index: int, card_name: str) -> None:
         instance_id = self._find_instance_id(state, player_index, card_name)
         player = state.players[player_index]
-        for zone_name in ("hand", "deck", "discard"):
+        for zone_name in ("hand", "deck", "discard", "prizes"):
             zone = getattr(player, zone_name)
             if instance_id in zone:
                 zone.remove(instance_id)
@@ -1218,7 +1242,7 @@ class StandardEngineTests(unittest.TestCase):
 
     def _find_instance_id(self, state, player_index: int, card_name: str) -> str:
         player = state.players[player_index]
-        for zone_name in ("hand", "deck", "discard"):
+        for zone_name in ("hand", "deck", "discard", "prizes"):
             zone = getattr(player, zone_name)
             for instance_id in zone:
                 if card_definition(state, instance_id).name == card_name:
@@ -1228,7 +1252,7 @@ class StandardEngineTests(unittest.TestCase):
     def _find_instance_ids(self, state, player_index: int, card_name: str, count: int) -> list[str]:
         player = state.players[player_index]
         matches: list[str] = []
-        for zone_name in ("hand", "deck", "discard"):
+        for zone_name in ("hand", "deck", "discard", "prizes"):
             zone = getattr(player, zone_name)
             for instance_id in zone:
                 if card_definition(state, instance_id).name != card_name:

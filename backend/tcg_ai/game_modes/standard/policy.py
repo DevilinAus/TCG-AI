@@ -5,6 +5,7 @@ import json
 import os
 from typing import Any
 from urllib import error, request as urllib_request
+from urllib.parse import urlsplit, urlunsplit
 
 from .decision_payload import build_decision_request
 from .engine import action_id_for, apply_action_for_player, card_definition, list_legal_actions
@@ -20,7 +21,9 @@ DEFAULT_MIN_EXPLORATION_RATE = 0.05
 class StandardPolicyConfig:
     remote_enabled: bool = False
     remote_url: str | None = None
+    remote_batch_eval_url: str | None = None
     remote_timeout_ms: int = DEFAULT_REMOTE_TIMEOUT_MS
+    remote_api_token: str | None = None
     exploration_rate: float = DEFAULT_EXPLORATION_RATE
     min_exploration_rate: float = DEFAULT_MIN_EXPLORATION_RATE
 
@@ -29,6 +32,8 @@ class StandardPolicyConfig:
         raw_enabled = os.environ.get("TCG_AI_STANDARD_REMOTE_ENABLED", "")
         remote_enabled = raw_enabled.lower() in {"1", "true", "yes", "on"}
         remote_url = os.environ.get("TCG_AI_STANDARD_REMOTE_URL")
+        remote_batch_eval_url = os.environ.get("TCG_AI_STANDARD_REMOTE_BATCH_EVAL_URL")
+        remote_api_token = os.environ.get("TCG_AI_STANDARD_REMOTE_API_TOKEN")
         try:
             remote_timeout_ms = int(
                 os.environ.get("TCG_AI_STANDARD_REMOTE_TIMEOUT_MS", str(DEFAULT_REMOTE_TIMEOUT_MS))
@@ -38,8 +43,47 @@ class StandardPolicyConfig:
         return cls(
             remote_enabled=remote_enabled and bool(remote_url),
             remote_url=remote_url,
+            remote_batch_eval_url=remote_batch_eval_url,
             remote_timeout_ms=max(100, remote_timeout_ms),
+            remote_api_token=remote_api_token or None,
         )
+
+    def resolved_remote_batch_eval_url(self) -> str | None:
+        if self.remote_batch_eval_url:
+            return self.remote_batch_eval_url
+        if not self.remote_url:
+            return None
+        if self.remote_url.endswith("/decision"):
+            return f"{self.remote_url[:-len('/decision')]}/batch-eval"
+        return f"{self.remote_url.rstrip('/')}/batch-eval"
+
+    def resolved_remote_ready_url(self) -> str | None:
+        worker_root = self._resolved_remote_worker_root()
+        if worker_root is None:
+            return None
+        path = worker_root.path.rstrip("/")
+        return urlunsplit(worker_root._replace(path=f"{path}/readyz" if path else "/readyz"))
+
+    def _resolved_remote_worker_root(self):
+        candidate_url = self.remote_batch_eval_url or self.remote_url
+        if not candidate_url:
+            return None
+        parsed = urlsplit(candidate_url)
+        path = parsed.path or ""
+        for suffix in (
+            "/api/standard-ml/decision",
+            "/api/standard-ml/batch-eval",
+            "/api/standard-ml/outcome",
+            "/decision",
+            "/batch-eval",
+            "/outcome",
+        ):
+            if path.endswith(suffix):
+                path = path[: -len(suffix)]
+                break
+        else:
+            path = path.rstrip("/")
+        return parsed._replace(path=path, query="", fragment="")
 
 
 @dataclass(frozen=True)
@@ -252,10 +296,13 @@ class RemoteStandardDecisionProvider(StandardDecisionProvider):
             raise StandardRemoteDecisionError("Remote Standard policy is disabled.")
 
         body = json.dumps(request.payload).encode("utf-8")
+        headers = {"Content-Type": "application/json"}
+        if self.config.remote_api_token:
+            headers["X-Standard-ML-Token"] = self.config.remote_api_token
         http_request = urllib_request.Request(
             self.config.remote_url,
             data=body,
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method="POST",
         )
         try:

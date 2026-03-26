@@ -36,7 +36,16 @@
               <span id="turn-chip" class="session-chip">Turn -</span>
               <span id="phase-chip" class="session-chip session-chip-accent">Loading...</span>
               <span id="session-chip" class="session-chip">Session: loading...</span>
-              <span class="session-chip session-chip-muted">Local assets only</span>
+              <label id="standard-ai-mode-chip" class="session-chip session-chip-muted session-chip-toggle" for="standard-ai-mode-toggle">
+                <span class="session-chip-toggle__copy">
+                  <span class="session-chip-toggle__label">NN Mode</span>
+                  <span id="standard-ai-mode-text" class="session-chip-toggle__text">Local AI</span>
+                </span>
+                <input id="standard-ai-mode-toggle" class="session-chip-toggle__input" type="checkbox" role="switch" />
+                <span class="session-chip-toggle__track" aria-hidden="true">
+                  <span class="session-chip-toggle__thumb"></span>
+                </span>
+              </label>
             </div>
             <div class="controls controls-column">
               <button id="new-game-button" class="primary">New Game</button>

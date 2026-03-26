@@ -7,12 +7,14 @@ from ..decision_payload import SCHEMA_VERSION as LEGACY_SCHEMA_VERSION
 from ..engine import action_id_for, list_legal_actions
 from .canonical_state import SCHEMA_VERSION as FULL_STATE_SCHEMA_VERSION, deserialize_state
 from .experience import StandardExperienceStore
+from .neural_policy import PolicyValueBackend
 from .planner import PlannerConfig, StandardTurnPlanner
 
 
 class StandardMlService:
     def __init__(self, experience_store: StandardExperienceStore | None = None) -> None:
         self.experience_store = experience_store or StandardExperienceStore()
+        self.policy_backend = PolicyValueBackend()
 
     def choose_action(self, payload: dict[str, Any]) -> dict[str, Any]:
         if _is_full_state_payload(payload):
@@ -27,6 +29,31 @@ class StandardMlService:
         return {
             "ok": True,
             "schema_version": FULL_STATE_SCHEMA_VERSION,
+        }
+
+    def evaluate_batch(self, payload: dict[str, Any]) -> dict[str, Any]:
+        evaluations = payload.get("evaluations", [])
+        if not isinstance(evaluations, list) or not evaluations:
+            raise ValueError("Batch evaluation payload is missing evaluations.")
+        return {
+            "schema_version": FULL_STATE_SCHEMA_VERSION,
+            "evaluations": self.policy_backend.evaluate_batch(evaluations),
+        }
+
+    def health(self) -> dict[str, Any]:
+        return {
+            "ok": True,
+            "schema_version": FULL_STATE_SCHEMA_VERSION,
+        }
+
+    def ready(self) -> dict[str, Any]:
+        status = self.policy_backend.status
+        return {
+            "ready": True,
+            "schema_version": FULL_STATE_SCHEMA_VERSION,
+            "backend": status.backend,
+            "model_loaded": status.model_loaded,
+            "checkpoint_path": status.checkpoint_path,
         }
 
     def _choose_full_state_action(self, payload: dict[str, Any]) -> dict[str, Any]:

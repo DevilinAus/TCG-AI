@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import mimetypes
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -9,6 +10,7 @@ import secrets
 import threading
 from typing import Any
 from urllib.parse import parse_qs, urlparse
+from urllib import error as urllib_error, request as urllib_request
 
 from .game_modes import (
     DEFAULT_GAME_MODE,
@@ -26,6 +28,9 @@ FRONTEND_DIR = PROJECT_ROOT / "frontend"
 AI_ACTION_DELAY_MIN_MS = 5_000
 AI_ACTION_DELAY_MAX_MS = 8_000
 OPENING_DIE_SIDES = 6
+STANDARD_AI_MODE_LOCAL = "local"
+STANDARD_AI_MODE_REMOTE = "remote"
+STANDARD_GAME_MODE = "standard"
 
 
 class ApiError(Exception):
@@ -50,6 +55,7 @@ class GameSession:
         mode: GameModeDefinition,
         standard_policy_store: StandardPolicyStore,
         standard_policy_config: StandardPolicyConfig,
+        standard_ai_mode: str = STANDARD_AI_MODE_LOCAL,
         human_deck_id: str | None = None,
         seed: int | None = None,
         human_first: bool = True,
@@ -62,6 +68,7 @@ class GameSession:
         self.game_mode = mode.game_mode
         self.standard_policy_store = standard_policy_store
         self.standard_policy_config = standard_policy_config
+        self.standard_ai_mode = standard_ai_mode
         self.human_deck_id = human_deck_id
         self.ai_deck_id = (
             mode.paired_deck_id_for(human_deck_id)
@@ -114,6 +121,8 @@ class GameSession:
         human_first: bool = True,
         seed: int | None = None,
         human_deck_id: str | None = None,
+        standard_ai_mode: str | None = None,
+        standard_policy_config: StandardPolicyConfig | None = None,
     ) -> None:
         with self.lock:
             if human_deck_id is not None:
@@ -123,6 +132,10 @@ class GameSession:
                     if self.mode.paired_deck_id_for is not None
                     else None
                 )
+            if standard_ai_mode is not None:
+                self.standard_ai_mode = standard_ai_mode
+            if standard_policy_config is not None:
+                self.standard_policy_config = standard_policy_config
             self.state = self.mode.create_game(
                 seed=seed,
                 human_first=human_first,
@@ -171,7 +184,12 @@ class GameSession:
         if self.state.winner is not None or self.state.current_player != 1:
             return None
 
-        action = self.mode.choose_action(self.state, 1, learner=self.learner)
+        action = self.mode.choose_action(
+            self.state,
+            1,
+            learner=self.learner,
+            runtime=self.mode_runtime,
+        )
         if action is None:
             return None
 
@@ -277,6 +295,8 @@ class SessionStore:
         human_deck_id: str | None = None,
         human_first: bool = True,
         seed: int | None = None,
+        standard_ai_mode: str = STANDARD_AI_MODE_LOCAL,
+        standard_policy_config: StandardPolicyConfig | None = None,
     ) -> tuple[str, GameSession]:
         session_id = secrets.token_urlsafe(9)
         session = GameSession(
@@ -285,7 +305,8 @@ class SessionStore:
             trainer_store=self._trainers,
             mode=mode,
             standard_policy_store=self._standard_policy_store,
-            standard_policy_config=self._standard_policy_config,
+            standard_policy_config=standard_policy_config or self._standard_policy_config,
+            standard_ai_mode=standard_ai_mode,
             human_deck_id=human_deck_id,
             seed=seed,
             human_first=human_first,
@@ -330,6 +351,7 @@ class TcgApplication:
         mode = self._resolve_game_mode(game_mode, require_available=False)
         snapshot = {
             "game_mode": mode.game_mode,
+            "standard_ai_mode": STANDARD_AI_MODE_LOCAL,
             "available_game_modes": available_game_mode_snapshots(selected_id=mode.game_mode),
             "ai_trainer": trainer.snapshot(selected=True, game_mode=mode.game_mode),
             "available_trainers": self.trainers.snapshots(
@@ -354,21 +376,28 @@ class TcgApplication:
         mode = self._resolve_game_mode(payload.get("game_mode"), require_available=True)
         trainer = self._resolve_trainer(payload.get("trainer_id"))
         human_deck_id = self._resolve_human_deck_id(mode, payload.get("human_deck_id"))
+        standard_ai_mode = self._resolve_standard_ai_mode(mode, payload.get("standard_ai_mode"))
         human_first, opening_roll = self._resolve_human_first(
             payload,
             use_opening_roll=mode.uses_opening_roll,
         )
+        standard_policy_config = self._resolve_standard_policy_config(mode, standard_ai_mode)
         session_id, session = self.sessions.create(
             trainer=trainer,
             mode=mode,
             human_deck_id=human_deck_id,
             human_first=human_first,
             seed=payload.get("seed"),
+            standard_ai_mode=standard_ai_mode,
+            standard_policy_config=standard_policy_config,
         )
         if opening_roll is not None:
             starter_name = session.state.players[session.state.current_player].name
             session.state.log.insert(1, f"Opening die roll: {opening_roll}. {starter_name} goes first.")
         return self._build_snapshot(session_id, session)
+
+    def standard_ml_status(self) -> dict[str, Any]:
+        return self._fetch_standard_ml_status()
 
     def human_action(self, payload: dict[str, Any]) -> dict[str, Any]:
         session_id = self._require_string(payload, "session_id", "missing_session_id")
@@ -418,6 +447,7 @@ class TcgApplication:
 
     def _attach_session_payload(self, snapshot: dict[str, Any], session: GameSession) -> dict[str, Any]:
         snapshot["game_mode"] = session.game_mode
+        snapshot["standard_ai_mode"] = session.standard_ai_mode
         snapshot["available_game_modes"] = available_game_mode_snapshots(selected_id=session.game_mode)
         snapshot["ai_trainer"] = session.trainer.snapshot(selected=True, game_mode=session.game_mode)
         snapshot["available_trainers"] = self.trainers.snapshots(
@@ -445,6 +475,106 @@ class TcgApplication:
         snapshot["ai_deck_id"] = ai_deck_id
         snapshot["available_decks"] = mode.available_deck_snapshots(selected_id=human_deck_id)
         return snapshot
+
+    def _resolve_standard_ai_mode(
+        self,
+        mode: GameModeDefinition,
+        raw_standard_ai_mode: Any,
+    ) -> str:
+        if mode.game_mode != STANDARD_GAME_MODE:
+            return STANDARD_AI_MODE_LOCAL
+        if raw_standard_ai_mode is None:
+            return STANDARD_AI_MODE_LOCAL
+        if not isinstance(raw_standard_ai_mode, str) or not raw_standard_ai_mode:
+            raise ApiError(
+                "Missing field: standard_ai_mode",
+                "missing_standard_ai_mode",
+                HTTPStatus.BAD_REQUEST,
+            )
+        if raw_standard_ai_mode not in {STANDARD_AI_MODE_LOCAL, STANDARD_AI_MODE_REMOTE}:
+            raise ApiError(
+                "Unknown Standard AI mode.",
+                "standard_ai_mode_not_found",
+                HTTPStatus.BAD_REQUEST,
+            )
+        if raw_standard_ai_mode == STANDARD_AI_MODE_REMOTE:
+            status = self._fetch_standard_ml_status()
+            if not (
+                status["configured"]
+                and status["ready"]
+                and status["model_loaded"]
+            ):
+                raise ApiError(
+                    status["error"] or "Remote Standard NN mode is unavailable.",
+                    "standard_ml_unavailable",
+                    HTTPStatus.BAD_REQUEST,
+                )
+        return raw_standard_ai_mode
+
+    def _resolve_standard_policy_config(
+        self,
+        mode: GameModeDefinition,
+        standard_ai_mode: str,
+    ) -> StandardPolicyConfig:
+        if mode.game_mode == STANDARD_GAME_MODE and standard_ai_mode == STANDARD_AI_MODE_REMOTE:
+            return self.standard_policy_config
+        return replace(
+            self.standard_policy_config,
+            remote_enabled=False,
+            remote_url=None,
+            remote_batch_eval_url=None,
+            remote_api_token=None,
+        )
+
+    def _fetch_standard_ml_status(self) -> dict[str, Any]:
+        ready_url = self.standard_policy_config.resolved_remote_ready_url()
+        configured = bool(
+            self.standard_policy_config.remote_enabled
+            and self.standard_policy_config.remote_url
+            and ready_url
+        )
+        status = {
+            "configured": configured,
+            "ready": False,
+            "model_loaded": False,
+            "backend": None,
+            "checkpoint_path": None,
+            "ready_url": ready_url,
+            "error": None,
+        }
+        if not configured or not ready_url:
+            status["error"] = "Remote Standard NN mode is not configured on the server."
+            return status
+
+        headers = {}
+        if self.standard_policy_config.remote_api_token:
+            headers["X-Standard-ML-Token"] = self.standard_policy_config.remote_api_token
+        request = urllib_request.Request(ready_url, headers=headers, method="GET")
+        try:
+            with urllib_request.urlopen(
+                request,
+                timeout=self.standard_policy_config.remote_timeout_ms / 1000,
+            ) as response:
+                payload = json.loads(response.read().decode("utf-8"))
+        except (TimeoutError, urllib_error.URLError, json.JSONDecodeError, OSError) as exc:
+            status["error"] = f"Remote Standard NN worker is unavailable: {exc}"
+            return status
+
+        if not isinstance(payload, dict):
+            status["error"] = "Remote Standard NN worker returned malformed readiness data."
+            return status
+
+        status["ready"] = bool(payload.get("ready"))
+        status["model_loaded"] = bool(payload.get("model_loaded"))
+        backend = payload.get("backend")
+        checkpoint_path = payload.get("checkpoint_path")
+        status["backend"] = backend if isinstance(backend, str) else None
+        status["checkpoint_path"] = checkpoint_path if isinstance(checkpoint_path, str) else None
+        if not status["ready"]:
+            status["error"] = "Remote Standard NN worker is not ready yet."
+        elif not status["model_loaded"]:
+            status["error"] = "Remote Standard NN worker is running, but no model checkpoint is loaded."
+        return status
 
     def _resolve_trainer(self, trainer_id: Any) -> TrainerProfile:
         if trainer_id is None:
@@ -548,6 +678,10 @@ class TcgRequestHandler(BaseHTTPRequestHandler):
             if parsed.path == "/api/lobby":
                 requested_mode = self._query_value(parsed.query, "game_mode", required=False)
                 self._send_json(self.app.lobby(requested_mode))
+                return
+
+            if parsed.path == "/api/standard-ml-status":
+                self._send_json(self.app.standard_ml_status())
                 return
 
             if parsed.path == "/api/game":

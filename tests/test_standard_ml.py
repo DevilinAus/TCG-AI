@@ -5,9 +5,13 @@ import tempfile
 import unittest
 
 from backend.tcg_ai.game_modes.standard.decision_payload import build_decision_request
-from backend.tcg_ai.game_modes.standard.engine import action_id_for, create_game, list_legal_actions
+from backend.tcg_ai.game_modes.standard.engine import action_id_for, apply_action, create_game, list_legal_actions
 from backend.tcg_ai.game_modes.standard.ml.canonical_state import deserialize_state, serialize_state
 from backend.tcg_ai.game_modes.standard.ml.experience import StandardExperienceStore
+from backend.tcg_ai.game_modes.standard.ml.knowledge_state import (
+    serialize_knowledge_actions,
+    serialize_knowledge_state,
+)
 from backend.tcg_ai.game_modes.standard.ml.planner import PlannerConfig, StandardTurnPlanner
 from backend.tcg_ai.game_modes.standard.ml.service import StandardMlService
 
@@ -99,3 +103,87 @@ class StandardMlTests(unittest.TestCase):
 
         self.assertTrue(response["ok"])
         self.assertTrue((Path(self.temp_dir.name) / "outcomes.jsonl").exists())
+
+    def test_knowledge_state_hides_opponent_hand_and_prize_positions(self) -> None:
+        state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck", ai_name="Brock")
+
+        knowledge_state = serialize_knowledge_state(state, perspective_player_index=0)
+
+        self.assertEqual(knowledge_state["players"][0]["hand_count"], 7)
+        self.assertNotIn("hand", knowledge_state["players"][1])
+        self.assertEqual(knowledge_state["players"][0]["known_prize_cards_unordered"], [])
+        self.assertNotIn("prizes", knowledge_state["players"][0])
+        self.assertEqual(knowledge_state["players"][1]["prize_count"], 6)
+
+    def test_knowledge_state_reveals_unordered_known_prizes_after_full_deck_search(self) -> None:
+        state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck", ai_name="Brock")
+        self._finish_opening_setup(state)
+        state.turn_number = 2
+        jacq_id = self._move_named_card_to_hand(state, 0, "Jacq")
+        state.players[0].hand = [jacq_id]
+
+        action = next(
+            action
+            for action in list_legal_actions(state)
+            if action["type"] == "play_supporter"
+        )
+        apply_action(state, action)
+
+        knowledge_state = serialize_knowledge_state(state, perspective_player_index=0)
+
+        self.assertTrue(state.players[0].deck_inspected_this_game)
+        self.assertEqual(len(knowledge_state["players"][0]["known_prize_cards_unordered"]), 6)
+        self.assertNotIn("position", knowledge_state["players"][0]["known_prize_cards_unordered"][0])
+
+    def test_service_evaluates_belief_batch_payloads(self) -> None:
+        state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck", ai_name="Brock")
+        legal_actions = list_legal_actions(state, player_index=0)
+        payload = {
+            "schema_version": 1,
+            "evaluations": [
+                {
+                    "acting_player_index": 0,
+                    "root_player_index": 0,
+                    "belief_state": serialize_knowledge_state(state, perspective_player_index=0),
+                    "legal_actions": serialize_knowledge_actions(
+                        state,
+                        acting_player_index=0,
+                        legal_actions=legal_actions,
+                    ),
+                }
+            ],
+        }
+
+        response = self.service.evaluate_batch(payload)
+
+        self.assertEqual(len(response["evaluations"]), 1)
+        self.assertIn("value", response["evaluations"][0])
+        self.assertEqual(
+            set(response["evaluations"][0]["action_priors"]),
+            {action_id_for(action) for action in legal_actions},
+        )
+
+    def _finish_opening_setup(self, state) -> None:
+        active_action = next(
+            action for action in list_legal_actions(state) if action["type"] == "play_basic_to_active"
+        )
+        apply_action(state, active_action)
+        end_setup_action = next(
+            action for action in list_legal_actions(state) if action["type"] == "end_setup"
+        )
+        apply_action(state, end_setup_action)
+
+    def _move_named_card_to_hand(self, state, player_index: int, card_name: str) -> str:
+        player = state.players[player_index]
+        for zone_name in ("hand", "deck", "discard", "prizes"):
+            zone = getattr(player, zone_name)
+            for instance_id in list(zone):
+                from backend.tcg_ai.game_modes.standard.engine import card_definition
+
+                if card_definition(state, instance_id).name != card_name:
+                    continue
+                if zone_name != "hand":
+                    zone.remove(instance_id)
+                    player.hand.append(instance_id)
+                return instance_id
+        self.fail(f"Could not find {card_name} for player {player_index}")

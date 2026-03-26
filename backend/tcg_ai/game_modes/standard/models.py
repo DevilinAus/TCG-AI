@@ -127,6 +127,7 @@ class PlayerState:
     deck: list[str] = field(default_factory=list)
     hand: list[str] = field(default_factory=list)
     discard: list[str] = field(default_factory=list)
+    prizes: list[str] = field(default_factory=list)
     active: PokemonInPlay | None = None
     bench: list[PokemonInPlay] = field(default_factory=list)
     prize_cards_remaining: int = 6
@@ -134,6 +135,7 @@ class PlayerState:
     supporter_played_this_turn: bool = False
     energy_attached_this_turn: bool = False
     turns_taken: int = 0
+    deck_inspected_this_game: bool = False
 
 
 @dataclass

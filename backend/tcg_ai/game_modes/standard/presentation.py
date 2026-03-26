@@ -75,11 +75,14 @@ def _serialize_player_state(
         "energy_count": _count_attached_energy(player),
         "energy_zone": [],
         "energy_attachment_available": not player.energy_attached_this_turn,
-        "prize_tokens_remaining": player.prize_cards_remaining,
+        "prize_tokens_remaining": len(player.prizes),
         "prize_pile": {
-            "count": player.prize_cards_remaining,
+            "count": len(player.prizes),
             "face_down": True,
             "image_url": None,
+            "known_cards": [
+                _serialize_card_instance(state, instance_id) for instance_id in player.prizes
+            ] if player_index == viewer and player.deck_inspected_this_game else [],
         },
         "requires_promotion": state.pending_promotion_for == player_index,
         "active": _serialize_pokemon(

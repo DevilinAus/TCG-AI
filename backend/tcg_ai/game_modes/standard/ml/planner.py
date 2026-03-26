@@ -7,7 +7,11 @@ from typing import Any
 
 from ..engine import action_id_for, apply_action_for_player, list_legal_actions
 from ..models import GameState
-from .evaluator import evaluate_state, score_action_prior
+from .oracle import (
+    HeuristicPolicyValueOracle,
+    PolicyValueOracle,
+    PolicyValueRequest,
+)
 
 
 @dataclass(frozen=True)
@@ -19,8 +23,13 @@ class PlannerConfig:
 
 
 class StandardTurnPlanner:
-    def __init__(self, config: PlannerConfig | None = None) -> None:
+    def __init__(
+        self,
+        config: PlannerConfig | None = None,
+        oracle: PolicyValueOracle | None = None,
+    ) -> None:
         self.config = config or PlannerConfig()
+        self.oracle = oracle or HeuristicPolicyValueOracle()
         self._nodes_evaluated = 0
 
     def plan(
@@ -33,7 +42,7 @@ class StandardTurnPlanner:
         if not legal_actions:
             raise ValueError("Planner needs at least one legal action.")
 
-        baseline_score = evaluate_state(state, acting_player_index)
+        baseline_score = self._evaluate_state_value(state, acting_player_index, acting_player_index)
         self._nodes_evaluated = 0
         ranked_actions = self._rank_actions(state, acting_player_index, legal_actions, acting_player_index)
         candidates: list[dict[str, Any]] = []
@@ -86,15 +95,15 @@ class StandardTurnPlanner:
     ) -> tuple[float, list[str]]:
         self._nodes_evaluated += 1
         if state.winner is not None or depth >= self.config.max_depth:
-            return evaluate_state(state, root_player_index), []
+            return self._evaluate_state_value(state, state.current_player, root_player_index), []
 
         acting_player_index = state.current_player
         if acting_player_index != root_player_index and not self.config.include_opponent_turn:
-            return evaluate_state(state, root_player_index), []
+            return self._evaluate_state_value(state, acting_player_index, root_player_index), []
 
         legal_actions = list_legal_actions(state, player_index=acting_player_index)
         if not legal_actions:
-            return evaluate_state(state, root_player_index), []
+            return self._evaluate_state_value(state, acting_player_index, root_player_index), []
 
         ranked_actions = self._rank_actions(
             state,
@@ -131,22 +140,51 @@ class StandardTurnPlanner:
         legal_actions: list[dict[str, Any]],
         root_player_index: int,
     ) -> list[dict[str, Any]]:
-        baseline_score = evaluate_state(state, root_player_index)
+        oracle_result = self.oracle.evaluate_batch(
+            [
+                PolicyValueRequest(
+                    state=state,
+                    acting_player_index=acting_player_index,
+                    root_player_index=root_player_index,
+                    legal_actions=legal_actions,
+                )
+            ]
+        )[0]
+        baseline_score = oracle_result.value
         ranked: list[tuple[float, str, dict[str, Any]]] = []
         for action in legal_actions:
             simulated_state = deepcopy(state)
             apply_action_for_player(simulated_state, action, acting_player_index)
-            score = evaluate_state(simulated_state, root_player_index)
-            prior = score_action_prior(state, acting_player_index, action)
+            score = self._evaluate_state_value(simulated_state, simulated_state.current_player, root_player_index)
+            prior = float(oracle_result.action_priors.get(_safe_action_id(action), 0.0))
             ranked.append(
                 (
-                    round(score + prior * 0.1 + (score - baseline_score) * 0.3, 6),
+                    round(score + prior * 8.0 + (score - baseline_score) * 0.3, 6),
                     _safe_action_id(action),
                     action,
                 )
             )
         ranked.sort(key=lambda item: (-item[0], item[1]))
         return [action for _, _, action in ranked]
+
+    def _evaluate_state_value(
+        self,
+        state: GameState,
+        acting_player_index: int,
+        root_player_index: int,
+    ) -> float:
+        legal_actions = list_legal_actions(state, player_index=acting_player_index)
+        result = self.oracle.evaluate_batch(
+            [
+                PolicyValueRequest(
+                    state=state,
+                    acting_player_index=acting_player_index,
+                    root_player_index=root_player_index,
+                    legal_actions=legal_actions,
+                )
+            ]
+        )[0]
+        return float(result.value)
 
 
 def _safe_action_id(action: dict[str, Any]) -> str:
