@@ -103,6 +103,10 @@ def list_legal_actions(
     if player_index is None:
         player_index = state.current_player
     player = state.players[player_index]
+    if state.pending_promotion_for is not None:
+        if state.pending_promotion_for != player_index:
+            return []
+        return _list_promotion_actions(state, player_index)
     if state.setup_phase == "choose_active":
         if player.active is not None:
             return []
@@ -212,6 +216,29 @@ def apply_action_for_player(
             state.log.append(f"{player.name} chose {card_name} as the Active Pokemon.")
         return state
 
+    if action["type"] == "promote":
+        bench_index = action.get("bench_index")
+        if not isinstance(bench_index, int):
+            raise ValueError("Promotion requires a bench index.")
+        try:
+            player.active = player.bench.pop(bench_index)
+        except IndexError as exc:
+            raise ValueError("Promotion target is out of range.") from exc
+        state.log.append(f"{actor_name} promoted {_board_target_name(state, player.active)} to the Active Spot.")
+        if state.pending_promotion_queue:
+            next_player_index = state.pending_promotion_queue.pop(0)
+            state.pending_promotion_for = next_player_index
+            state.current_player = next_player_index
+            next_actor_name = "You" if next_player_index == 0 else state.players[next_player_index].name
+            state.log.append(f"{next_actor_name} must choose a new Active Pokemon.")
+            return state
+        state.pending_promotion_for = None
+        pending_attacker_index = state.pending_promotion_attacker_index
+        state.pending_promotion_attacker_index = None
+        if pending_attacker_index is not None:
+            _advance_turn_after_attack(state, pending_attacker_index)
+        return state
+
     if action["type"] == "bench_basic":
         card_id = _remove_from_hand(player, action["hand_card_id"])
         entered_play_turn = 0 if state.setup_phase is not None else player.turns_taken
@@ -273,7 +300,7 @@ def apply_action_for_player(
         state.log.append(f"{actor_name} used {attack.name}.")
         _resolve_attack(state, player_index, attack, action)
         _resolve_knockouts_after_attack(state, attacker_index=player_index)
-        if state.winner is not None:
+        if state.winner is not None or state.pending_promotion_for is not None:
             return state
 
         _advance_turn_after_attack(state, player_index)
@@ -318,6 +345,8 @@ def action_id_for(action: dict[str, Any]) -> str:
         if target_zone == "bench":
             return f"evolve:{action['hand_card_id']}:bench:{action['target_bench_index']}"
         return f"evolve:{action['hand_card_id']}:active"
+    if action["type"] == "promote":
+        return f"promote:{action['bench_index']}"
     if action["type"] == "play_item":
         target_zone = action.get("target_zone")
         discard_suffix = _discard_action_id_suffix(action)
@@ -354,6 +383,9 @@ def action_id_for(action: dict[str, Any]) -> str:
         discard_ids = action.get("discard_attached_energy_ids")
         if discard_ids:
             suffix_parts.append(",".join(discard_ids))
+        search_ids = action.get("search_deck_ids")
+        if search_ids:
+            suffix_parts.append(f"search:{','.join(search_ids)}")
         return ":".join(suffix_parts)
     return action["type"]
 
@@ -585,57 +617,68 @@ def _resolve_effect_specs(
             continue
 
         if effect_spec.effect_type == "search_deck":
-            if effect_spec.source_zone != "deck":
-                raise ValueError(f"Unsupported search effect configuration: {effect_spec}")
-            choose_count = max(0, int(effect_spec.choose_count or 1))
-            chosen_ids = list(action.get("search_deck_ids") or []) if action else []
-            minimum_choose_count = 0 if effect_spec.optional else choose_count
-            if not minimum_choose_count <= len(chosen_ids) <= choose_count:
-                raise ValueError("Search effect is missing required selected cards.")
-            if len(set(chosen_ids)) != len(chosen_ids):
-                raise ValueError("Search selection contains duplicate cards.")
-            searchable_ids = _searchable_deck_ids(state, player, effect_spec)
-            for chosen_id in chosen_ids:
-                if chosen_id not in searchable_ids:
-                    raise ValueError("Search selection contains a card that is not searchable.")
-            destination_zone = effect_spec.destination_zone or "hand"
-            entered_play_turn = 0 if state.setup_phase is not None else player.turns_taken
-            if destination_zone == "bench":
-                if len(player.bench) + len(chosen_ids) > BENCH_LIMIT:
-                    raise ValueError("Not enough bench space for search effect.")
-                for chosen_id in chosen_ids:
-                    if card_definition(state, chosen_id).kind != "pokemon":
-                        raise ValueError("Only Pokemon can be placed onto the Bench.")
-            for chosen_id in chosen_ids:
-                player.deck.remove(chosen_id)
-                if destination_zone == "hand":
-                    player.hand.append(chosen_id)
-                elif destination_zone == "bench":
-                    player.bench.append(
-                        PokemonInPlay(stack=[chosen_id], entered_play_turn=entered_play_turn)
-                    )
-                else:
-                    raise ValueError(f"Unsupported search destination zone: {destination_zone}")
-            if effect_spec.shuffle_destination:
-                state.rng.shuffle(player.deck)
-            if not chosen_ids:
-                if destination_zone == "hand":
-                    state.log.append(f"{actor_name} searched the deck but did not add a card to hand.")
-                else:
-                    state.log.append(f"{actor_name} searched the deck but did not put a card onto the Bench.")
-            elif destination_zone == "hand":
-                state.log.append(
-                    f"{actor_name} searched the deck and added {len(chosen_ids)} card"
-                    f"{'' if len(chosen_ids) == 1 else 's'} to hand."
-                )
-            else:
-                state.log.append(
-                    f"{actor_name} searched the deck and put {len(chosen_ids)} card"
-                    f"{'' if len(chosen_ids) == 1 else 's'} onto the Bench."
-                )
+            _resolve_search_deck_effect(state, player_index, effect_spec, action)
             continue
 
         raise ValueError(f"Unsupported Standard effect type: {effect_spec.effect_type}")
+
+
+def _resolve_search_deck_effect(
+    state: GameState,
+    player_index: int,
+    effect_spec: Any,
+    action: dict[str, Any] | None = None,
+) -> None:
+    player = state.players[player_index]
+    actor_name = "You" if player_index == 0 else player.name
+    if effect_spec.source_zone != "deck":
+        raise ValueError(f"Unsupported search effect configuration: {effect_spec}")
+    choose_count = max(0, int(effect_spec.choose_count or 1))
+    chosen_ids = list(action.get("search_deck_ids") or []) if action else []
+    minimum_choose_count = 0 if effect_spec.optional else choose_count
+    if not minimum_choose_count <= len(chosen_ids) <= choose_count:
+        raise ValueError("Search effect is missing required selected cards.")
+    if len(set(chosen_ids)) != len(chosen_ids):
+        raise ValueError("Search selection contains duplicate cards.")
+    searchable_ids = _searchable_deck_ids(state, player, effect_spec)
+    for chosen_id in chosen_ids:
+        if chosen_id not in searchable_ids:
+            raise ValueError("Search selection contains a card that is not searchable.")
+    destination_zone = effect_spec.destination_zone or "hand"
+    entered_play_turn = 0 if state.setup_phase is not None else player.turns_taken
+    if destination_zone == "bench":
+        if len(player.bench) + len(chosen_ids) > BENCH_LIMIT:
+            raise ValueError("Not enough bench space for search effect.")
+        for chosen_id in chosen_ids:
+            if card_definition(state, chosen_id).kind != "pokemon":
+                raise ValueError("Only Pokemon can be placed onto the Bench.")
+    for chosen_id in chosen_ids:
+        player.deck.remove(chosen_id)
+        if destination_zone == "hand":
+            player.hand.append(chosen_id)
+        elif destination_zone == "bench":
+            player.bench.append(
+                PokemonInPlay(stack=[chosen_id], entered_play_turn=entered_play_turn)
+            )
+        else:
+            raise ValueError(f"Unsupported search destination zone: {destination_zone}")
+    if effect_spec.shuffle_destination:
+        state.rng.shuffle(player.deck)
+    if not chosen_ids:
+        if destination_zone == "hand":
+            state.log.append(f"{actor_name} searched the deck but did not add a card to hand.")
+        else:
+            state.log.append(f"{actor_name} searched the deck but did not put a card onto the Bench.")
+    elif destination_zone == "hand":
+        state.log.append(
+            f"{actor_name} searched the deck and added {len(chosen_ids)} card"
+            f"{'' if len(chosen_ids) == 1 else 's'} to hand."
+        )
+    else:
+        state.log.append(
+            f"{actor_name} searched the deck and put {len(chosen_ids)} card"
+            f"{'' if len(chosen_ids) == 1 else 's'} onto the Bench."
+        )
 
 
 def _list_bench_basic_actions(
@@ -654,6 +697,21 @@ def _list_bench_basic_actions(
         }
         for instance_id in player.hand
         if card_definition(state, instance_id).is_basic
+    ]
+
+
+def _list_promotion_actions(
+    state: GameState,
+    player_index: int,
+) -> list[dict[str, Any]]:
+    player = state.players[player_index]
+    return [
+        {
+            "type": "promote",
+            "bench_index": bench_index,
+            "label": f"Promote {_board_target_name(state, pokemon)}",
+        }
+        for bench_index, pokemon in enumerate(player.bench)
     ]
 
 
@@ -856,6 +914,15 @@ def _expand_trainer_actions_for_search_choices(
         for effect_spec in card.effect_specs
         if effect_spec.effect_type == "search_deck"
     ]
+    return _expand_actions_for_search_choices(state, player, search_effects, base_actions)
+
+
+def _expand_actions_for_search_choices(
+    state: GameState,
+    player: PlayerState,
+    search_effects: list[Any],
+    base_actions: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
     expanded_actions = list(base_actions)
     for search_effect in search_effects:
         if search_effect.source_zone != "deck":
@@ -903,6 +970,8 @@ def _card_matches_search_filters(
         if search_filter == "pokemon" and card.kind != "pokemon":
             return False
         if search_filter == "basic_pokemon" and (card.kind != "pokemon" or not card.is_basic):
+            return False
+        if search_filter == "evolution_pokemon" and (card.kind != "pokemon" or card.is_basic):
             return False
         if search_filter == "supporter" and (card.kind != "trainer" or "supporter" not in card.card_tags):
             return False
@@ -1066,6 +1135,17 @@ def _build_attack_actions_for_definition(
                 actions,
                 effect_spec,
             )
+            continue
+
+        if effect_spec.effect_type == "search_deck":
+            actions = _expand_actions_for_search_choices(
+                state,
+                state.players[player_index],
+                [effect_spec],
+                actions,
+            )
+            if not actions:
+                return []
             continue
 
     return actions
@@ -1314,6 +1394,10 @@ def _resolve_attack_effect_spec(
         )
         return
 
+    if effect_spec.effect_type == "search_deck":
+        _resolve_search_deck_effect(state, player_index, effect_spec, action)
+        return
+
     if effect_spec.effect_type == "apply_protection":
         if player.active is None:
             return
@@ -1508,13 +1592,25 @@ def _apply_weakness_and_resistance(
 
 
 def _resolve_knockouts_after_attack(state: GameState, attacker_index: int) -> None:
+    promotion_queue: list[int] = []
+    state.pending_promotion_for = None
+    state.pending_promotion_queue = []
+    state.pending_promotion_attacker_index = None
     for knocked_player_index in (1 - attacker_index, attacker_index):
-        _resolve_player_knockouts(state, knocked_player_index)
+        if _resolve_player_knockouts(state, knocked_player_index):
+            promotion_queue.append(knocked_player_index)
         if state.winner is not None:
             return
+    if promotion_queue:
+        state.pending_promotion_for = promotion_queue[0]
+        state.pending_promotion_queue = promotion_queue[1:]
+        state.pending_promotion_attacker_index = attacker_index
+        state.current_player = promotion_queue[0]
+        actor_name = "You" if promotion_queue[0] == 0 else state.players[promotion_queue[0]].name
+        state.log.append(f"{actor_name} must choose a new Active Pokemon.")
 
 
-def _resolve_player_knockouts(state: GameState, knocked_player_index: int) -> None:
+def _resolve_player_knockouts(state: GameState, knocked_player_index: int) -> bool:
     player = state.players[knocked_player_index]
     opponent_index = 1 - knocked_player_index
 
@@ -1529,10 +1625,10 @@ def _resolve_player_knockouts(state: GameState, knocked_player_index: int) -> No
         state.log.append(f"{knocked_out_name} was Knocked Out.")
         _award_prize_for_knockout(state, winner_index=opponent_index)
         if state.winner is not None:
-            return
+            return False
 
     if player.active is None or not _pokemon_is_knocked_out(state, player.active):
-        return
+        return False
 
     knocked_out_name = _board_target_name(state, player.active)
     player.discard.extend(player.active.stack)
@@ -1541,16 +1637,14 @@ def _resolve_player_knockouts(state: GameState, knocked_player_index: int) -> No
     state.log.append(f"{knocked_out_name} was Knocked Out.")
     _award_prize_for_knockout(state, winner_index=opponent_index)
     if state.winner is not None:
-        return
+        return False
 
     if player.bench:
-        promoted = player.bench.pop(0)
-        player.active = promoted
-        state.log.append(f"{player.name} promoted {_board_target_name(state, promoted)} to the Active Spot.")
-        return
+        return True
 
     state.winner = opponent_index
     state.log.append(f"{'You' if opponent_index == 0 else state.players[opponent_index].name} won the game.")
+    return False
 
 
 def _pokemon_is_knocked_out(state: GameState, pokemon: PokemonInPlay | None) -> bool:

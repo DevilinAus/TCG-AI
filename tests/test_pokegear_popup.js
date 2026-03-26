@@ -74,6 +74,66 @@ print(json.dumps(snapshot))
   );
 }
 
+function loadJacqSnapshot() {
+  const pythonScript = `
+from __future__ import annotations
+import json
+from backend.tcg_ai.server import TcgApplication
+from backend.tcg_ai.game_modes.standard.engine import apply_action, list_legal_actions, card_definition
+
+app = TcgApplication()
+state = app.new_game({
+    "game_mode": "standard",
+    "human_first": True,
+    "human_deck_id": "ampharos-ex-battle-deck",
+    "seed": 1,
+})
+session = app.sessions.get(state["session_id"])
+active_action = next(action for action in list_legal_actions(session.state) if action["type"] == "play_basic_to_active")
+apply_action(session.state, active_action)
+end_setup = next(action for action in list_legal_actions(session.state) if action["type"] == "end_setup")
+apply_action(session.state, end_setup)
+session.state.turn_number = 2
+
+player = session.state.players[0]
+
+def move(name: str) -> str:
+    for zone_name in ("hand", "deck", "discard"):
+        zone = getattr(player, zone_name)
+        for instance_id in list(zone):
+            if card_definition(session.state, instance_id).name != name:
+                continue
+            if zone_name != "hand":
+                zone.remove(instance_id)
+                player.hand.append(instance_id)
+            return instance_id
+    raise AssertionError(f"Missing {name}")
+
+jacq_id = move("Jacq")
+player.hand = [jacq_id]
+
+mareep_id = move("Mareep")
+ampharos_id = move("Ampharos ex")
+staraptor_id = move("Staraptor")
+prioritized_ids = {mareep_id, ampharos_id, staraptor_id}
+player.deck = [mareep_id, ampharos_id, staraptor_id] + [
+    instance_id
+    for instance_id in player.deck
+    if instance_id not in prioritized_ids
+]
+
+snapshot = app.get_game(state["session_id"])
+print(json.dumps(snapshot))
+`
+
+  return JSON.parse(
+    execFileSync("python3", ["-c", pythonScript], {
+      cwd: ROOT,
+      encoding: "utf8",
+    }),
+  );
+}
+
 function setupDom() {
   const html = fs.readFileSync(path.join(ROOT, "frontend/index.html"), "utf8");
   const dom = new JSDOM(html, {
@@ -158,5 +218,144 @@ test("Pokegear opens a top-seven search popup and only supporters are selectable
   assert.ok(
     !nonSupporterButton.classList.contains("is-match"),
     "Non-supporters should not be highlighted as matching Pokegear.",
+  );
+});
+
+test("Jacq opens a full deck search popup and only evolution Pokemon are selectable", async () => {
+  const snapshot = loadJacqSnapshot();
+  const dom = setupDom();
+  const { window } = dom;
+  const app = window.__TCG_APP_TEST_API__;
+
+  app.setCurrentState(snapshot);
+  app.render(snapshot);
+
+  const jacqElement = findHandCardElement(window, "Jacq");
+  assert.ok(jacqElement, "Jacq should render in hand.");
+
+  jacqElement.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+
+  const boardPanel = window.document.getElementById("player-board-panel");
+  assert.ok(boardPanel, "Player board panel should render.");
+  boardPanel.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+
+  const overlay = window.document.getElementById("deck-browser-overlay");
+  assert.ok(overlay, "Deck browser overlay should exist.");
+  assert.equal(overlay.hidden, false, "Jacq should open the deck browser popup.");
+  assert.equal(
+    window.document.querySelector(".deck-browser__eyebrow")?.textContent,
+    "Full Deck Search",
+    "Jacq should browse the full deck.",
+  );
+
+  const confirmButton = window.document.querySelector(".deck-browser__confirm");
+  assert.ok(confirmButton, "The confirm button should render.");
+  assert.equal(
+    confirmButton.disabled,
+    false,
+    "Jacq should allow confirming with zero selected cards.",
+  );
+
+  const ampharosButton = window.document.querySelector('.deck-browser-card[title="Ampharos ex"]');
+  const staraptorButton = window.document.querySelector('.deck-browser-card[title="Staraptor"]');
+  const mareepButton = window.document.querySelector('.deck-browser-card[title="Mareep"]');
+  assert.ok(ampharosButton, "An evolution Pokemon should render.");
+  assert.ok(staraptorButton, "A second evolution Pokemon should render.");
+  assert.ok(mareepButton, "A Basic Pokemon should render.");
+  assert.ok(
+    ampharosButton.classList.contains("is-selectable"),
+    "Evolution Pokemon should be selectable for Jacq.",
+  );
+  assert.ok(
+    ampharosButton.classList.contains("is-match"),
+    "Evolution Pokemon should be highlighted as Jacq matches.",
+  );
+  assert.ok(
+    staraptorButton.classList.contains("is-selectable"),
+    "Jacq should allow selecting a second evolution Pokemon.",
+  );
+  assert.ok(
+    !mareepButton.classList.contains("is-selectable"),
+    "Basic Pokemon should not be selectable for Jacq.",
+  );
+  assert.ok(
+    !mareepButton.classList.contains("is-match"),
+    "Basic Pokemon should not be highlighted as Jacq matches.",
+  );
+});
+
+test("Jacq popup lets the player choose two evolution Pokemon and confirms that search", async () => {
+  const snapshot = loadJacqSnapshot();
+  const dom = setupDom();
+  const { window } = dom;
+  const app = window.__TCG_APP_TEST_API__;
+
+  const jacqCard = snapshot.players[0].hand.find((card) => card.name === "Jacq");
+  assert.ok(jacqCard, "Jacq should be in the hand snapshot.");
+
+  const ampharosCard = snapshot.players[0].deck_cards.find((card) => card.name === "Ampharos ex");
+  const staraptorCard = snapshot.players[0].deck_cards.find((card) => card.name === "Staraptor");
+  assert.ok(ampharosCard, "Ampharos ex should be in the deck snapshot.");
+  assert.ok(staraptorCard, "Staraptor should be in the deck snapshot.");
+
+  app.setCurrentState(snapshot);
+  app.uiState.selectedCardId = jacqCard.instance_id;
+  app.render(snapshot);
+  assert.equal(app.openDeckBrowserForSelection(snapshot), true);
+
+  const ampharosButton = window.document.querySelector(
+    `.deck-browser-card[data-instance-id="${ampharosCard.instance_id}"]`,
+  );
+  const staraptorButton = window.document.querySelector(
+    `.deck-browser-card[data-instance-id="${staraptorCard.instance_id}"]`,
+  );
+  assert.ok(ampharosButton, "The first evolution option should render.");
+  assert.ok(staraptorButton, "The second evolution option should render.");
+
+  ampharosButton.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+  staraptorButton.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+
+  assert.ok(ampharosButton.classList.contains("is-selected"), "The first Jacq choice should highlight.");
+  assert.ok(staraptorButton.classList.contains("is-selected"), "The second Jacq choice should highlight.");
+
+  const confirmButton = window.document.querySelector(".deck-browser__confirm");
+  assert.ok(confirmButton, "Confirm button should render.");
+  assert.equal(confirmButton.disabled, false, "Confirm should stay enabled after two valid choices.");
+
+  let submittedAction = null;
+  app.setSubmitActionOverride(async (actionView) => {
+    submittedAction = actionView;
+    const updated = structuredClone(snapshot);
+    const selectedIds = new Set(actionView.action.search_deck_ids || []);
+    const movedCards = updated.players[0].deck_cards.filter((card) => selectedIds.has(card.instance_id));
+    updated.players[0].deck_cards = updated.players[0].deck_cards.filter(
+      (card) => !selectedIds.has(card.instance_id),
+    );
+    updated.players[0].deck_count = updated.players[0].deck_cards.length;
+    updated.players[0].hand = [
+      ...updated.players[0].hand.filter((card) => card.instance_id !== jacqCard.instance_id),
+      ...movedCards,
+    ];
+    updated.players[0].hand_count = updated.players[0].hand.length;
+    updated.legal_actions = [];
+    app.setCurrentState(updated);
+    app.render(updated);
+  });
+
+  confirmButton.dispatchEvent(new window.MouseEvent("click", { bubbles: true }));
+
+  assert.ok(submittedAction, "Confirm should submit the selected Jacq search action.");
+  assert.deepEqual(
+    [...submittedAction.action.search_deck_ids].sort(),
+    [ampharosCard.instance_id, staraptorCard.instance_id].sort(),
+    "Confirm should submit both chosen evolution ids.",
+  );
+  assert.ok(
+    window.document.querySelector('#player-hand img[alt="Ampharos ex"]'),
+    "After confirm, Ampharos ex should appear in hand.",
+  );
+  assert.ok(
+    window.document.querySelector('#player-hand img[alt="Staraptor"]'),
+    "After confirm, Staraptor should appear in hand.",
   );
 });

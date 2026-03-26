@@ -14,7 +14,7 @@ from ..models import (
 )
 import random
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 def serialize_state(state: GameState) -> dict[str, Any]:
@@ -27,6 +27,9 @@ def serialize_state(state: GameState) -> dict[str, Any]:
         "starting_player": state.starting_player,
         "winner": state.winner,
         "setup_phase": state.setup_phase,
+        "pending_promotion_for": state.pending_promotion_for,
+        "pending_promotion_queue": list(state.pending_promotion_queue),
+        "pending_promotion_attacker_index": state.pending_promotion_attacker_index,
         "log": list(state.log),
         "cards": {
             instance_id: {
@@ -77,6 +80,9 @@ def deserialize_state(payload: dict[str, Any]) -> GameState:
         log=[str(entry) for entry in payload.get("log", [])],
         seed=int(payload.get("seed", 0)),
         setup_phase=payload.get("setup_phase"),
+        pending_promotion_for=payload.get("pending_promotion_for"),
+        pending_promotion_queue=[int(player_index) for player_index in payload.get("pending_promotion_queue", [])],
+        pending_promotion_attacker_index=payload.get("pending_promotion_attacker_index"),
     )
 
 
@@ -206,11 +212,21 @@ def _serialize_attack_effect_spec(effect_spec: AttackEffectSpec) -> dict[str, An
     return {
         "effect_type": effect_spec.effect_type,
         "amount": effect_spec.amount,
+        "count": effect_spec.count,
+        "count_mode": effect_spec.count_mode,
+        "source_zone": effect_spec.source_zone,
+        "destination_zone": effect_spec.destination_zone,
+        "destination_position": effect_spec.destination_position,
         "target_player": effect_spec.target_player,
         "target_zone": effect_spec.target_zone,
         "selection_count": effect_spec.selection_count,
+        "choose_count": effect_spec.choose_count,
+        "search_filters": list(effect_spec.search_filters),
         "energy_type": effect_spec.energy_type,
         "optional": effect_spec.optional,
+        "shuffle_destination": effect_spec.shuffle_destination,
+        "revealed_to": effect_spec.revealed_to,
+        "changes_hidden_information": effect_spec.changes_hidden_information,
         "bonus_damage": effect_spec.bonus_damage,
         "condition": effect_spec.condition,
         "duration": effect_spec.duration,
@@ -221,13 +237,25 @@ def _deserialize_attack_effect_spec(payload: dict[str, Any]) -> AttackEffectSpec
     return AttackEffectSpec(
         effect_type=str(payload["effect_type"]),
         amount=None if payload.get("amount") is None else int(payload["amount"]),
+        count=None if payload.get("count") is None else int(payload["count"]),
+        count_mode=str(payload.get("count_mode", "fixed")),
+        source_zone=payload.get("source_zone"),
+        destination_zone=payload.get("destination_zone"),
+        destination_position=payload.get("destination_position"),
         target_player=str(payload.get("target_player", "self")),
         target_zone=payload.get("target_zone"),
         selection_count=None
         if payload.get("selection_count") is None
         else int(payload["selection_count"]),
+        choose_count=None
+        if payload.get("choose_count") is None
+        else int(payload["choose_count"]),
+        search_filters=tuple(str(filter_name) for filter_name in payload.get("search_filters", [])),
         energy_type=payload.get("energy_type"),
         optional=bool(payload.get("optional", False)),
+        shuffle_destination=bool(payload.get("shuffle_destination", False)),
+        revealed_to=payload.get("revealed_to"),
+        changes_hidden_information=bool(payload.get("changes_hidden_information", False)),
         bonus_damage=None
         if payload.get("bonus_damage") is None
         else int(payload["bonus_damage"]),

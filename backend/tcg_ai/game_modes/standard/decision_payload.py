@@ -48,6 +48,7 @@ def _serialize_public_state(state: GameState) -> dict[str, Any]:
         "current_player": state.current_player,
         "starting_player": state.starting_player,
         "setup_phase": state.setup_phase,
+        "pending_promotion_for": state.pending_promotion_for,
         "winner": state.winner,
         "players": [
             _serialize_public_player_state(state, player_index)
@@ -164,6 +165,19 @@ def _serialize_action_source(
             "card_id": card.card_id,
             "name": card.name,
         }
+    if action["type"] == "promote":
+        bench_index = action["bench_index"]
+        pokemon = state.players[player_index].bench[bench_index]
+        instance_id = pokemon.stack[-1]
+        card = card_definition(state, instance_id)
+        return {
+            "player_index": player_index,
+            "zone": "bench",
+            "bench_index": bench_index,
+            "instance_id": instance_id,
+            "card_id": card.card_id,
+            "name": card.name,
+        }
     if action["type"] == "attack":
         player = state.players[player_index]
         instance_id = player.active.stack[-1] if player.active is not None and player.active.stack else None
@@ -183,6 +197,14 @@ def _serialize_action_target(
     action: dict[str, Any],
 ) -> dict[str, Any] | None:
     if action["type"] == "play_basic_to_active":
+        return {
+            "player_index": player_index,
+            "zone": "active",
+            "instance_id": None,
+            "bench_index": None,
+            "name": "Active Spot",
+        }
+    if action["type"] == "promote":
         return {
             "player_index": player_index,
             "zone": "active",
@@ -220,11 +242,21 @@ def _serialize_attack_effect_spec(effect_spec: Any) -> dict[str, Any]:
     return {
         "effect_type": effect_spec.effect_type,
         "amount": effect_spec.amount,
+        "count": effect_spec.count,
+        "count_mode": effect_spec.count_mode,
+        "source_zone": effect_spec.source_zone,
+        "destination_zone": effect_spec.destination_zone,
+        "destination_position": effect_spec.destination_position,
         "target_player": effect_spec.target_player,
         "target_zone": effect_spec.target_zone,
         "selection_count": effect_spec.selection_count,
+        "choose_count": effect_spec.choose_count,
+        "search_filters": list(effect_spec.search_filters),
         "energy_type": effect_spec.energy_type,
         "optional": effect_spec.optional,
+        "shuffle_destination": effect_spec.shuffle_destination,
+        "revealed_to": effect_spec.revealed_to,
+        "changes_hidden_information": effect_spec.changes_hidden_information,
         "bonus_damage": effect_spec.bonus_damage,
         "condition": effect_spec.condition,
         "duration": effect_spec.duration,

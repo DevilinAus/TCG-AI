@@ -16,7 +16,7 @@ from backend.tcg_ai.game_modes.standard.models import TypeModifier
 
 
 class StandardEngineTests(unittest.TestCase):
-    def test_only_implemented_direct_draw_supporters_are_playable(self) -> None:
+    def test_supported_supporters_are_playable(self) -> None:
         state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck")
         self._finish_opening_setup(state)
         state.turn_number = 2
@@ -27,8 +27,8 @@ class StandardEngineTests(unittest.TestCase):
         supporter_actions = [action for action in list_legal_actions(state) if action["type"] == "play_supporter"]
 
         self.assertEqual(
-            sorted(card_definition(state, action["hand_card_id"]).name for action in supporter_actions),
-            ["Nemona", "Youngster"],
+            sorted({card_definition(state, action["hand_card_id"]).name for action in supporter_actions}),
+            ["Jacq", "Nemona", "Youngster"],
         )
 
     def test_starting_player_cannot_play_supporters_on_turn_one(self) -> None:
@@ -88,6 +88,96 @@ class StandardEngineTests(unittest.TestCase):
         self.assertIn(mareep_id, state.players[0].deck)
         self.assertIn(wattrel_id, state.players[0].deck)
         self.assertTrue(state.players[0].supporter_played_this_turn)
+
+    def test_jacq_searches_up_to_two_evolution_pokemon(self) -> None:
+        state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck")
+        self._finish_opening_setup(state)
+        state.turn_number = 2
+        jacq_id = self._move_named_card_to_hand(state, 0, "Jacq")
+        self._set_exact_hand(state, 0, [jacq_id])
+
+        ampharos_id = self._find_instance_id(state, 0, "Ampharos ex")
+        staraptor_id = self._find_instance_id(state, 0, "Staraptor")
+        mareep_id = self._find_instance_id(state, 0, "Mareep")
+        self._reorder_deck(state, 0, [mareep_id, ampharos_id, staraptor_id])
+
+        jacq_actions = [
+            action
+            for action in list_legal_actions(state)
+            if action["type"] == "play_supporter" and card_definition(state, action["hand_card_id"]).name == "Jacq"
+        ]
+
+        self.assertGreaterEqual(len(jacq_actions), 1)
+        self.assertIn([], [action.get("search_deck_ids") for action in jacq_actions])
+        self.assertIn([ampharos_id], [action.get("search_deck_ids") for action in jacq_actions])
+        self.assertIn([staraptor_id], [action.get("search_deck_ids") for action in jacq_actions])
+        self.assertIn([ampharos_id, staraptor_id], [action.get("search_deck_ids") for action in jacq_actions])
+        self.assertNotIn([mareep_id], [action.get("search_deck_ids") for action in jacq_actions])
+
+        chosen_action = next(
+            action
+            for action in jacq_actions
+            if action.get("search_deck_ids") == [ampharos_id, staraptor_id]
+        )
+        apply_action(state, chosen_action)
+
+        self.assertIn(ampharos_id, state.players[0].hand)
+        self.assertIn(staraptor_id, state.players[0].hand)
+        self.assertNotIn(ampharos_id, state.players[0].deck)
+        self.assertNotIn(staraptor_id, state.players[0].deck)
+        self.assertEqual(card_definition(state, state.players[0].discard[-1]).name, "Jacq")
+        self.assertTrue(state.players[0].supporter_played_this_turn)
+        self.assertIn("searched the deck and added 2 cards to hand", " ".join(state.log).lower())
+
+    def test_call_for_family_searches_up_to_two_basics_from_deck_to_bench(self) -> None:
+        state = create_game(seed=1, human_deck_id="lucario-ex-battle-deck")
+        state.setup_phase = None
+        state.current_player = 0
+        state.turn_number = 2
+        state.players[0].turns_taken = 2
+        state.players[1].turns_taken = 2
+        self._set_named_active_pokemon(state, 0, "Squawkabilly")
+        self._set_named_active_pokemon(state, 1, "Mareep")
+        state.players[0].active.attached_energy = [
+            self._find_instance_id(state, 0, "Basic Fighting Energy"),
+        ]
+
+        riolu_id = self._find_instance_id(state, 0, "Riolu")
+        lechonk_id = self._find_instance_id(state, 0, "Lechonk")
+        oinkologne_id = self._find_instance_id(state, 0, "Oinkologne")
+        self._reorder_deck(state, 0, [riolu_id, oinkologne_id, lechonk_id])
+
+        call_for_family_actions = [
+            action
+            for action in list_legal_actions(state)
+            if action["type"] == "attack" and action.get("attack_index") == 0
+        ]
+
+        self.assertGreaterEqual(len(call_for_family_actions), 1)
+        self.assertIn([], [action.get("search_deck_ids") for action in call_for_family_actions])
+        self.assertIn([riolu_id], [action.get("search_deck_ids") for action in call_for_family_actions])
+        self.assertIn([lechonk_id], [action.get("search_deck_ids") for action in call_for_family_actions])
+        self.assertIn(
+            [riolu_id, lechonk_id],
+            [action.get("search_deck_ids") for action in call_for_family_actions],
+        )
+        self.assertNotIn([oinkologne_id], [action.get("search_deck_ids") for action in call_for_family_actions])
+
+        chosen_action = next(
+            action
+            for action in call_for_family_actions
+            if action.get("search_deck_ids") == [riolu_id, lechonk_id]
+        )
+        apply_action(state, chosen_action)
+
+        bench_names = [card_definition(state, pokemon.stack[-1]).name for pokemon in state.players[0].bench]
+        self.assertEqual(len(state.players[0].bench), 2)
+        self.assertIn("Riolu", bench_names)
+        self.assertIn("Lechonk", bench_names)
+        self.assertNotIn(oinkologne_id, [pokemon.stack[-1] for pokemon in state.players[0].bench])
+        self.assertNotIn(riolu_id, state.players[0].deck)
+        self.assertNotIn(lechonk_id, state.players[0].deck)
+        self.assertIn("searched the deck and put 2 cards onto the bench", " ".join(state.log).lower())
 
     def test_play_energy_attaches_to_active_and_uses_the_turn_attachment(self) -> None:
         state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck")
@@ -284,6 +374,43 @@ class StandardEngineTests(unittest.TestCase):
 
         self.assertEqual(state.players[1].active.damage, 10)
         self.assertEqual(state.current_player, 1)
+
+    def test_knock_out_requires_human_promotion_before_the_next_turn_starts(self) -> None:
+        state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck")
+        state.setup_phase = None
+        state.current_player = 1
+        state.turn_number = 2
+        state.players[0].turns_taken = 2
+        state.players[1].turns_taken = 2
+        self._set_named_active_pokemon(state, 0, "Mareep")
+        self._set_named_bench_pokemon(state, 0, "Wattrel")
+        self._set_named_active_pokemon(state, 1, "Mankey")
+        state.players[0].active.damage = 30
+        state.players[1].active.attached_energy = [
+            self._find_instance_id(state, 1, "Basic Fighting Energy"),
+        ]
+
+        attack_action = next(action for action in list_legal_actions(state) if action["type"] == "attack")
+        apply_action(state, attack_action)
+
+        self.assertIsNone(state.players[0].active)
+        self.assertEqual(state.current_player, 0)
+        self.assertEqual(state.turn_number, 2)
+        self.assertEqual(state.players[0].turns_taken, 2)
+        self.assertEqual(state.pending_promotion_for, 0)
+        self.assertEqual(
+            [action["type"] for action in list_legal_actions(state)],
+            ["promote"],
+        )
+
+        promote_action = next(action for action in list_legal_actions(state) if action["type"] == "promote")
+        apply_action(state, promote_action)
+
+        self.assertEqual(card_definition(state, state.players[0].active.stack[-1]).name, "Wattrel")
+        self.assertIsNone(state.pending_promotion_for)
+        self.assertEqual(state.current_player, 0)
+        self.assertEqual(state.turn_number, 3)
+        self.assertEqual(state.players[0].turns_taken, 3)
 
     def test_weakness_doubles_damage_to_the_opponents_active_pokemon(self) -> None:
         state = create_game(seed=1, human_deck_id="lucario-ex-battle-deck")
