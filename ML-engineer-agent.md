@@ -20,7 +20,7 @@ For now, scope is intentionally narrow:
 
 The project should:
 
-- run large-scale self-play on the Linux machine that has the full repo and RTX 4070
+- run large-scale self-play on the machine that has the full repo and the accelerated training/inference stack
 - produce useful training data, not just raw game logs
 - train a model checkpoint that the current worker can load directly
 - evaluate candidate checkpoints against the current champion

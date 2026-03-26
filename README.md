@@ -103,7 +103,7 @@ Or, with the optional `standard-ml` extras installed:
 python3 -m backend.tcg_ai.game_modes.standard.ml_fastapi
 ```
 
-Quick launcher for the Linux NN box:
+Quick launcher for the remote NN worker host:
 
 ```bash
 bash scripts/start_standard_ml_worker.sh --checkpoint /home/<you>/models/champion.pt --token <shared-token>
@@ -113,7 +113,7 @@ bash scripts/start_standard_ml_worker.sh --checkpoint /home/<you>/models/champio
 
 The first self-play/training scripts on this branch target only the current `Ampharos ex Battle Deck` vs `Lucario ex Battle Deck` matchup.
 
-Generate self-play data locally on the Linux box:
+Generate self-play data locally on the training host:
 
 ```bash
 python3 scripts/run_standard_self_play.py --games 100000 --workers 8 --chunk-size 250
@@ -150,6 +150,235 @@ python3 scripts/train_standard_model.py --device cuda --promote-path standard_ml
 ```
 
 The self-play script prints rolling console progress, the training script prints live loss/checkpoint updates, and the evaluation script prints live head-to-head win-rate progress before optionally promoting a new champion checkpoint.
+
+## Distributed Standard Self-Play
+
+If one machine is handling accelerated training/inference and several others are mostly idle CPUs, the best MVP scale-up path is distributed self-play:
+
+- one main machine runs the coordinator and stores shards
+- extra machines poll for chunks and simulate games locally
+- the main training host trains and evaluates checkpoints after the run
+
+Why this shape:
+
+- the Standard simulator is symbolic Python logic and is a poor fit for "move the whole engine onto the accelerator"
+- CPU workers are still useful for generating lots of games
+- the accelerated training host is better used for training now, and later for batched model inference
+
+### What Runs Where
+
+Coordinator / training box:
+
+- machine that will run training, evaluation, and optional accelerated inference
+- full repo checkout and Python environment
+- runs the coordinator
+- serves the dashboard
+- stores the self-play shards
+- later runs training and evaluation
+
+Worker machines:
+
+- any Mac or Linux machine with the repo checkout and Python environment
+- no dedicated accelerator required
+- run self-play workers only
+- request chunk leases from the coordinator and upload results back
+
+### Requirements And Dependencies
+
+Coordinator / training host requirements:
+
+- Python `3.13+`
+- full repo checkout
+- project dependencies installed in a virtual environment
+- network visibility from worker machines to the chosen coordinator host/port
+
+Coordinator / training host Python dependencies:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+Accelerated training / remote NN worker extras:
+
+```bash
+pip install -e '.[standard-ml]'
+```
+
+That extra installs the optional ML stack from [pyproject.toml](/Users/andrew/Documents/projects/TCG-AI/pyproject.toml):
+
+- `torch`
+- `fastapi`
+- `uvicorn`
+- `numpy`
+- `polars`
+- `pyarrow`
+- `tensorboard`
+
+Worker machine requirements:
+
+- Python `3.13+`
+- full repo checkout
+- project dependencies installed with `pip install -e .`
+- no accelerated ML extras required for heuristic distributed self-play workers
+
+Dashboard requirements:
+
+- no separate frontend build step
+- the coordinator serves `/dashboard`, `/dashboard.css`, and `/dashboard.js` directly
+
+### How To Launch A Distributed Run
+
+1. On the coordinator machine, start the coordinator.
+
+Minimal:
+
+```bash
+bash scripts/start_standard_self_play_coordinator.sh
+```
+
+Recommended first run:
+
+```bash
+export TCG_AI_STANDARD_SELF_PLAY_RUN_ID=run_$(date -u '+%Y%m%dT%H%M%SZ')
+TCG_AI_STANDARD_SELF_PLAY_GAMES=20000 \
+TCG_AI_STANDARD_SELF_PLAY_CHUNK_SIZE=50 \
+TCG_AI_STANDARD_SELF_PLAY_HOST=0.0.0.0 \
+TCG_AI_STANDARD_SELF_PLAY_PORT=8787 \
+bash scripts/start_standard_self_play_coordinator.sh
+```
+
+The coordinator prints:
+
+- the server URL
+- the dashboard URL
+- the status endpoint
+- the output directory for this run
+
+2. Open the dashboard in your browser.
+
+```text
+http://<linux-box>:8787/dashboard
+```
+
+3. Optionally open a second terminal on the coordinator machine for the text status watcher.
+
+```bash
+bash scripts/watch_standard_self_play_status.sh http://<linux-box>:8787
+```
+
+4. On each worker machine, launch a worker.
+
+Minimal worker setup:
+
+```bash
+export TCG_AI_STANDARD_SELF_PLAY_COORDINATOR_URL=http://<linux-box>:8787
+export TCG_AI_STANDARD_SELF_PLAY_WORKER_ID=<unique-worker-name>
+bash scripts/start_standard_self_play_worker.sh
+```
+
+Recommended worker setup:
+
+```bash
+export TCG_AI_STANDARD_SELF_PLAY_COORDINATOR_URL=http://<linux-box>:8787
+export TCG_AI_STANDARD_SELF_PLAY_WORKER_ID=macbook-m1
+export TCG_AI_STANDARD_SELF_PLAY_POLL_SECONDS=2
+export TCG_AI_STANDARD_SELF_PLAY_HEARTBEAT_INTERVAL_SECONDS=15
+export TCG_AI_STANDARD_SELF_PLAY_PROGRESS_LOG=standard_ml_data/progress/self_play_worker.log
+bash scripts/start_standard_self_play_worker.sh
+```
+
+Important:
+
+- every worker should use a unique `TCG_AI_STANDARD_SELF_PLAY_WORKER_ID`
+- every worker should be on the same repo revision
+- every worker needs the Python dependencies installed
+- if a worker disappears, the coordinator will eventually reclaim the lease and reissue that chunk
+
+5. Confirm the machines appear in the dashboard.
+
+What you should see:
+
+- workers marked as `busy`, `idle`, `stalled`, or `offline`
+- current shard progress per machine
+- total distributed throughput and recent games-per-minute
+- per-worker pace so you can compare machines against each other
+- dropout visibility when a worker stops checking in
+
+### Dashboard Notes
+
+The dashboard shows two slightly different progress views:
+
+- `reported` totals update as soon as a worker finishes a game and reports progress
+- `aggregate` totals update only after a full shard is submitted and written to disk
+
+So during an active run it is normal for `reported.games` to be slightly ahead of `aggregate.games`.
+
+Worker states mean:
+
+- `busy`: worker is alive and currently holds a shard lease
+- `idle`: worker is alive but waiting for work
+- `stalled`: worker still holds a lease but has stopped checking in
+- `offline`: worker has no active lease and has stopped checking in
+
+### Output Layout
+
+The coordinator writes a normal self-play dataset under `standard_ml_data/distributed_self_play/<run_id>`:
+
+- `manifest.json`
+- `summary.json`
+- `decisions/shard_XXXXXX.jsonl`
+- `games/shard_XXXXXX.jsonl`
+
+That output is intentionally compatible with the training/evaluation scripts that already exist.
+
+If you want to control the output folder explicitly:
+
+```bash
+export TCG_AI_STANDARD_SELF_PLAY_OUTPUT_DIR=standard_ml_data/distributed_self_play/<run_id>
+```
+
+### Parameter Guidance
+
+These are not fixed:
+
+- `games`
+- `chunk-size`
+- `workers`
+
+Practical guidance:
+
+- `games` mostly changes how much data you collect
+- `chunk-size` mostly changes scheduler behavior, time-to-visible-progress, and shard count
+- `chunk-size` does not make the model smarter by itself
+- `max-depth`, `beam-width`, and `opponent-branch-width` affect teacher quality much more directly
+
+Good early coordinator defaults:
+
+- `games=5000` for the first end-to-end distributed smoke run
+- `chunk-size=25` or `50` so work is rebalanced often and progress appears quickly
+- keep the current search defaults until the distributed loop is stable
+
+### After The Run Finishes
+
+Train on the training host using the completed distributed run folder:
+
+```bash
+python3 scripts/train_standard_model.py --input-dir standard_ml_data/distributed_self_play/<run_id> --device cuda --epochs 1
+```
+
+Evaluate the candidate checkpoint and promote it if it wins:
+
+```bash
+python3 scripts/evaluate_standard_checkpoints.py --candidate standard_ml_data/checkpoints/<run_id>/final.pt --promote-path standard_ml_data/champion.pt
+```
+
+If you want to play against the promoted model in the UI afterward, launch the remote NN worker against the champion checkpoint:
+
+```bash
+bash scripts/start_standard_ml_worker.sh --checkpoint standard_ml_data/champion.pt --token <shared-token>
+```
 
 ## How To Test
 
