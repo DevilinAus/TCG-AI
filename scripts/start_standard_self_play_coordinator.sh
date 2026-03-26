@@ -3,6 +3,9 @@ set -euo pipefail
 
 # Quick launcher for the main coordinator machine.
 #
+# Fastest form:
+#   bash scripts/start_standard_self_play_coordinator.sh
+#
 # Adjust these with env vars if needed:
 #   TCG_AI_STANDARD_SELF_PLAY_HOST=0.0.0.0
 #   TCG_AI_STANDARD_SELF_PLAY_PORT=8787
@@ -64,5 +67,10 @@ fi
 if [[ -n "${TCG_AI_STANDARD_SELF_PLAY_CHECKPOINT:-}" ]]; then
   ARGS+=(--checkpoint "$TCG_AI_STANDARD_SELF_PLAY_CHECKPOINT")
 fi
+
+echo "[coordinator-launch] run_id=${RUN_ID}"
+echo "[coordinator-launch] dashboard=http://127.0.0.1:${PORT}/dashboard"
+echo "[coordinator-launch] worker example:"
+echo "  bash scripts/start_standard_self_play_worker.sh http://<this-machine-ip>:${PORT} worker-1"
 
 exec python3 scripts/run_standard_self_play_coordinator.py "${ARGS[@]}" "$@"
