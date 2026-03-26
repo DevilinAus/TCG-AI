@@ -846,6 +846,370 @@ class StandardEngineTests(unittest.TestCase):
         self.assertEqual(state.players[0].active.damage, 0)
         self.assertEqual(state.players[0].active.lingering_effects, [])
 
+    def test_knocking_out_pokemon_ex_awards_two_prizes(self) -> None:
+        scenarios = (
+            {
+                "human_deck_id": "ampharos-ex-battle-deck",
+                "attacker_index": 0,
+                "attacker_name": "Kilowattrel",
+                "attack_index": 1,
+                "energy_name": "Basic Lightning Energy",
+                "defender_name": "Lucario ex",
+                "defender_damage": 120,
+            },
+            {
+                "human_deck_id": "ampharos-ex-battle-deck",
+                "attacker_index": 1,
+                "attacker_name": "Lucario ex",
+                "attack_index": 1,
+                "energy_name": "Basic Fighting Energy",
+                "defender_name": "Ampharos ex",
+                "defender_damage": 170,
+            },
+        )
+
+        for scenario in scenarios:
+            with self.subTest(defender=scenario["defender_name"]):
+                state = create_game(seed=1, human_deck_id=scenario["human_deck_id"])
+                attacker_index = scenario["attacker_index"]
+                defender_index = 1 - attacker_index
+                state.setup_phase = None
+                state.current_player = attacker_index
+                state.turn_number = 2
+                state.players[0].turns_taken = 2
+                state.players[1].turns_taken = 2
+                self._set_named_active_pokemon(state, attacker_index, scenario["attacker_name"])
+                self._set_named_active_pokemon(state, defender_index, scenario["defender_name"])
+                state.players[defender_index].active.damage = scenario["defender_damage"]
+
+                attack = card_definition(state, state.players[attacker_index].active.stack[-1]).attacks[
+                    scenario["attack_index"]
+                ]
+                state.players[attacker_index].active.attached_energy = [
+                    self._take_named_card(state, attacker_index, scenario["energy_name"])
+                    for _ in range(attack.cost)
+                ]
+                prizes_before = len(state.players[attacker_index].prizes)
+
+                attack_action = next(
+                    action
+                    for action in list_legal_actions(state)
+                    if action["type"] == "attack" and action["attack_index"] == scenario["attack_index"]
+                )
+                apply_action(state, attack_action)
+
+                self.assertEqual(len(state.players[attacker_index].prizes), prizes_before - 2)
+                self.assertEqual(state.players[attacker_index].prize_cards_remaining, prizes_before - 2)
+                self.assertTrue(any("took 2 Prize cards" in entry for entry in state.log))
+
+    def test_energy_retrieval_is_not_legal_without_basic_energy_in_discard(self) -> None:
+        state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck")
+        self._finish_opening_setup(state)
+        energy_retrieval_id = self._move_named_card_to_hand(state, 0, "Energy Retrieval")
+        self._set_exact_hand(state, 0, [energy_retrieval_id])
+
+        energy_retrieval_actions = [
+            action
+            for action in list_legal_actions(state)
+            if action["type"] == "play_item"
+            and card_definition(state, action["hand_card_id"]).name == "Energy Retrieval"
+        ]
+
+        self.assertEqual(energy_retrieval_actions, [])
+
+    def test_energy_retrieval_recovers_up_to_two_basic_energy_from_discard(self) -> None:
+        state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck")
+        self._finish_opening_setup(state)
+        energy_retrieval_id = self._move_named_card_to_hand(state, 0, "Energy Retrieval")
+        lightning_a_id = self._take_named_card(state, 0, "Basic Lightning Energy")
+        lightning_b_id = self._take_named_card(state, 0, "Basic Lightning Energy")
+        potion_id = self._take_named_card(state, 0, "Potion")
+        state.players[0].discard.extend([lightning_a_id, lightning_b_id, potion_id])
+        self._set_exact_hand(state, 0, [energy_retrieval_id])
+
+        energy_retrieval_actions = [
+            action
+            for action in list_legal_actions(state)
+            if action["type"] == "play_item"
+            and card_definition(state, action["hand_card_id"]).name == "Energy Retrieval"
+        ]
+        recover_choices = [action.get("recover_from_discard_ids", []) for action in energy_retrieval_actions]
+
+        self.assertIn([], recover_choices)
+        self.assertIn([lightning_a_id], recover_choices)
+        self.assertIn([lightning_b_id], recover_choices)
+        self.assertIn([lightning_a_id, lightning_b_id], recover_choices)
+        self.assertNotIn([potion_id], recover_choices)
+
+        chosen_action = next(
+            action
+            for action in energy_retrieval_actions
+            if set(action.get("recover_from_discard_ids", [])) == {lightning_a_id, lightning_b_id}
+        )
+        apply_action(state, chosen_action)
+
+        self.assertCountEqual(state.players[0].hand, [lightning_a_id, lightning_b_id])
+        self.assertIn(potion_id, state.players[0].discard)
+        self.assertEqual(card_definition(state, state.players[0].discard[-1]).name, "Energy Retrieval")
+
+    def test_fly_does_no_damage_on_tails(self) -> None:
+        state = create_game(seed=1, human_deck_id="lucario-ex-battle-deck")
+        state.setup_phase = None
+        state.current_player = 0
+        state.turn_number = 2
+        state.players[0].turns_taken = 2
+        state.players[1].turns_taken = 2
+        self._set_named_active_pokemon(state, 0, "Squawkabilly")
+        self._set_named_active_pokemon(state, 1, "Ampharos ex")
+        attack = card_definition(state, state.players[0].active.stack[-1]).attacks[1]
+        state.players[0].active.attached_energy = [
+            self._take_named_card(state, 0, "Basic Fighting Energy")
+            for _ in range(attack.cost)
+        ]
+
+        fly_action = next(
+            action
+            for action in list_legal_actions(state)
+            if action["type"] == "attack" and action["attack_index"] == 1
+        )
+        with patch.object(state.rng, "choice", return_value=False):
+            apply_action(state, fly_action)
+
+        self.assertEqual(state.players[1].active.damage, 0)
+        self.assertEqual(state.players[0].active.lingering_effects, [])
+        self.assertIn("Fly did no damage.", state.log)
+
+    def test_fly_on_heads_deals_damage_and_prevents_damage_during_the_next_turn(self) -> None:
+        state = create_game(seed=1, human_deck_id="lucario-ex-battle-deck")
+        state.setup_phase = None
+        state.current_player = 0
+        state.turn_number = 2
+        state.players[0].turns_taken = 2
+        state.players[1].turns_taken = 2
+        self._set_named_active_pokemon(state, 0, "Squawkabilly")
+        self._set_named_active_pokemon(state, 1, "Ampharos ex")
+        fly = card_definition(state, state.players[0].active.stack[-1]).attacks[1]
+        ampharos_attack = card_definition(state, state.players[1].active.stack[-1]).attacks[0]
+        state.players[0].active.attached_energy = [
+            self._take_named_card(state, 0, "Basic Fighting Energy")
+            for _ in range(fly.cost)
+        ]
+        state.players[1].active.attached_energy = [
+            self._take_named_card(state, 1, "Basic Lightning Energy")
+            for _ in range(ampharos_attack.cost)
+        ]
+
+        fly_action = next(
+            action
+            for action in list_legal_actions(state)
+            if action["type"] == "attack" and action["attack_index"] == 1
+        )
+        with patch.object(state.rng, "choice", return_value=True):
+            apply_action(state, fly_action)
+
+        self.assertEqual(state.players[1].active.damage, 60)
+        self.assertTrue(
+            any(
+                effect.effect_type == "prevent_attack_damage_and_effects"
+                for effect in state.players[0].active.lingering_effects
+            )
+        )
+
+        counter_attack = next(action for action in list_legal_actions(state) if action["type"] == "attack")
+        apply_action(state, counter_attack)
+
+        self.assertEqual(state.players[0].active.damage, 0)
+        self.assertEqual(state.players[0].active.lingering_effects, [])
+
+    def test_fly_protection_clears_after_switching_out(self) -> None:
+        state = create_game(seed=1, human_deck_id="lucario-ex-battle-deck")
+        state.setup_phase = None
+        state.current_player = 0
+        state.turn_number = 2
+        state.players[0].turns_taken = 2
+        state.players[1].turns_taken = 2
+        self._set_named_active_pokemon(state, 0, "Squawkabilly")
+        self._set_named_bench_pokemon(state, 0, "Riolu")
+        self._set_named_active_pokemon(state, 1, "Ampharos ex")
+        fly = card_definition(state, state.players[0].active.stack[-1]).attacks[1]
+        state.players[0].active.attached_energy = [
+            self._take_named_card(state, 0, "Basic Fighting Energy")
+            for _ in range(fly.cost)
+        ]
+
+        fly_action = next(
+            action
+            for action in list_legal_actions(state)
+            if action["type"] == "attack" and action["attack_index"] == 1
+        )
+        with patch.object(state.rng, "choice", return_value=True):
+            apply_action(state, fly_action)
+
+        opponent_end_turn = next(action for action in list_legal_actions(state) if action["type"] == "end_turn")
+        apply_action(state, opponent_end_turn)
+
+        switch_id = self._move_named_card_to_hand(state, 0, "Switch")
+        self._set_exact_hand(state, 0, [switch_id])
+        switch_action = next(action for action in list_legal_actions(state) if action["type"] == "play_item")
+        apply_action(state, switch_action)
+
+        benched_squawkabilly = next(
+            pokemon
+            for pokemon in state.players[0].bench
+            if card_definition(state, pokemon.stack[-1]).name == "Squawkabilly"
+        )
+        self.assertEqual(benched_squawkabilly.lingering_effects, [])
+
+    def test_acu_punch_ture_creates_a_choice_per_opposing_attack_and_blocks_only_the_selected_one(self) -> None:
+        state = create_game(seed=1, human_deck_id="lucario-ex-battle-deck")
+        state.setup_phase = None
+        state.current_player = 0
+        state.turn_number = 2
+        state.players[0].turns_taken = 2
+        state.players[1].turns_taken = 2
+        self._set_named_active_pokemon(state, 0, "Medicham")
+        self._set_named_active_pokemon(state, 1, "Ampharos ex")
+        state.players[0].active.attached_energy = [self._take_named_card(state, 0, "Basic Fighting Energy")]
+        state.players[1].active.attached_energy = [
+            self._take_named_card(state, 1, "Basic Lightning Energy")
+            for _ in range(3)
+        ]
+
+        acu_punch_ture_actions = [
+            action
+            for action in list_legal_actions(state)
+            if action["type"] == "attack" and action["attack_index"] == 0
+        ]
+
+        self.assertEqual(
+            {action.get("blocked_attack_index") for action in acu_punch_ture_actions},
+            {0, 1},
+        )
+        self.assertEqual(
+            {action["label"] for action in acu_punch_ture_actions},
+            {
+                "Use Acu-Punch-Ture and block Electro Ball",
+                "Use Acu-Punch-Ture and block Thunderstrike Tail",
+            },
+        )
+
+        chosen_action = next(
+            action
+            for action in acu_punch_ture_actions
+            if action.get("blocked_attack_index") == 1
+        )
+        apply_action(state, chosen_action)
+
+        opponent_attack_actions = [action for action in list_legal_actions(state) if action["type"] == "attack"]
+        self.assertEqual({action["attack_index"] for action in opponent_attack_actions}, {0})
+
+    def test_acu_punch_ture_clears_when_the_defending_pokemon_evolves(self) -> None:
+        state = create_game(seed=1, human_deck_id="lucario-ex-battle-deck")
+        state.setup_phase = None
+        state.current_player = 0
+        state.turn_number = 2
+        state.players[0].turns_taken = 2
+        state.players[1].turns_taken = 2
+        self._set_named_active_pokemon(state, 0, "Medicham")
+        self._set_named_active_pokemon(state, 1, "Flaaffy")
+        state.players[0].active.attached_energy = [self._take_named_card(state, 0, "Basic Fighting Energy")]
+
+        chosen_action = next(
+            action
+            for action in list_legal_actions(state)
+            if action["type"] == "attack"
+            and action["attack_index"] == 0
+            and action.get("blocked_attack_index") == 0
+        )
+        apply_action(state, chosen_action)
+
+        ampharos_id = self._move_named_card_to_hand(state, 1, "Ampharos ex")
+        self._set_exact_hand(state, 1, [ampharos_id])
+        evolve_action = next(action for action in list_legal_actions(state) if action["type"] == "evolve")
+        apply_action(state, evolve_action)
+
+        self.assertEqual(card_definition(state, state.players[1].active.stack[-1]).name, "Ampharos ex")
+        self.assertEqual(state.players[1].active.lingering_effects, [])
+
+    def test_leg_stomp_applies_a_next_turn_attack_lock_on_tails(self) -> None:
+        state = create_game(seed=1, human_deck_id="lucario-ex-battle-deck")
+        state.setup_phase = None
+        state.current_player = 0
+        state.turn_number = 2
+        state.players[0].turns_taken = 2
+        state.players[1].turns_taken = 2
+        self._set_named_active_pokemon(state, 0, "Oinkologne")
+        self._set_named_active_pokemon(state, 1, "Ampharos ex")
+        attack = card_definition(state, state.players[0].active.stack[-1]).attacks[1]
+        state.players[0].active.attached_energy = [
+            self._take_named_card(state, 0, "Basic Fighting Energy")
+            for _ in range(attack.cost)
+        ]
+
+        leg_stomp = next(
+            action
+            for action in list_legal_actions(state)
+            if action["type"] == "attack" and action["attack_index"] == 1
+        )
+        with patch.object(state.rng, "choice", return_value=False):
+            apply_action(state, leg_stomp)
+
+        opponent_end_turn = next(action for action in list_legal_actions(state) if action["type"] == "end_turn")
+        apply_action(state, opponent_end_turn)
+
+        self.assertEqual([action for action in list_legal_actions(state) if action["type"] == "attack"], [])
+        self.assertTrue(any(effect.effect_type == "cannot_attack" for effect in state.players[0].active.lingering_effects))
+
+    def test_leg_stomp_does_not_apply_an_attack_lock_on_heads(self) -> None:
+        state = create_game(seed=1, human_deck_id="lucario-ex-battle-deck")
+        state.setup_phase = None
+        state.current_player = 0
+        state.turn_number = 2
+        state.players[0].turns_taken = 2
+        state.players[1].turns_taken = 2
+        self._set_named_active_pokemon(state, 0, "Oinkologne")
+        self._set_named_active_pokemon(state, 1, "Ampharos ex")
+        attack = card_definition(state, state.players[0].active.stack[-1]).attacks[1]
+        state.players[0].active.attached_energy = [
+            self._take_named_card(state, 0, "Basic Fighting Energy")
+            for _ in range(attack.cost)
+        ]
+
+        leg_stomp = next(
+            action
+            for action in list_legal_actions(state)
+            if action["type"] == "attack" and action["attack_index"] == 1
+        )
+        with patch.object(state.rng, "choice", return_value=True):
+            apply_action(state, leg_stomp)
+
+        opponent_end_turn = next(action for action in list_legal_actions(state) if action["type"] == "end_turn")
+        apply_action(state, opponent_end_turn)
+
+        self.assertTrue(any(action["type"] == "attack" for action in list_legal_actions(state)))
+        self.assertEqual(state.players[0].active.lingering_effects, [])
+
+    def test_feint_ignores_resistance(self) -> None:
+        state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck")
+        state.setup_phase = None
+        state.current_player = 1
+        state.turn_number = 2
+        state.players[0].turns_taken = 2
+        state.players[1].turns_taken = 2
+        self._set_named_active_pokemon(state, 0, "Staraptor")
+        self._set_named_active_pokemon(state, 1, "Meditite")
+        state.players[1].active.attached_energy = [self._take_named_card(state, 1, "Basic Fighting Energy")]
+
+        feint = next(
+            action
+            for action in list_legal_actions(state)
+            if action["type"] == "attack" and action["attack_index"] == 0
+        )
+        apply_action(state, feint)
+
+        self.assertEqual(state.players[0].active.damage, 10)
+        self.assertFalse(any("Resistance applied" in entry for entry in state.log))
+
     def test_ai_prefers_an_immediate_winning_attack_over_benching_more_basics(self) -> None:
         state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck")
         state.setup_phase = None
@@ -1197,6 +1561,17 @@ class StandardEngineTests(unittest.TestCase):
                     player.hand.append(instance_id)
                 return instance_id
         self.fail(f"Could not find {card_name} for player {player_index}")
+
+    def _take_named_card(self, state, player_index: int, card_name: str) -> str:
+        player = state.players[player_index]
+        for zone_name in ("hand", "deck", "discard", "prizes"):
+            zone = getattr(player, zone_name)
+            for instance_id in list(zone):
+                if card_definition(state, instance_id).name != card_name:
+                    continue
+                zone.remove(instance_id)
+                return instance_id
+        self.fail(f"Could not take {card_name} for player {player_index}")
 
     def _set_exact_hand(self, state, player_index: int, ordered_instance_ids: list[str]) -> None:
         player = state.players[player_index]

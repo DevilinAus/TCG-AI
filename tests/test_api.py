@@ -508,6 +508,106 @@ class ApiTests(unittest.TestCase):
             any("put 2 cards onto the bench" in entry["text"].lower() for entry in updated["log"]),
         )
 
+    def test_standard_energy_retrieval_exposes_discard_cards_and_recovery_choices(self) -> None:
+        state = self.app.new_game(
+            {
+                "game_mode": "standard",
+                "human_first": True,
+                "human_deck_id": "ampharos-ex-battle-deck",
+                "seed": 1,
+            }
+        )
+        session = self.app.sessions.get(state["session_id"])
+        from backend.tcg_ai.game_modes.standard.engine import apply_action, list_legal_actions
+
+        active_action = next(
+            action for action in list_legal_actions(session.state) if action["type"] == "play_basic_to_active"
+        )
+        apply_action(session.state, active_action)
+        end_setup = next(action for action in list_legal_actions(session.state) if action["type"] == "end_setup")
+        apply_action(session.state, end_setup)
+
+        energy_retrieval_id = self._move_standard_named_card_to_hand(session.state, 0, "Energy Retrieval")
+        lightning_a_id = self._take_standard_named_card(session.state, 0, "Basic Lightning Energy")
+        lightning_b_id = self._take_standard_named_card(session.state, 0, "Basic Lightning Energy")
+        potion_id = self._take_standard_named_card(session.state, 0, "Potion")
+        session.state.players[0].discard.extend([lightning_a_id, lightning_b_id, potion_id])
+        self._set_standard_exact_hand(session.state, 0, [energy_retrieval_id])
+
+        snapshot = self.app.get_game(state["session_id"])
+        energy_retrieval = next(
+            card for card in snapshot["players"][0]["hand"] if card["instance_id"] == energy_retrieval_id
+        )
+        energy_retrieval_actions = [
+            action
+            for action in snapshot["legal_actions"]
+            if action["type"] == "play_item" and action["source"]["instance_id"] == energy_retrieval_id
+        ]
+        recover_choices = [action["action"]["recover_from_discard_ids"] for action in energy_retrieval_actions]
+
+        self.assertEqual(energy_retrieval["effect_specs"][0]["effect_type"], "recover_from_discard")
+        self.assertEqual(energy_retrieval["effect_specs"][0]["source_zone"], "discard")
+        self.assertEqual(energy_retrieval["effect_specs"][0]["destination_zone"], "hand")
+        self.assertEqual(energy_retrieval["effect_specs"][0]["search_filters"], ["basic_energy"])
+        self.assertEqual(energy_retrieval["effect_specs"][0]["choose_count"], 2)
+        self.assertTrue(energy_retrieval["effect_specs"][0]["optional"])
+        self.assertCountEqual(
+            [card["name"] for card in snapshot["players"][0]["discard_cards"]],
+            ["Basic Lightning Energy", "Basic Lightning Energy", "Potion"],
+        )
+        self.assertIn([], recover_choices)
+        self.assertIn([lightning_a_id], recover_choices)
+        self.assertIn([lightning_b_id], recover_choices)
+        self.assertIn([lightning_a_id, lightning_b_id], recover_choices)
+        self.assertNotIn([potion_id], recover_choices)
+
+    def test_standard_acu_punch_ture_exposes_attack_choice_metadata(self) -> None:
+        state = self.app.new_game(
+            {
+                "game_mode": "standard",
+                "human_first": True,
+                "human_deck_id": "lucario-ex-battle-deck",
+                "seed": 1,
+            }
+        )
+        session = self.app.sessions.get(state["session_id"])
+        session.state.setup_phase = None
+        session.state.current_player = 0
+        session.state.turn_number = 2
+        session.state.players[0].turns_taken = 2
+        session.state.players[1].turns_taken = 2
+        self._set_standard_named_active_pokemon(session.state, 0, "Medicham")
+        self._set_standard_named_active_pokemon(session.state, 1, "Ampharos ex")
+        session.state.players[0].active.attached_energy = [
+            self._take_standard_named_card(session.state, 0, "Basic Fighting Energy"),
+        ]
+
+        snapshot = self.app.get_game(state["session_id"])
+        medicham = snapshot["players"][0]["active"]
+        acu_punch_ture = medicham["attacks"][0]
+        acu_punch_ture_actions = [
+            action
+            for action in snapshot["legal_actions"]
+            if action["type"] == "attack"
+            and action["source"]["instance_id"] == medicham["instance_id"]
+            and action["action"]["attack_index"] == 0
+            and isinstance(action["action"].get("blocked_attack_index"), int)
+        ]
+
+        self.assertEqual(acu_punch_ture["name"], "Acu-Punch-Ture")
+        self.assertEqual(acu_punch_ture["effect_specs"][0]["effect_type"], "block_selected_opponent_attack")
+        self.assertEqual(
+            {action["action"]["blocked_attack_index"] for action in acu_punch_ture_actions},
+            {0, 1},
+        )
+        self.assertEqual(
+            {action["label"] for action in acu_punch_ture_actions},
+            {
+                "Use Acu-Punch-Ture and block Electro Ball",
+                "Use Acu-Punch-Ture and block Thunderstrike Tail",
+            },
+        )
+
     def test_standard_ultra_ball_exposes_deck_search_metadata_and_viewer_deck_cards(self) -> None:
         state = self.app.new_game(
             {
@@ -1238,6 +1338,19 @@ class ApiTests(unittest.TestCase):
                 return instance_id
         self.fail(f"Could not find {card_name} for player {player_index}")
         self.assertIn("7 cards were redrawn", updated["log"][-2]["text"])
+
+    def _take_standard_named_card(self, state, player_index: int, card_name: str) -> str:
+        player = state.players[player_index]
+        from backend.tcg_ai.game_modes.standard.engine import card_definition
+
+        for zone_name in ("hand", "deck", "discard", "prizes"):
+            zone = getattr(player, zone_name)
+            for instance_id in list(zone):
+                if card_definition(state, instance_id).name != card_name:
+                    continue
+                zone.remove(instance_id)
+                return instance_id
+        self.fail(f"Could not take {card_name} for player {player_index}")
 
     def _set_standard_exact_hand(self, state, player_index: int, ordered_instance_ids: list[str]) -> None:
         player = state.players[player_index]

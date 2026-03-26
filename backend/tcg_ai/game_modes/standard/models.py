@@ -92,6 +92,8 @@ class CardDefinition:
     image_url: str | None = None
     card_tags: tuple[str, ...] = ()
     rules_text: tuple[str, ...] = ()
+    is_basic_energy: bool = False
+    prize_card_value: int = 1
     effect_specs: tuple[EffectSpec, ...] = ()
 
 
@@ -107,7 +109,9 @@ class LingeringEffect:
     effect_type: str
     source_player: int
     expires_end_of_player_turn: int | None = None
+    activation_turn: int | None = None
     condition: str | None = None
+    blocked_attack_index: int | None = None
 
 
 @dataclass

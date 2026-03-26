@@ -61,6 +61,8 @@ class DeckCardDefinition:
     image_url: str | None
     card_tags: tuple[str, ...]
     rules_text: tuple[str, ...]
+    is_basic_energy: bool
+    prize_card_value: int
     effect_specs: tuple[EffectSpec, ...]
 
 
@@ -170,6 +172,16 @@ TRAINER_EFFECT_SPECS: dict[str, tuple[EffectSpec, ...]] = {
             shuffle_destination=True,
             revealed_to="all",
             changes_hidden_information=True,
+        ),
+    ),
+    "sv1-171": (
+        EffectSpec(
+            effect_type="recover_from_discard",
+            source_zone="discard",
+            destination_zone="hand",
+            choose_count=2,
+            search_filters=("basic_energy",),
+            optional=True,
         ),
     ),
 }
@@ -287,6 +299,20 @@ ATTACK_EFFECT_SPECS: dict[tuple[str, str], tuple[AttackEffectSpec, ...]] = {
             condition="heads_required",
         ),
     ),
+    ("sv1-111", "Acu-Punch-Ture"): (
+        AttackEffectSpec(
+            effect_type="block_selected_opponent_attack",
+            target_player="opponent",
+            target_zone="active",
+        ),
+    ),
+    ("sv1-110", "Feint"): (
+        AttackEffectSpec(
+            effect_type="ignore_resistance",
+            target_player="opponent",
+            target_zone="active",
+        ),
+    ),
     ("sv1-124", "Rampaging Fang"): (
         AttackEffectSpec(
             effect_type="discard_attached_energy",
@@ -314,12 +340,33 @@ ATTACK_EFFECT_SPECS: dict[tuple[str, str], tuple[AttackEffectSpec, ...]] = {
             changes_hidden_information=True,
         ),
     ),
+    ("sv1-162", "Fly"): (
+        AttackEffectSpec(
+            effect_type="coin_flip_damage_on_heads_only",
+            condition="heads_required",
+        ),
+        AttackEffectSpec(
+            effect_type="self_protection_on_heads",
+            target_player="self",
+            target_zone="active",
+            condition="attack_damage_and_effects",
+            duration="until_end_of_opponents_next_turn",
+        ),
+    ),
     ("sv1-165", "Nosedive"): (
         AttackEffectSpec(
             effect_type="damage_target",
             amount=20,
             target_player="self",
             target_zone="active",
+        ),
+    ),
+    ("sv1-157", "Leg Stomp"): (
+        AttackEffectSpec(
+            effect_type="self_attack_lock_on_tails",
+            target_player="self",
+            target_zone="active",
+            duration="until_end_of_next_turn",
         ),
     ),
     ("svp-16", "Thunderstrike Tail"): (
@@ -571,6 +618,24 @@ def _catalog_rules_text(card_id: str) -> tuple[str, ...]:
     return tuple(rule for rule in rules if isinstance(rule, str) and rule)
 
 
+def _catalog_is_basic_energy(kind: str, name: str) -> bool:
+    return kind == "energy" and name.startswith("Basic ")
+
+
+def _catalog_prize_card_value(card_id: str, kind: str) -> int:
+    if kind != "pokemon":
+        return 1
+
+    card = _load_card_catalog().get(card_id)
+    if card is None:
+        raise ValueError(f"Missing Standard catalog data for card '{card_id}'.")
+
+    subtypes = card.get("subtypes", [])
+    if not isinstance(subtypes, list):
+        return 1
+    return 2 if "ex" in subtypes else 1
+
+
 def _effect_specs_for_card(card_id: str) -> tuple[EffectSpec, ...]:
     return TRAINER_EFFECT_SPECS.get(card_id, ())
 
@@ -639,6 +704,8 @@ def load_deck_cards(deck_id: str) -> tuple[DeckCardDefinition, ...]:
                 image_url=image_url if isinstance(image_url, str) and image_url else None,
                 card_tags=_catalog_card_tags(card_id),
                 rules_text=_catalog_rules_text(card_id),
+                is_basic_energy=_catalog_is_basic_energy(kind, name),
+                prize_card_value=_catalog_prize_card_value(card_id, kind),
                 effect_specs=_effect_specs_for_card(card_id),
             )
         )
