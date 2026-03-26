@@ -4,7 +4,10 @@ set -euo pipefail
 # Quick launcher for a self-play worker machine.
 #
 # Required:
-#   export TCG_AI_STANDARD_SELF_PLAY_COORDINATOR_URL=http://<linux-box>:8787
+#   export TCG_AI_STANDARD_SELF_PLAY_COORDINATOR_URL=http://<coordinator-host>:8787
+#
+# Fastest form:
+#   bash scripts/start_standard_self_play_worker.sh http://<coordinator-host>:8787 my-worker-1
 #
 # Optional:
 #   export TCG_AI_STANDARD_SELF_PLAY_WORKER_ID=macbook-m1
@@ -19,9 +22,39 @@ set -euo pipefail
 PROJECT_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-COORDINATOR_URL="${TCG_AI_STANDARD_SELF_PLAY_COORDINATOR_URL:-}"
+if [[ "${1:-}" == "-h" || "${1:-}" == "--help" ]]; then
+  cat <<'EOF'
+Usage:
+  bash scripts/start_standard_self_play_worker.sh <coordinator-url> [worker-id]
+
+Examples:
+  bash scripts/start_standard_self_play_worker.sh http://192.168.1.50:8787 macbook-m1
+
+Or use env vars:
+  export TCG_AI_STANDARD_SELF_PLAY_COORDINATOR_URL=http://192.168.1.50:8787
+  export TCG_AI_STANDARD_SELF_PLAY_WORKER_ID=macbook-m1
+  bash scripts/start_standard_self_play_worker.sh
+EOF
+  exit 0
+fi
+
+POSITIONAL_COORDINATOR_URL=""
+POSITIONAL_WORKER_ID=""
+
+if [[ $# -gt 0 && "${1:-}" != --* ]]; then
+  POSITIONAL_COORDINATOR_URL="$1"
+  shift
+fi
+
+if [[ $# -gt 0 && "${1:-}" != --* ]]; then
+  POSITIONAL_WORKER_ID="$1"
+  shift
+fi
+
+COORDINATOR_URL="${TCG_AI_STANDARD_SELF_PLAY_COORDINATOR_URL:-$POSITIONAL_COORDINATOR_URL}"
 if [[ -z "$COORDINATOR_URL" ]]; then
-  echo "Set TCG_AI_STANDARD_SELF_PLAY_COORDINATOR_URL to the coordinator base URL, for example http://192.168.1.20:8787" >&2
+  echo "Set TCG_AI_STANDARD_SELF_PLAY_COORDINATOR_URL or pass the coordinator URL as the first argument." >&2
+  echo "Example: bash scripts/start_standard_self_play_worker.sh http://192.168.1.20:8787 macbook-m1" >&2
   exit 1
 fi
 
@@ -32,12 +65,18 @@ ARGS=(
   --heartbeat-interval-seconds "${TCG_AI_STANDARD_SELF_PLAY_HEARTBEAT_INTERVAL_SECONDS:-15}"
 )
 
-if [[ -n "${TCG_AI_STANDARD_SELF_PLAY_WORKER_ID:-}" ]]; then
-  ARGS+=(--worker-id "$TCG_AI_STANDARD_SELF_PLAY_WORKER_ID")
+WORKER_ID="${TCG_AI_STANDARD_SELF_PLAY_WORKER_ID:-$POSITIONAL_WORKER_ID}"
+if [[ -n "$WORKER_ID" ]]; then
+  ARGS+=(--worker-id "$WORKER_ID")
 fi
 
 if [[ -n "${TCG_AI_STANDARD_SELF_PLAY_PROGRESS_LOG:-}" ]]; then
   ARGS+=(--progress-log "$TCG_AI_STANDARD_SELF_PLAY_PROGRESS_LOG")
+fi
+
+echo "[worker-launch] coordinator=${COORDINATOR_URL}"
+if [[ -n "$WORKER_ID" ]]; then
+  echo "[worker-launch] worker_id=${WORKER_ID}"
 fi
 
 exec python3 scripts/run_standard_self_play_worker.py "${ARGS[@]}" "$@"
