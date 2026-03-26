@@ -103,7 +103,7 @@ Or, with the optional `standard-ml` extras installed:
 python3 -m backend.tcg_ai.game_modes.standard.ml_fastapi
 ```
 
-Quick launcher for the Linux NN box:
+Quick launcher for the remote NN worker host:
 
 ```bash
 bash scripts/start_standard_ml_worker.sh --checkpoint /home/<you>/models/champion.pt --token <shared-token>
@@ -113,7 +113,7 @@ bash scripts/start_standard_ml_worker.sh --checkpoint /home/<you>/models/champio
 
 The first self-play/training scripts on this branch target only the current `Ampharos ex Battle Deck` vs `Lucario ex Battle Deck` matchup.
 
-Generate self-play data locally on the Linux box:
+Generate self-play data locally on the training host:
 
 ```bash
 python3 scripts/run_standard_self_play.py --games 100000 --workers 8 --chunk-size 250
@@ -153,23 +153,23 @@ The self-play script prints rolling console progress, the training script prints
 
 ## Distributed Standard Self-Play
 
-If one machine is training on the 4070 and several others are mostly idle CPUs, the best MVP scale-up path is distributed self-play:
+If one machine is handling accelerated training/inference and several others are mostly idle CPUs, the best MVP scale-up path is distributed self-play:
 
-- one main Linux machine runs the coordinator and stores shards
+- one main machine runs the coordinator and stores shards
 - extra machines poll for chunks and simulate games locally
-- the Linux machine trains and evaluates checkpoints after the run
+- the main training host trains and evaluates checkpoints after the run
 
 Why this shape:
 
-- the Standard simulator is symbolic Python logic and is a poor fit for "move the whole engine onto the GPU"
+- the Standard simulator is symbolic Python logic and is a poor fit for "move the whole engine onto the accelerator"
 - CPU workers are still useful for generating lots of games
-- the 4070 is better used for training now, and later for batched model inference
+- the accelerated training host is better used for training now, and later for batched model inference
 
 ### What Runs Where
 
 Coordinator / training box:
 
-- Linux machine with the RTX 4070
+- machine that will run training, evaluation, and optional accelerated inference
 - full repo checkout and Python environment
 - runs the coordinator
 - serves the dashboard
@@ -179,13 +179,58 @@ Coordinator / training box:
 Worker machines:
 
 - any Mac or Linux machine with the repo checkout and Python environment
-- no GPU required
+- no dedicated accelerator required
 - run self-play workers only
 - request chunk leases from the coordinator and upload results back
 
+### Requirements And Dependencies
+
+Coordinator / training host requirements:
+
+- Python `3.13+`
+- full repo checkout
+- project dependencies installed in a virtual environment
+- network visibility from worker machines to the chosen coordinator host/port
+
+Coordinator / training host Python dependencies:
+
+```bash
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -e .
+```
+
+Accelerated training / remote NN worker extras:
+
+```bash
+pip install -e '.[standard-ml]'
+```
+
+That extra installs the optional ML stack from [pyproject.toml](/Users/andrew/Documents/projects/TCG-AI/pyproject.toml):
+
+- `torch`
+- `fastapi`
+- `uvicorn`
+- `numpy`
+- `polars`
+- `pyarrow`
+- `tensorboard`
+
+Worker machine requirements:
+
+- Python `3.13+`
+- full repo checkout
+- project dependencies installed with `pip install -e .`
+- no accelerated ML extras required for heuristic distributed self-play workers
+
+Dashboard requirements:
+
+- no separate frontend build step
+- the coordinator serves `/dashboard`, `/dashboard.css`, and `/dashboard.js` directly
+
 ### How To Launch A Distributed Run
 
-1. On the Linux coordinator machine, start the coordinator.
+1. On the coordinator machine, start the coordinator.
 
 Minimal:
 
@@ -317,7 +362,7 @@ Good early coordinator defaults:
 
 ### After The Run Finishes
 
-Train on the Linux 4070 machine using the completed distributed run folder:
+Train on the training host using the completed distributed run folder:
 
 ```bash
 python3 scripts/train_standard_model.py --input-dir standard_ml_data/distributed_self_play/<run_id> --device cuda --epochs 1

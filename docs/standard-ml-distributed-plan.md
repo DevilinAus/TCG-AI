@@ -2,7 +2,7 @@
 
 ## Goal
 
-Scale Standard self-play beyond a single CPU while keeping training centralized on the Linux RTX 4070 machine.
+Scale Standard self-play beyond a single CPU while keeping training centralized on the main accelerated training host.
 
 The target matchup is still:
 
@@ -26,19 +26,19 @@ This repo's Standard engine is symbolic Python logic:
 - branching search
 - `deepcopy`-heavy rollouts
 
-That is a poor fit for "move the whole simulator onto the GPU" as an MVP.
+That is a poor fit for "move the whole simulator onto the accelerator" as an MVP.
 
 The better fit for the available hardware is:
 
 - CPU for simulation
-- GPU for training
-- later, GPU for batched neural inference during self-play
+- accelerator-backed training for model updates
+- later, accelerator-backed batched neural inference during self-play
 
 ## Hardware Strategy
 
 Recommended split:
 
-- Linux 4070 box: coordinator, trainer, evaluator, champion storage
+- accelerated training host: coordinator, trainer, evaluator, champion storage
 - extra CPU machines: self-play workers
 
 Candidate worker machines:
@@ -71,11 +71,11 @@ Build workers that:
 Notes:
 
 - this is the fastest practical way to use all available CPUs now
-- this avoids making the 4070 a bottleneck for first-pass data generation
+- this avoids making the accelerated training host a bottleneck for first-pass data generation
 
 ### Phase 2: Centralized Training And Promotion
 
-Keep training on the 4070 box only.
+Keep training on the accelerated training host only.
 
 The central machine should:
 
@@ -108,17 +108,17 @@ Generation loop:
 4. promote if better
 5. repeat
 
-### Phase 4: Shared GPU Inference For Self-Play
+### Phase 4: Shared Accelerated Inference For Self-Play
 
-This is the right way to use the 4070 more often.
+This is the right way to use the accelerated training host more often.
 
-Do not try to move full game simulation onto the GPU.
+Do not try to move full game simulation onto the accelerator.
 
 Instead:
 
 - keep simulation on CPU workers
 - add a shared batched inference path on the main Linux box
-- let workers request policy/value evaluations from the central GPU service
+- let workers request policy/value evaluations from the central inference service
 
 This phase only makes sense after there is already a useful champion checkpoint.
 
@@ -213,12 +213,12 @@ Practical guidance:
 5. Add targeted tests for lease/submit persistence.
 6. Document Linux coordinator plus multi-machine worker setup.
 7. Add generation-based champion reuse after the coordinator MVP works.
-8. Add shared GPU inference only after profiling shows the next real bottleneck.
+8. Add shared accelerated inference only after profiling shows the next real bottleneck.
 
 ## Things To Avoid
 
-- Do not try to fully GPU-port the Standard simulator for MVP.
-- Do not make every worker depend on central GPU inference immediately.
+- Do not try to fully accelerator-port the Standard simulator for MVP.
+- Do not make every worker depend on central accelerated inference immediately.
 - Do not build online live-weight mutation into human matches.
 - Do not assume more games automatically means better data.
 - Do not block the whole system on the slowest worker; reclaim leases.
@@ -230,6 +230,6 @@ The best next engineering move is:
 - distributed heuristic self-play first
 - centralized training/evaluation second
 - generation-based champion reuse third
-- shared GPU inference fourth
+- shared accelerated inference fourth
 
 That sequence is the most practical use of the available machines and keeps the project moving toward a stronger playable Standard model.
