@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from math import exp, tanh
 import os
 from pathlib import Path
+import pickle
 from typing import Any
 
 try:
@@ -93,7 +94,7 @@ class PolicyValueBackend:
             return
         device = "cuda" if torch.cuda.is_available() else "cpu"
         model = ActionConditionedPolicyValueNet()
-        checkpoint = torch.load(self.checkpoint_path, map_location=device)
+        checkpoint = load_trusted_checkpoint(self.checkpoint_path, map_location=device)
         state_dict = checkpoint.get("state_dict") if isinstance(checkpoint, dict) else checkpoint
         model.load_state_dict(state_dict)
         model.eval()
@@ -157,6 +158,19 @@ class PolicyValueBackend:
                 "model_loaded": self._status.model_loaded,
             },
         }
+
+
+def load_trusted_checkpoint(checkpoint_path: Path, *, map_location: str | torch.device) -> Any:
+    if torch is None:
+        raise RuntimeError("PyTorch is not available.")
+    try:
+        return torch.load(checkpoint_path, map_location=map_location, weights_only=False)
+    except TypeError:
+        return torch.load(checkpoint_path, map_location=map_location)
+    except pickle.UnpicklingError as exc:
+        if "Weights only load failed" not in str(exc):
+            raise
+        return torch.load(checkpoint_path, map_location=map_location, weights_only=False)
 
 
 def _heuristic_value_from_belief_state(belief_state: dict[str, Any]) -> float:

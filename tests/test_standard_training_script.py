@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 import unittest
+from unittest.mock import Mock
 
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
@@ -30,6 +31,64 @@ class StandardTrainingScriptTests(unittest.TestCase):
             training_module._collate_training_batch = original_collate
 
         self.assertEqual(batches, [[1, 2], [3]])
+
+    def test_json_safe_converts_paths_recursively(self) -> None:
+        training_module = _load_training_module()
+
+        payload = {
+            "output_dir": Path("/tmp/model"),
+            "nested": [Path("/tmp/a"), {"checkpoint": Path("/tmp/b")}],
+        }
+
+        sanitized = training_module._json_safe(payload)
+
+        self.assertEqual(
+            sanitized,
+            {
+                "output_dir": "/tmp/model",
+                "nested": ["/tmp/a", {"checkpoint": "/tmp/b"}],
+            },
+        )
+
+
+class StandardCheckpointLoadingTests(unittest.TestCase):
+    def test_load_trusted_checkpoint_uses_non_weights_only_load(self) -> None:
+        from backend.tcg_ai.game_modes.standard.ml import neural_policy
+
+        original_torch = neural_policy.torch
+        fake_torch = Mock()
+        fake_torch.load.return_value = {"state_dict": {}}
+        neural_policy.torch = fake_torch
+        try:
+            checkpoint = neural_policy.load_trusted_checkpoint(Path("/tmp/champion.pt"), map_location="cpu")
+        finally:
+            neural_policy.torch = original_torch
+
+        self.assertEqual(checkpoint, {"state_dict": {}})
+        fake_torch.load.assert_called_once_with(Path("/tmp/champion.pt"), map_location="cpu", weights_only=False)
+
+    def test_load_trusted_checkpoint_falls_back_when_weights_only_kwarg_is_unsupported(self) -> None:
+        from backend.tcg_ai.game_modes.standard.ml import neural_policy
+
+        original_torch = neural_policy.torch
+        fake_torch = Mock()
+        fake_torch.load.side_effect = [TypeError("unexpected keyword"), {"state_dict": {}}]
+        neural_policy.torch = fake_torch
+        try:
+            checkpoint = neural_policy.load_trusted_checkpoint(Path("/tmp/champion.pt"), map_location="cpu")
+        finally:
+            neural_policy.torch = original_torch
+
+        self.assertEqual(checkpoint, {"state_dict": {}})
+        self.assertEqual(fake_torch.load.call_count, 2)
+        self.assertEqual(
+            fake_torch.load.call_args_list[0].kwargs,
+            {"map_location": "cpu", "weights_only": False},
+        )
+        self.assertEqual(
+            fake_torch.load.call_args_list[1].kwargs,
+            {"map_location": "cpu"},
+        )
 
 
 if __name__ == "__main__":
