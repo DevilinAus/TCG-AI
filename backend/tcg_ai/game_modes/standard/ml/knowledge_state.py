@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..action_metadata import build_action_metadata
 from ..engine import action_id_for, card_definition, get_top_card_definition
 from ..models import GameState, PokemonInPlay
 
@@ -83,6 +84,7 @@ def _serialize_private_player_state(
         "deck_inspected_this_game": player.deck_inspected_this_game,
         "supporter_played_this_turn": player.supporter_played_this_turn,
         "energy_attached_this_turn": player.energy_attached_this_turn,
+        "retreated_this_turn": player.retreated_this_turn,
         "active": _serialize_visible_pokemon(state, player.active),
         "bench": [_serialize_visible_pokemon(state, pokemon) for pokemon in player.bench],
     }
@@ -105,6 +107,7 @@ def _serialize_public_player_state(
         "prize_count": len(player.prizes),
         "supporter_played_this_turn": player.supporter_played_this_turn,
         "energy_attached_this_turn": player.energy_attached_this_turn,
+        "retreated_this_turn": player.retreated_this_turn,
         "active": _serialize_visible_pokemon(state, player.active),
         "bench": [_serialize_visible_pokemon(state, pokemon) for pokemon in player.bench],
     }
@@ -122,9 +125,12 @@ def _serialize_knowledge_action(
 
     action_type = str(action.get("type", ""))
     discard_ids = [instance_id for instance_id in action.get("discard_from_hand_ids", []) if isinstance(instance_id, str)]
+    retreat_discard_ids = [
+        instance_id for instance_id in action.get("discard_attached_energy_ids", []) if isinstance(instance_id, str)
+    ]
     recover_ids = [instance_id for instance_id in action.get("recover_from_discard_ids", []) if isinstance(instance_id, str)]
     search_ids = [instance_id for instance_id in action.get("search_deck_ids", []) if isinstance(instance_id, str)]
-    return {
+    payload = {
         "action_id": action_id_for(action),
         "type": action_type,
         "label": str(action.get("label", "")),
@@ -135,15 +141,19 @@ def _serialize_knowledge_action(
             "bench_index": action.get("target_bench_index"),
         },
         "discard_from_hand": [_serialize_card_instance(state, instance_id) for instance_id in discard_ids],
+        "discard_attached_energy": [_serialize_card_instance(state, instance_id) for instance_id in retreat_discard_ids],
         "recover_from_discard": [_serialize_card_instance(state, instance_id) for instance_id in recover_ids],
         "search_selection": [_serialize_card_instance(state, instance_id) for instance_id in search_ids],
         "blocked_attack_index": action.get("blocked_attack_index"),
         "consumes_supporter_for_turn": action_type == "play_supporter",
         "consumes_attachment_for_turn": action_type == "play_energy",
+        "consumes_retreat_for_turn": action_type == "retreat",
         "reveals_hidden_cards": bool(search_ids),
         "card_tags": list(source_card.get("card_tags", [])) if isinstance(source_card, dict) else [],
         "effect_specs": list(source_card.get("effect_specs", [])) if isinstance(source_card, dict) else [],
     }
+    payload.update(build_action_metadata(state, acting_player_index, action))
+    return payload
 
 
 def _serialize_visible_pokemon(
@@ -170,6 +180,7 @@ def _serialize_visible_pokemon(
         "damage": pokemon.damage,
         "hp": hp,
         "remaining_hp": max(0, hp - pokemon.damage),
+        "retreat_cost": int(top_card.retreat_cost or 0),
         "attached_energy_count": len(pokemon.attached_energy),
         "attached_energy": [_serialize_card_instance(state, instance_id) for instance_id in pokemon.attached_energy],
         "attacks": attacks,

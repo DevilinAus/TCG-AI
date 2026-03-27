@@ -41,6 +41,8 @@ MAX_DEPTH=2
 BEAM_WIDTH=4
 OPPONENT_BRANCH_WIDTH=2
 SELF_PLAY_SEED=""
+SELF_PLAY_ORACLE="auto"
+SELF_PLAY_CHECKPOINT=""
 
 TRAIN_DEVICE="auto"
 TRAIN_BATCH_SIZE=128
@@ -55,6 +57,8 @@ VALIDATION_MOD=20
 VALIDATION_BUCKET=0
 MAX_TRAIN_RECORDS=""
 MAX_EVAL_RECORDS=""
+RESUME_FROM=""
+AUTO_RESUME_CHAMPION=1
 
 EVAL_GAMES=400
 EVAL_WORKERS=1
@@ -63,6 +67,7 @@ EVAL_SEED=""
 BASELINE=""
 PROMOTE_PATH="standard_ml_data/champion.pt"
 PROMOTION_THRESHOLD=0.55
+TACTICAL_SUITE="strategic"
 
 print_help() {
   cat <<'EOF'
@@ -83,6 +88,8 @@ Options:
   --beam-width <n>                  Search beam width. Default: 4
   --opponent-branch-width <n>       Opponent branch width. Default: 2
   --self-play-seed <n>              Optional fixed self-play seed.
+  --self-play-oracle <mode>         auto, heuristic, or local-model. Default: auto
+  --self-play-checkpoint <path>     Optional checkpoint for self-play model oracle.
   --train-device <auto|cuda|cpu>    Training device. Default: auto
   --train-batch-size <n>            Training batch size. Default: 128
   --epochs <n>                      Training epochs. Default: 1
@@ -96,6 +103,8 @@ Options:
   --validation-bucket <n>           Validation split bucket. Default: 0
   --max-train-records <n>           Optional cap for train records.
   --max-eval-records <n>            Optional cap for eval records.
+  --resume-from <path>              Resume training from a checkpoint.
+  --no-auto-resume-champion         Do not auto-resume from the current promoted champion.
   --eval-games <n>                  Head-to-head evaluation games. Default: 400
   --eval-workers <n>                Evaluation workers. Default: 1
   --eval-chunk-size <n>             Evaluation chunk size. Default: 50
@@ -103,6 +112,8 @@ Options:
   --baseline <path>                 Optional baseline checkpoint.
   --promote-path <path>             Champion output path. Default: standard_ml_data/champion.pt
   --promotion-threshold <float>     Promotion win rate threshold. Default: 0.55
+  --tactical-suite <core|strategic|all>
+                                    Tactical evaluation suite. Default: strategic
   --help                            Show this message.
 
 Example:
@@ -127,6 +138,8 @@ while [[ $# -gt 0 ]]; do
     --beam-width) BEAM_WIDTH="$2"; shift 2 ;;
     --opponent-branch-width) OPPONENT_BRANCH_WIDTH="$2"; shift 2 ;;
     --self-play-seed) SELF_PLAY_SEED="$2"; shift 2 ;;
+    --self-play-oracle) SELF_PLAY_ORACLE="$2"; shift 2 ;;
+    --self-play-checkpoint) SELF_PLAY_CHECKPOINT="$2"; shift 2 ;;
     --train-device) TRAIN_DEVICE="$2"; shift 2 ;;
     --train-batch-size) TRAIN_BATCH_SIZE="$2"; shift 2 ;;
     --epochs) EPOCHS="$2"; shift 2 ;;
@@ -140,6 +153,8 @@ while [[ $# -gt 0 ]]; do
     --validation-bucket) VALIDATION_BUCKET="$2"; shift 2 ;;
     --max-train-records) MAX_TRAIN_RECORDS="$2"; shift 2 ;;
     --max-eval-records) MAX_EVAL_RECORDS="$2"; shift 2 ;;
+    --resume-from) RESUME_FROM="$2"; shift 2 ;;
+    --no-auto-resume-champion) AUTO_RESUME_CHAMPION=0; shift 1 ;;
     --eval-games) EVAL_GAMES="$2"; shift 2 ;;
     --eval-workers) EVAL_WORKERS="$2"; shift 2 ;;
     --eval-chunk-size) EVAL_CHUNK_SIZE="$2"; shift 2 ;;
@@ -147,6 +162,7 @@ while [[ $# -gt 0 ]]; do
     --baseline) BASELINE="$2"; shift 2 ;;
     --promote-path) PROMOTE_PATH="$2"; shift 2 ;;
     --promotion-threshold) PROMOTION_THRESHOLD="$2"; shift 2 ;;
+    --tactical-suite) TACTICAL_SUITE="$2"; shift 2 ;;
     --help|-h)
       print_help
       exit 0
@@ -158,6 +174,13 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [[ -z "${SELF_PLAY_CHECKPOINT}" ]]; then
+  SELF_PLAY_CHECKPOINT="${PROMOTE_PATH}"
+fi
+if [[ -z "${RESUME_FROM}" && "${AUTO_RESUME_CHAMPION}" == "1" && -f "${PROMOTE_PATH}" ]]; then
+  RESUME_FROM="${PROMOTE_PATH}"
+fi
 
 mkdir -p "${SELF_PLAY_DIR}" "${CHECKPOINT_DIR}" "${EVAL_DIR}"
 mkdir -p "${PROGRESS_DIR}"
@@ -172,11 +195,15 @@ SELF_PLAY_CMD=(
   --max-depth "${MAX_DEPTH}"
   --beam-width "${BEAM_WIDTH}"
   --opponent-branch-width "${OPPONENT_BRANCH_WIDTH}"
+  --oracle "${SELF_PLAY_ORACLE}"
   --output-dir "${SELF_PLAY_DIR}"
   --progress-log "${PROGRESS_LOG}"
 )
 if [[ -n "${SELF_PLAY_SEED}" ]]; then
   SELF_PLAY_CMD+=(--seed "${SELF_PLAY_SEED}")
+fi
+if [[ -n "${SELF_PLAY_CHECKPOINT}" ]]; then
+  SELF_PLAY_CMD+=(--checkpoint "${SELF_PLAY_CHECKPOINT}")
 fi
 
 TRAIN_CMD=(
@@ -195,6 +222,9 @@ TRAIN_CMD=(
   --validation-mod "${VALIDATION_MOD}"
   --validation-bucket "${VALIDATION_BUCKET}"
 )
+if [[ -n "${RESUME_FROM}" ]]; then
+  TRAIN_CMD+=(--resume-from "${RESUME_FROM}")
+fi
 if [[ -n "${MAX_TRAIN_RECORDS}" ]]; then
   TRAIN_CMD+=(--max-train-records "${MAX_TRAIN_RECORDS}")
 fi
@@ -217,6 +247,7 @@ EVAL_CMD=(
   --progress-log "${PROGRESS_LOG}"
   --promote-path "${PROMOTE_PATH}"
   --promotion-threshold "${PROMOTION_THRESHOLD}"
+  --tactical-suite "${TACTICAL_SUITE}"
 )
 if [[ -n "${BASELINE}" ]]; then
   EVAL_CMD+=(--baseline "${BASELINE}")
@@ -232,6 +263,12 @@ echo "[pipeline] checkpoint_dir=${CHECKPOINT_DIR}"
 echo "[pipeline] evaluation_dir=${EVAL_DIR}"
 echo "[pipeline] progress_log=${PROGRESS_LOG}"
 echo "[pipeline] promote_path=${PROMOTE_PATH}"
+echo "[pipeline] self_play_oracle=${SELF_PLAY_ORACLE}"
+echo "[pipeline] self_play_checkpoint=${SELF_PLAY_CHECKPOINT}"
+echo "[pipeline] tactical_suite=${TACTICAL_SUITE}"
+if [[ -n "${RESUME_FROM}" ]]; then
+  echo "[pipeline] resume_from=${RESUME_FROM}"
+fi
 echo "[pipeline] watch progress in another terminal with:"
 echo "tail -f ${PROGRESS_LOG}"
 
@@ -243,6 +280,10 @@ echo "tail -f ${PROGRESS_LOG}"
   echo "[pipeline-log] checkpoint_dir=${CHECKPOINT_DIR}"
   echo "[pipeline-log] evaluation_dir=${EVAL_DIR}"
   echo "[pipeline-log] promote_path=${PROMOTE_PATH}"
+  echo "[pipeline-log] self_play_oracle=${SELF_PLAY_ORACLE}"
+  echo "[pipeline-log] self_play_checkpoint=${SELF_PLAY_CHECKPOINT}"
+  echo "[pipeline-log] tactical_suite=${TACTICAL_SUITE}"
+  echo "[pipeline-log] resume_from=${RESUME_FROM}"
   echo "[pipeline-log] self_play_cmd=${SELF_PLAY_CMD[*]}"
   echo "[pipeline-log] train_cmd=${TRAIN_CMD[*]}"
   echo "[pipeline-log] eval_cmd=${EVAL_CMD[*]}"

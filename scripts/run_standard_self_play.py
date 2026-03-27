@@ -48,7 +48,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--disable-opponent-turn", action="store_true")
     parser.add_argument("--include-setup-decisions", action="store_true")
     parser.add_argument("--record-forced-actions", action="store_true")
-    parser.add_argument("--oracle", choices=("heuristic", "local-model"), default="heuristic")
+    parser.add_argument("--oracle", choices=("auto", "heuristic", "local-model"), default="auto")
     parser.add_argument("--checkpoint", type=Path, default=None, help="Checkpoint for --oracle local-model.")
     parser.add_argument("--output-dir", type=Path, default=None)
     parser.add_argument(
@@ -68,7 +68,8 @@ def main() -> int:
         raise SystemExit("--games must be positive.")
     if args.chunk_size <= 0:
         raise SystemExit("--chunk-size must be positive.")
-    if args.oracle == "local-model" and args.workers > 1:
+    oracle_status = resolve_oracle_status(oracle=args.oracle, checkpoint=args.checkpoint)
+    if oracle_status.get("resolved_oracle") == "local-model" and args.workers > 1:
         raise SystemExit(
             "--oracle local-model currently requires --workers 1 so we do not duplicate the checkpoint across processes."
         )
@@ -97,7 +98,6 @@ def main() -> int:
         oracle=args.oracle,
         checkpoint=str(args.checkpoint) if args.checkpoint else None,
     )
-    oracle_status = resolve_oracle_status(oracle=args.oracle, checkpoint=args.checkpoint)
     manifest = build_self_play_manifest(
         run_id=run_id,
         config=run_config,
@@ -110,7 +110,7 @@ def main() -> int:
     print(
         "[self-play] "
         f"games={args.games} workers={args.workers} chunk={args.chunk_size} "
-        f"oracle={args.oracle} seed={args.seed}"
+        f"oracle={args.oracle} resolved={oracle_status.get('resolved_oracle', args.oracle)} seed={args.seed}"
     )
     if oracle_status:
         print(f"[self-play] oracle-status={json.dumps(oracle_status, sort_keys=True)}")

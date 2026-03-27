@@ -192,6 +192,7 @@ def list_legal_actions(
         return []
     actions = _list_bench_basic_actions(state, player_index)
     actions.extend(_list_energy_attachment_actions(state, player_index))
+    actions.extend(_list_retreat_actions(state, player_index))
     actions.extend(_list_evolution_actions(state, player_index))
     actions.extend(_list_trainer_actions(state, player_index))
     actions.extend(_list_attack_actions(state, player_index))
@@ -297,6 +298,31 @@ def apply_action_for_player(
         state.log.append(f"{actor_name} attached {energy_card.name} to {target_name}.")
         return state
 
+    if action["type"] == "retreat":
+        if player.active is None:
+            raise ValueError("Cannot retreat without an Active Pokemon.")
+        bench_index = action.get("target_bench_index")
+        if not isinstance(bench_index, int):
+            raise ValueError("Retreat requires a benched target.")
+        discarded = _discard_attached_energy_from_retreat_action(state, player_index, action)
+        previous_active = player.active
+        try:
+            player.active = player.bench.pop(bench_index)
+        except IndexError as exc:
+            raise ValueError("Retreat target is out of range.") from exc
+        _clear_pokemon_temporary_effects(previous_active)
+        player.bench.append(previous_active)
+        player.retreated_this_turn = True
+        active_name = _board_target_name(state, player.active)
+        if discarded:
+            state.log.append(
+                f"{actor_name} retreated to {active_name} by discarding {len(discarded)} Energy card"
+                f"{'' if len(discarded) == 1 else 's'}."
+            )
+        else:
+            state.log.append(f"{actor_name} retreated to {active_name}.")
+        return state
+
     if action["type"] == "evolve":
         card_id = _remove_from_hand(player, action["hand_card_id"])
         card = card_definition(state, card_id)
@@ -374,6 +400,10 @@ def action_id_for(action: dict[str, Any]) -> str:
         if target_zone == "bench":
             return f"play_energy:{action['hand_card_id']}:bench:{action['target_bench_index']}"
         return f"play_energy:{action['hand_card_id']}:active"
+    if action["type"] == "retreat":
+        discard_ids = list(action.get("discard_attached_energy_ids") or [])
+        discard_suffix = f":discard:{','.join(discard_ids)}" if discard_ids else ""
+        return f"retreat:bench:{action['target_bench_index']}{discard_suffix}"
     if action["type"] == "evolve":
         target_zone = action["target_zone"]
         if target_zone == "bench":
@@ -509,6 +539,7 @@ def _to_card_definition(entry: DeckCardDefinition) -> CardDefinition:
         rules_text=entry.rules_text,
         is_basic_energy=entry.is_basic_energy,
         prize_card_value=entry.prize_card_value,
+        retreat_cost=entry.retreat_cost,
         effect_specs=entry.effect_specs,
     )
 
@@ -575,6 +606,7 @@ def _start_turn(state: GameState, player_index: int) -> None:
     player.turns_taken += 1
     player.supporter_played_this_turn = False
     player.energy_attached_this_turn = False
+    player.retreated_this_turn = False
 
 
 def _draw_turn_card(state: GameState, player_index: int) -> None:
@@ -1335,6 +1367,15 @@ def _attack_is_unavailable(pokemon: PokemonInPlay, attack_index: int, turns_take
     return False
 
 
+def _retreat_is_unavailable(pokemon: PokemonInPlay, turns_taken: int) -> bool:
+    for effect in pokemon.lingering_effects:
+        if effect.activation_turn is not None and turns_taken < effect.activation_turn:
+            continue
+        if effect.effect_type == "cannot_retreat":
+            return True
+    return False
+
+
 def _expand_attack_actions_for_blocked_attack_choices(
     state: GameState,
     player_index: int,
@@ -1467,6 +1508,57 @@ def _energy_target_name(
     if top_card is None:
         return "Pokemon"
     return top_card.name
+
+
+def _retreat_cost_for_pokemon(state: GameState, pokemon: PokemonInPlay | None) -> int:
+    card = get_top_card_definition(state, pokemon)
+    if card is None:
+        return 0
+    return max(0, int(card.retreat_cost or 0))
+
+
+def _pick_attached_energy_ids_for_retreat(
+    state: GameState,
+    pokemon: PokemonInPlay,
+) -> list[str]:
+    retreat_cost = _retreat_cost_for_pokemon(state, pokemon)
+    if retreat_cost <= 0:
+        return []
+    if len(pokemon.attached_energy) < retreat_cost:
+        return []
+    return list(pokemon.attached_energy[-retreat_cost:])
+
+
+def _list_retreat_actions(
+    state: GameState,
+    player_index: int,
+) -> list[dict[str, Any]]:
+    player = state.players[player_index]
+    if player.active is None or not player.bench or player.retreated_this_turn:
+        return []
+    if _retreat_is_unavailable(player.active, player.turns_taken):
+        return []
+
+    retreat_cost = _retreat_cost_for_pokemon(state, player.active)
+    discard_ids = _pick_attached_energy_ids_for_retreat(state, player.active)
+    if retreat_cost > 0 and len(discard_ids) != retreat_cost:
+        return []
+
+    actions: list[dict[str, Any]] = []
+    for bench_index, pokemon in enumerate(player.bench):
+        label = f"Retreat to {_board_target_name(state, pokemon)}"
+        if retreat_cost > 0:
+            label += f" (discard {retreat_cost} Energy)"
+        actions.append(
+            {
+                "type": "retreat",
+                "target_zone": "bench",
+                "target_bench_index": bench_index,
+                "discard_attached_energy_ids": list(discard_ids),
+                "label": label,
+            }
+        )
+    return actions
 
 
 def _resolve_board_target(player: PlayerState, action: dict[str, Any] | None) -> PokemonInPlay:
@@ -1783,6 +1875,31 @@ def _discard_attached_energy_from_attack_action(
     for instance_id in discard_ids:
         if instance_id not in player.active.attached_energy:
             continue
+        player.active.attached_energy.remove(instance_id)
+        player.discard.append(instance_id)
+        discarded.append(instance_id)
+    return discarded
+
+
+def _discard_attached_energy_from_retreat_action(
+    state: GameState,
+    player_index: int,
+    action: dict[str, Any],
+) -> list[str]:
+    player = state.players[player_index]
+    if player.active is None:
+        return []
+    discard_ids = list(action.get("discard_attached_energy_ids") or [])
+    retreat_cost = _retreat_cost_for_pokemon(state, player.active)
+    if retreat_cost != len(discard_ids):
+        raise ValueError("Retreat action is missing the required Energy discard selection.")
+    if len(set(discard_ids)) != len(discard_ids):
+        raise ValueError("Retreat discard selection contains duplicate Energy cards.")
+
+    discarded: list[str] = []
+    for instance_id in discard_ids:
+        if instance_id not in player.active.attached_energy:
+            raise ValueError("Retreat discard selection contains Energy that is not attached to the Active Pokemon.")
         player.active.attached_energy.remove(instance_id)
         player.discard.append(instance_id)
         discarded.append(instance_id)

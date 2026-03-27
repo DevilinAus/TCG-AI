@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .action_metadata import build_action_metadata
 from .engine import action_id_for, card_definition, get_top_card_definition
 from .models import GameState, PlayerState, PokemonInPlay
 
@@ -100,6 +101,7 @@ def _serialize_public_pokemon(
         "damage": pokemon.damage,
         "hp": hp,
         "remaining_hp": max(0, hp - pokemon.damage),
+        "retreat_cost": int(top_card.retreat_cost or 0),
         "attacks": [
             {
                 "name": attack.name,
@@ -130,6 +132,7 @@ def _serialize_card_instance(state: GameState, instance_id: str) -> dict[str, An
         "element": card.element,
         "image_url": card.image_url,
         "prize_card_value": card.prize_card_value,
+        "retreat_cost": card.retreat_cost,
     }
 
 
@@ -149,6 +152,7 @@ def _serialize_legal_action(
         payload["source"] = source
     if target is not None:
         payload["target"] = target
+    payload.update(build_action_metadata(state, player_index, action))
     return payload
 
 
@@ -179,6 +183,16 @@ def _serialize_action_source(
             "instance_id": instance_id,
             "card_id": card.card_id,
             "name": card.name,
+        }
+    if action["type"] == "retreat":
+        player = state.players[player_index]
+        instance_id = player.active.stack[-1] if player.active is not None and player.active.stack else None
+        return {
+            "player_index": player_index,
+            "zone": "active",
+            "instance_id": instance_id,
+            "bench_index": None,
+            "name": "Active Pokemon",
         }
     if action["type"] == "attack":
         player = state.players[player_index]
@@ -213,6 +227,17 @@ def _serialize_action_target(
             "instance_id": None,
             "bench_index": None,
             "name": "Active Spot",
+        }
+    if action["type"] == "retreat":
+        player = state.players[player_index]
+        bench_index = action["target_bench_index"]
+        pokemon = player.bench[bench_index]
+        return {
+            "player_index": player_index,
+            "zone": "bench",
+            "instance_id": pokemon.stack[-1] if pokemon.stack else None,
+            "bench_index": bench_index,
+            "name": "Bench Pokemon",
         }
     if action["type"] in {"play_energy", "evolve", "play_supporter", "play_item"}:
         player = state.players[player_index]

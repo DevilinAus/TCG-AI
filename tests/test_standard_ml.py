@@ -20,6 +20,7 @@ from backend.tcg_ai.game_modes.standard.ml.oracle import (
 from backend.tcg_ai.game_modes.standard.ml.planner import PlannerConfig, StandardTurnPlanner
 from backend.tcg_ai.game_modes.standard.ml.self_play import (
     SelfPlayConfig,
+    _discounted_prize_progress_target,
     _build_player_planners,
     _should_record_decision,
     play_self_play_game,
@@ -57,6 +58,10 @@ class StandardMlTests(unittest.TestCase):
         legal_action_ids = {action_id_for(action) for action in list_legal_actions(state, player_index=0)}
         self.assertIn(decision["chosen_action_id"], legal_action_ids)
         self.assertIn("top_candidates", decision["diagnostics"])
+        self.assertEqual(
+            {entry["action_id"] for entry in decision["diagnostics"]["policy_target_scores"]},
+            legal_action_ids,
+        )
 
     def test_service_handles_full_state_payload(self) -> None:
         state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck", ai_name="Brock")
@@ -213,10 +218,35 @@ class StandardMlTests(unittest.TestCase):
         self.assertEqual(summary.decision_samples, len(records))
         self.assertGreater(len(records), 0)
         self.assertTrue(all(record["winner"] == summary.winner for record in records))
-        self.assertTrue(all(record["value_target"] in {-100.0, 100.0} for record in records))
+        self.assertTrue(
+            all(
+                isinstance(record["value_target"], float) and -100.0 <= record["value_target"] <= 100.0
+                for record in records
+            )
+        )
+        self.assertTrue(all(record["terminal_outcome_target"] in {-100.0, 100.0} for record in records))
+        self.assertTrue(
+            all(
+                isinstance(record["discounted_prize_progress_target"], float)
+                for record in records
+            )
+        )
+        self.assertTrue(all("transition_summary" in record for record in records))
         self.assertTrue(
             all(
                 record["chosen_action_id"] in {action["action_id"] for action in record["legal_actions"]}
+                for record in records
+            )
+        )
+        self.assertTrue(
+            all(
+                abs(sum(record["policy_target_probs"].values()) - 1.0) < 1e-5
+                for record in records
+            )
+        )
+        self.assertTrue(
+            all(
+                record["chosen_action_id"] in record["policy_target_probs"]
                 for record in records
             )
         )
@@ -252,6 +282,39 @@ class StandardMlTests(unittest.TestCase):
                 ),
             )
         )
+
+    def test_discounted_prize_progress_target_is_from_perspective_player(self) -> None:
+        samples = [
+            {
+                "acting_player_index": 0,
+                "transition_summary": {
+                    "prizes_taken_by_actor": 1,
+                    "prizes_lost_by_actor": 0,
+                },
+            },
+            {
+                "acting_player_index": 1,
+                "transition_summary": {
+                    "prizes_taken_by_actor": 2,
+                    "prizes_lost_by_actor": 0,
+                },
+            },
+        ]
+
+        player0_target = _discounted_prize_progress_target(
+            samples,
+            start_index=0,
+            perspective_player_index=0,
+        )
+        player1_target = _discounted_prize_progress_target(
+            samples,
+            start_index=0,
+            perspective_player_index=1,
+        )
+
+        self.assertLess(player0_target, 0.0)
+        self.assertGreater(player1_target, 0.0)
+        self.assertAlmostEqual(player0_target, -player1_target, places=6)
 
     def _finish_opening_setup(self, state) -> None:
         active_action = next(

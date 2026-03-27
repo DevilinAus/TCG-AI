@@ -18,11 +18,14 @@ if str(PROJECT_ROOT) not in sys.path:
 
 from backend.tcg_ai.game_modes.standard.ml.neural_policy import (
     ACTION_VECTOR_SIZE,
+    DEFAULT_HIDDEN_SIZE,
+    ENCODER_VERSION,
     STATE_VECTOR_SIZE,
     ActionConditionedPolicyValueNet,
     DEFAULT_CHECKPOINT_PATH,
     encode_action_vector,
     encode_state_vector,
+    infer_checkpoint_model_dimensions,
     load_trusted_checkpoint,
 )
 
@@ -52,6 +55,8 @@ class SelfPlayDecisionDataset:
         self,
         decision_paths: list[Path],
         *,
+        state_dim: int,
+        action_dim: int,
         split: str,
         validation_mod: int,
         validation_bucket: int,
@@ -59,6 +64,8 @@ class SelfPlayDecisionDataset:
     ) -> None:
         super().__init__()
         self.decision_paths = decision_paths
+        self.state_dim = state_dim
+        self.action_dim = action_dim
         self.split = split
         self.validation_mod = max(2, validation_mod)
         self.validation_bucket = validation_bucket % self.validation_mod
@@ -77,7 +84,11 @@ class SelfPlayDecisionDataset:
                         validation_bucket=self.validation_bucket,
                     ):
                         continue
-                    encoded = _encode_training_record(payload)
+                    encoded = _encode_training_record(
+                        payload,
+                        state_dim=self.state_dim,
+                        action_dim=self.action_dim,
+                    )
                     if encoded is None:
                         continue
                     yield encoded
@@ -125,9 +136,15 @@ def main() -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     device = _resolve_device(args.device)
 
-    model = ActionConditionedPolicyValueNet().to(device)
+    model_state_dim = STATE_VECTOR_SIZE
+    model_action_dim = ACTION_VECTOR_SIZE
+    checkpoint = None
     if args.resume_from is not None:
         checkpoint = load_trusted_checkpoint(args.resume_from, map_location=device)
+        model_state_dim, model_action_dim = infer_checkpoint_model_dimensions(checkpoint)
+
+    model = ActionConditionedPolicyValueNet(state_dim=model_state_dim, action_dim=model_action_dim).to(device)
+    if checkpoint is not None:
         state_dict = checkpoint.get("state_dict") if isinstance(checkpoint, dict) else checkpoint
         model.load_state_dict(state_dict)
 
@@ -139,6 +156,8 @@ def main() -> int:
 
     train_dataset = SelfPlayDecisionDataset(
         decision_paths,
+        state_dim=model_state_dim,
+        action_dim=model_action_dim,
         split="train",
         validation_mod=args.validation_mod,
         validation_bucket=args.validation_bucket,
@@ -146,6 +165,8 @@ def main() -> int:
     )
     eval_dataset = SelfPlayDecisionDataset(
         decision_paths,
+        state_dim=model_state_dim,
+        action_dim=model_action_dim,
         split="eval",
         validation_mod=args.validation_mod,
         validation_bucket=args.validation_bucket,
@@ -156,7 +177,8 @@ def main() -> int:
     print(
         "[train] "
         f"input={input_dir} output={output_dir} device={device} "
-        f"files={len(decision_paths)} batch_size={batch_size}"
+        f"files={len(decision_paths)} batch_size={batch_size} "
+        f"state_dim={model_state_dim} action_dim={model_action_dim}"
     )
 
     global_step = 0
@@ -178,7 +200,7 @@ def main() -> int:
             optimizer.zero_grad(set_to_none=True)
             policy_logits, values = model(batch["state_vectors"], batch["action_vectors"])
             policy_logits = policy_logits.masked_fill(~batch["action_mask"], -1e9)
-            policy_loss = F.cross_entropy(policy_logits, batch["chosen_indices"])
+            policy_loss = _soft_target_policy_loss(policy_logits, batch["policy_targets"])
             value_loss = F.smooth_l1_loss(values, batch["value_targets"])
             total_loss = policy_loss + value_loss * args.value_loss_weight
             total_loss.backward()
@@ -281,7 +303,12 @@ def _record_in_split(
     return is_eval if split == "eval" else not is_eval
 
 
-def _encode_training_record(payload: dict[str, object]) -> dict[str, object] | None:
+def _encode_training_record(
+    payload: dict[str, object],
+    *,
+    state_dim: int,
+    action_dim: int,
+) -> dict[str, object] | None:
     belief_state = payload.get("belief_state")
     legal_actions = payload.get("legal_actions")
     chosen_action_id = payload.get("chosen_action_id")
@@ -296,13 +323,18 @@ def _encode_training_record(payload: dict[str, object]) -> dict[str, object] | N
     if chosen_action_id not in action_ids:
         return None
     return {
-        "state_vector": encode_state_vector(belief_state),
+        "state_vector": encode_state_vector(belief_state, vector_size=state_dim),
         "action_vectors": [
-            encode_action_vector(action)
+            encode_action_vector(action, belief_state=belief_state, vector_size=action_dim)
             for action in legal_actions
             if isinstance(action, dict)
         ],
         "chosen_action_index": action_ids.index(chosen_action_id),
+        "policy_target": _build_policy_target_vector(
+            payload=payload,
+            action_ids=action_ids,
+            chosen_action_id=chosen_action_id,
+        ),
         "value_target": float(value_target),
     }
 
@@ -312,10 +344,16 @@ def _collate_training_batch(samples: list[dict[str, object]]):
         return None
     batch_size = len(samples)
     max_actions = max(len(sample["action_vectors"]) for sample in samples)
-    state_vectors = torch.zeros(batch_size, STATE_VECTOR_SIZE, dtype=torch.float32)
-    action_vectors = torch.zeros(batch_size, max_actions, ACTION_VECTOR_SIZE, dtype=torch.float32)
+    state_dim = max(len(sample["state_vector"]) for sample in samples)
+    action_dim = max(
+        (len(sample["action_vectors"][0]) for sample in samples if sample["action_vectors"]),
+        default=ACTION_VECTOR_SIZE,
+    )
+    state_vectors = torch.zeros(batch_size, state_dim, dtype=torch.float32)
+    action_vectors = torch.zeros(batch_size, max_actions, action_dim, dtype=torch.float32)
     action_mask = torch.zeros(batch_size, max_actions, dtype=torch.bool)
     chosen_indices = torch.zeros(batch_size, dtype=torch.long)
+    policy_targets = torch.zeros(batch_size, max_actions, dtype=torch.float32)
     value_targets = torch.zeros(batch_size, dtype=torch.float32)
 
     for sample_index, sample in enumerate(samples):
@@ -325,6 +363,8 @@ def _collate_training_batch(samples: list[dict[str, object]]):
         action_vectors[sample_index, :action_count] = encoded_actions
         action_mask[sample_index, :action_count] = True
         chosen_indices[sample_index] = int(sample["chosen_action_index"])
+        policy_target = torch.tensor(sample["policy_target"], dtype=torch.float32)
+        policy_targets[sample_index, :action_count] = policy_target
         value_targets[sample_index] = float(sample["value_target"])
 
     return {
@@ -332,6 +372,7 @@ def _collate_training_batch(samples: list[dict[str, object]]):
         "action_vectors": action_vectors,
         "action_mask": action_mask,
         "chosen_indices": chosen_indices,
+        "policy_targets": policy_targets,
         "value_targets": value_targets,
     }
 
@@ -349,6 +390,32 @@ def _iter_collated_batches(dataset: Iterable[dict[str, object]], *, batch_size: 
 
 def _move_batch_to_device(batch: dict[str, torch.Tensor], device: torch.device) -> dict[str, torch.Tensor]:
     return {key: value.to(device) for key, value in batch.items()}
+
+
+def _build_policy_target_vector(
+    *,
+    payload: dict[str, object],
+    action_ids: list[str],
+    chosen_action_id: str,
+) -> list[float]:
+    policy_target_probs = payload.get("policy_target_probs")
+    if isinstance(policy_target_probs, dict):
+        weights: list[float] = []
+        for action_id in action_ids:
+            raw_weight = policy_target_probs.get(action_id, 0.0)
+            if not isinstance(raw_weight, (int, float)):
+                raw_weight = 0.0
+            weights.append(max(0.0, float(raw_weight)))
+        total = sum(weights)
+        if total > 0:
+            return [weight / total for weight in weights]
+    return [1.0 if action_id == chosen_action_id else 0.0 for action_id in action_ids]
+
+
+def _soft_target_policy_loss(policy_logits, policy_targets):
+    normalized_targets = policy_targets / policy_targets.sum(dim=1, keepdim=True).clamp_min(1e-9)
+    log_probs = F.log_softmax(policy_logits, dim=1)
+    return -(normalized_targets * log_probs).sum(dim=1).mean()
 
 
 def _run_eval(
@@ -370,7 +437,7 @@ def _run_eval(
             batch = _move_batch_to_device(batch, device)
             policy_logits, values = model(batch["state_vectors"], batch["action_vectors"])
             policy_logits = policy_logits.masked_fill(~batch["action_mask"], -1e9)
-            policy_loss = F.cross_entropy(policy_logits, batch["chosen_indices"])
+            policy_loss = _soft_target_policy_loss(policy_logits, batch["policy_targets"])
             value_loss = F.smooth_l1_loss(values, batch["value_targets"])
             total_loss = policy_loss + value_loss * value_loss_weight
             batch_size = int(batch["state_vectors"].shape[0])
@@ -397,6 +464,12 @@ def _save_checkpoint(
     torch.save(
         {
             "state_dict": model.state_dict(),
+            "model_config": {
+                "state_dim": int(model.state_dim),
+                "action_dim": int(model.action_dim),
+                "hidden_size": DEFAULT_HIDDEN_SIZE,
+                "encoder_version": ENCODER_VERSION,
+            },
             "epoch": epoch,
             "step": step,
             "saved_at": datetime.now(UTC).isoformat(),

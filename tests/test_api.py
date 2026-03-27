@@ -1201,8 +1201,53 @@ class ApiTests(unittest.TestCase):
         self.assertFalse(updated["players"][0]["active"]["can_attack"])
         self.assertEqual(
             [action["type"] for action in updated["legal_actions"]],
-            ["end_turn"],
+            ["retreat", "end_turn"],
         )
+
+    def test_standard_retreat_actions_expose_active_to_bench_and_update_state(self) -> None:
+        state = self.app.new_game(
+            {
+                "game_mode": "standard",
+                "human_first": True,
+                "human_deck_id": "ampharos-ex-battle-deck",
+                "seed": 1,
+            }
+        )
+        session = self.app.sessions.get(state["session_id"])
+
+        session.state.setup_phase = None
+        session.state.current_player = 0
+        session.state.turn_number = 2
+        session.state.players[0].turns_taken = 2
+        session.state.players[1].turns_taken = 2
+        self._set_standard_named_active_pokemon(session.state, 0, "Mareep")
+        self._set_standard_named_bench_pokemon(session.state, 0, "Wattrel")
+        self._set_standard_named_active_pokemon(session.state, 1, "Mankey")
+        retreat_energy_id = self._take_standard_named_card(session.state, 0, "Basic Lightning Energy")
+        bench_energy_id = self._take_standard_named_card(session.state, 0, "Basic Lightning Energy")
+        session.state.players[0].active.attached_energy = [retreat_energy_id]
+        session.state.players[0].bench[0].attached_energy = [bench_energy_id]
+
+        snapshot = self.app.get_game(state["session_id"])
+        retreat_action = self._find_action(snapshot, "retreat")
+
+        self.assertEqual(retreat_action["source"]["zone"], "active")
+        self.assertEqual(retreat_action["source"]["instance_id"], snapshot["players"][0]["active"]["ref"]["instance_id"])
+        self.assertEqual(retreat_action["target"]["zone"], "bench")
+        self.assertEqual(retreat_action["target"]["bench_index"], 0)
+
+        updated = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": retreat_action["action"],
+            }
+        )
+
+        self.assertEqual(updated["players"][0]["active"]["name"], "Wattrel")
+        self.assertEqual(updated["players"][0]["bench"][0]["name"], "Mareep")
+        self.assertEqual(updated["players"][0]["discard_top"]["name"], "Basic Lightning Energy")
+        self.assertNotIn("retreat", [action["type"] for action in updated["legal_actions"]])
+        self.assertIn("attack", [action["type"] for action in updated["legal_actions"]])
 
     def test_standard_collect_attack_draws_a_card_and_passes_the_turn_on_a_later_turn(self) -> None:
         state = self.app.new_game(
