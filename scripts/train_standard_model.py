@@ -23,6 +23,7 @@ from backend.tcg_ai.game_modes.standard.ml.neural_policy import (
     DEFAULT_CHECKPOINT_PATH,
     encode_action_vector,
     encode_state_vector,
+    load_trusted_checkpoint,
 )
 
 DEFAULT_SELF_PLAY_ROOT = PROJECT_ROOT / "standard_ml_data" / "self_play"
@@ -126,7 +127,7 @@ def main() -> int:
 
     model = ActionConditionedPolicyValueNet().to(device)
     if args.resume_from is not None:
-        checkpoint = torch.load(args.resume_from, map_location=device)
+        checkpoint = load_trusted_checkpoint(args.resume_from, map_location=device)
         state_dict = checkpoint.get("state_dict") if isinstance(checkpoint, dict) else checkpoint
         model.load_state_dict(state_dict)
 
@@ -399,7 +400,7 @@ def _save_checkpoint(
             "epoch": epoch,
             "step": step,
             "saved_at": datetime.now(UTC).isoformat(),
-            "training_config": vars(args),
+            "training_config": _json_safe(vars(args)),
         },
         checkpoint_path,
     )
@@ -433,6 +434,16 @@ def _resolve_device(device_arg: str) -> torch.device:
             raise SystemExit("CUDA was requested, but no CUDA device is available.")
         return torch.device("cuda")
     return torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _json_safe(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
 
 
 if __name__ == "__main__":
