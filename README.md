@@ -30,7 +30,8 @@ You do **not** launch the dashboard separately.
 
 ### 1. Start The Coordinator
 
-Run this on the main machine that will collect results and later train:
+Run this on the main machine that will collect results and later train.
+In your current setup, the worker machines should target `192.168.0.175`.
 
 ```bash
 python3 -m venv .venv
@@ -65,25 +66,43 @@ From another machine on the LAN:
 http://<coordinator-ip>:8787/dashboard
 ```
 
-### 3. Start A Worker
+### 3. Start Workers
 
-Run this on each helper machine:
+The worker launchers now do the repetitive part for you:
+
+- default coordinator: `http://192.168.0.175:8787`
+- default worker prefix: machine hostname
+- default worker count: one process per detected CPU core
+
+Linux / macOS:
 
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -e .
 
-bash scripts/start_standard_self_play_worker.sh http://<coordinator-ip>:8787 my-worker-1
+bash scripts/start_standard_self_play_worker.sh
 ```
 
-Example:
+Linux / macOS with explicit overrides:
 
 ```bash
-bash scripts/start_standard_self_play_worker.sh http://192.168.1.50:8787 macbook-m1
+bash scripts/start_standard_self_play_worker.sh http://192.168.0.175:8787 macbook-m1 --workers 4
 ```
 
-Use a different worker name on each machine.
+Windows:
+
+```bat
+scripts\start_standard_self_play_worker.cmd
+```
+
+Windows with explicit overrides:
+
+```bat
+scripts\start_standard_self_play_worker.cmd http://192.168.0.175:8787 windows-box --workers 4
+```
+
+If you do not supply a prefix, the launcher uses the hostname.
 
 ### 4. Optional Text Status Watcher
 
@@ -175,6 +194,8 @@ bash scripts/start_standard_ml_worker.sh --checkpoint standard_ml_data/champion.
 
 - [scripts/start_standard_self_play_coordinator.sh](/Users/andrew/Documents/projects/TCG-AI/scripts/start_standard_self_play_coordinator.sh)
 - [scripts/start_standard_self_play_worker.sh](/Users/andrew/Documents/projects/TCG-AI/scripts/start_standard_self_play_worker.sh)
+- [scripts/start_standard_self_play_worker.cmd](/Users/andrew/Documents/projects/TCG-AI/scripts/start_standard_self_play_worker.cmd)
+- [scripts/start_standard_self_play_workers.py](/Users/andrew/Documents/projects/TCG-AI/scripts/start_standard_self_play_workers.py)
 - [scripts/watch_standard_self_play_status.sh](/Users/andrew/Documents/projects/TCG-AI/scripts/watch_standard_self_play_status.sh)
 - [scripts/run_standard_training_pipeline.sh](/Users/andrew/Documents/projects/TCG-AI/scripts/run_standard_training_pipeline.sh)
 - [scripts/start_standard_ml_worker.sh](/Users/andrew/Documents/projects/TCG-AI/scripts/start_standard_ml_worker.sh)
