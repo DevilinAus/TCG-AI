@@ -3266,6 +3266,7 @@ function describeActionType(actionType) {
     play_supporter: "Supporter",
     play_switch: "Switch",
     promote: "Required choice",
+    retreat: "Retreat",
   };
   return labels[actionType] || actionType.replaceAll("_", " ");
 }

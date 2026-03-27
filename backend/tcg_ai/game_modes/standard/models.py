@@ -94,6 +94,7 @@ class CardDefinition:
     rules_text: tuple[str, ...] = ()
     is_basic_energy: bool = False
     prize_card_value: int = 1
+    retreat_cost: int = 0
     effect_specs: tuple[EffectSpec, ...] = ()
 
 
@@ -138,6 +139,7 @@ class PlayerState:
     mulligans_taken: int = 0
     supporter_played_this_turn: bool = False
     energy_attached_this_turn: bool = False
+    retreated_this_turn: bool = False
     turns_taken: int = 0
     deck_inspected_this_game: bool = False
 

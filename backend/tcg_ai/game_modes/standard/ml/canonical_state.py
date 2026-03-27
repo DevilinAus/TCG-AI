@@ -96,6 +96,7 @@ def _serialize_card_definition(definition: CardDefinition) -> dict[str, Any]:
         "is_basic": definition.is_basic,
         "is_basic_energy": definition.is_basic_energy,
         "prize_card_value": definition.prize_card_value,
+        "retreat_cost": definition.retreat_cost,
         "evolves_from": definition.evolves_from,
         "hp": definition.hp,
         "image_url": definition.image_url,
@@ -126,6 +127,7 @@ def _deserialize_card_definition(payload: dict[str, Any]) -> CardDefinition:
         is_basic=bool(payload.get("is_basic", False)),
         is_basic_energy=bool(payload.get("is_basic_energy", False)),
         prize_card_value=int(payload.get("prize_card_value", 1) or 1),
+        retreat_cost=int(payload.get("retreat_cost", 0) or 0),
         evolves_from=payload.get("evolves_from"),
         hp=None if payload.get("hp") is None else int(payload["hp"]),
         image_url=payload.get("image_url"),
@@ -161,6 +163,7 @@ def _serialize_player(player: PlayerState) -> dict[str, Any]:
         "mulligans_taken": player.mulligans_taken,
         "supporter_played_this_turn": player.supporter_played_this_turn,
         "energy_attached_this_turn": player.energy_attached_this_turn,
+        "retreated_this_turn": player.retreated_this_turn,
         "turns_taken": player.turns_taken,
         "deck_inspected_this_game": player.deck_inspected_this_game,
     }
@@ -181,6 +184,7 @@ def _deserialize_player(payload: dict[str, Any]) -> PlayerState:
         mulligans_taken=int(payload.get("mulligans_taken", 0)),
         supporter_played_this_turn=bool(payload.get("supporter_played_this_turn", False)),
         energy_attached_this_turn=bool(payload.get("energy_attached_this_turn", False)),
+        retreated_this_turn=bool(payload.get("retreated_this_turn", False)),
         turns_taken=int(payload.get("turns_taken", 0)),
         deck_inspected_this_game=bool(payload.get("deck_inspected_this_game", False)),
     )

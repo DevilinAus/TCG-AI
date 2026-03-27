@@ -22,6 +22,16 @@ class PlannerConfig:
     include_opponent_turn: bool = True
 
 
+@dataclass(frozen=True)
+class RankedAction:
+    action: dict[str, Any]
+    action_id: str
+    rank_score: float
+    prior: float
+    one_step_score: float
+    continuation_score: float
+
+
 class StandardTurnPlanner:
     def __init__(
         self,
@@ -46,22 +56,30 @@ class StandardTurnPlanner:
         self._nodes_evaluated = 0
         ranked_actions = self._rank_actions(state, acting_player_index, legal_actions, acting_player_index)
         candidates: list[dict[str, Any]] = []
-        for action in ranked_actions[: self.config.beam_width]:
+        for ranked_action in ranked_actions[: self.config.beam_width]:
             simulated_state = deepcopy(state)
-            apply_action_for_player(simulated_state, action, acting_player_index)
+            apply_action_for_player(simulated_state, ranked_action.action, acting_player_index)
             score, line = self._search(simulated_state, acting_player_index, depth=1)
             candidates.append(
                 {
-                    "action": action,
-                    "action_id": _safe_action_id(action),
+                    "action": ranked_action.action,
+                    "action_id": ranked_action.action_id,
                     "score": round(score, 6),
                     "delta": round(score - baseline_score, 6),
-                    "line": [_safe_action_id(action), *line],
+                    "line": [ranked_action.action_id, *line],
+                    "rank_score": round(ranked_action.rank_score, 6),
+                    "prior": round(ranked_action.prior, 6),
+                    "one_step_score": round(ranked_action.one_step_score, 6),
+                    "continuation_score": round(ranked_action.continuation_score, 6),
                 }
             )
 
         best_score = max(candidate["score"] for candidate in candidates)
         best = next(candidate for candidate in candidates if candidate["score"] == best_score)
+        policy_target_scores = _build_policy_target_scores(
+            legal_action_ids=[ranked_action.action_id for ranked_action in ranked_actions],
+            candidates=candidates,
+        )
         return {
             "chosen_action": best["action"],
             "chosen_action_id": best["action_id"],
@@ -84,6 +102,7 @@ class StandardTurnPlanner:
                         key=lambda candidate: (-candidate["score"], candidate["action_id"]),
                     )[:3]
                 ],
+                "policy_target_scores": policy_target_scores,
             },
         }
 
@@ -118,18 +137,18 @@ class StandardTurnPlanner:
         )
         best_score = -inf if acting_player_index == root_player_index else inf
         best_line: list[str] = []
-        for action in ranked_actions[:branch_width]:
+        for ranked_action in ranked_actions[:branch_width]:
             simulated_state = deepcopy(state)
-            apply_action_for_player(simulated_state, action, acting_player_index)
+            apply_action_for_player(simulated_state, ranked_action.action, acting_player_index)
             score, line = self._search(simulated_state, root_player_index, depth + 1)
             if acting_player_index == root_player_index:
                 if score > best_score:
                     best_score = score
-                    best_line = [_safe_action_id(action), *line]
+                    best_line = [ranked_action.action_id, *line]
             else:
                 if score < best_score:
                     best_score = score
-                    best_line = [_safe_action_id(action), *line]
+                    best_line = [ranked_action.action_id, *line]
 
         return round(best_score, 6), best_line
 
@@ -139,7 +158,7 @@ class StandardTurnPlanner:
         acting_player_index: int,
         legal_actions: list[dict[str, Any]],
         root_player_index: int,
-    ) -> list[dict[str, Any]]:
+    ) -> list[RankedAction]:
         oracle_result = self.oracle.evaluate_batch(
             [
                 PolicyValueRequest(
@@ -151,21 +170,101 @@ class StandardTurnPlanner:
             ]
         )[0]
         baseline_score = oracle_result.value
-        ranked: list[tuple[float, str, dict[str, Any]]] = []
+        ranked: list[RankedAction] = []
         for action in legal_actions:
             simulated_state = deepcopy(state)
             apply_action_for_player(simulated_state, action, acting_player_index)
-            score = self._evaluate_state_value(simulated_state, simulated_state.current_player, root_player_index)
-            prior = float(oracle_result.action_priors.get(_safe_action_id(action), 0.0))
+            one_step_score = self._evaluate_state_value(
+                simulated_state,
+                simulated_state.current_player,
+                root_player_index,
+            )
+            action_id = _safe_action_id(action)
+            prior = float(oracle_result.action_priors.get(action_id, 0.0))
+            continuation_score = self._same_turn_continuation_score(
+                simulated_state,
+                acting_player_index=acting_player_index,
+                root_player_index=root_player_index,
+                max_steps=2,
+            )
+            rank_score = round(
+                one_step_score
+                + prior * 8.0
+                + (one_step_score - baseline_score) * 0.3
+                + self._continuation_rank_bonus(one_step_score, continuation_score),
+                6,
+            )
             ranked.append(
-                (
-                    round(score + prior * 8.0 + (score - baseline_score) * 0.3, 6),
-                    _safe_action_id(action),
-                    action,
+                RankedAction(
+                    action=action,
+                    action_id=action_id,
+                    rank_score=rank_score,
+                    prior=prior,
+                    one_step_score=round(one_step_score, 6),
+                    continuation_score=round(continuation_score, 6),
                 )
             )
-        ranked.sort(key=lambda item: (-item[0], item[1]))
-        return [action for _, _, action in ranked]
+        ranked.sort(key=lambda item: (-item.rank_score, item.action_id))
+        return ranked
+
+    def _same_turn_continuation_score(
+        self,
+        state: GameState,
+        *,
+        acting_player_index: int,
+        root_player_index: int,
+        max_steps: int,
+    ) -> float:
+        best_score = self._evaluate_state_value(state, state.current_player, root_player_index)
+        if max_steps <= 0 or state.winner is not None or state.current_player != acting_player_index:
+            return best_score
+
+        legal_actions = list_legal_actions(state, player_index=acting_player_index)
+        if not legal_actions:
+            return best_score
+
+        tactical_followups = [
+            action
+            for action in legal_actions
+            if str(action.get("type", "")) in {
+                "attack",
+                "evolve",
+                "play_energy",
+                "retreat",
+                "bench_basic",
+                "play_basic_to_active",
+            }
+        ]
+        ordered_followups = sorted(
+            tactical_followups,
+            key=lambda action: (
+                -_same_turn_followup_priority(action),
+                _safe_action_id(action),
+            ),
+        )[:6]
+        for followup in ordered_followups:
+            simulated_state = deepcopy(state)
+            apply_action_for_player(simulated_state, followup, acting_player_index)
+            followup_score = self._same_turn_continuation_score(
+                simulated_state,
+                acting_player_index=acting_player_index,
+                root_player_index=root_player_index,
+                max_steps=max_steps - 1,
+            )
+            if followup_score > best_score:
+                best_score = followup_score
+        return round(best_score, 6)
+
+    @staticmethod
+    def _continuation_rank_bonus(one_step_score: float, continuation_score: float) -> float:
+        if continuation_score >= 9_000.0:
+            return 1_000.0
+        if continuation_score <= -9_000.0:
+            return -120.0
+        delta = continuation_score - one_step_score
+        if delta <= 0:
+            return 0.0
+        return min(24.0, delta * 0.45)
 
     def _evaluate_state_value(
         self,
@@ -192,3 +291,50 @@ def _safe_action_id(action: dict[str, Any]) -> str:
         return action_id_for(action)
     except Exception:
         return str(action)
+
+
+def _same_turn_followup_priority(action: dict[str, Any]) -> int:
+    priorities = {
+        "attack": 60,
+        "evolve": 50,
+        "play_energy": 40,
+        "retreat": 30,
+        "bench_basic": 20,
+        "play_basic_to_active": 15,
+    }
+    return priorities.get(str(action.get("type", "")), 0)
+
+
+def _build_policy_target_scores(
+    *,
+    legal_action_ids: list[str],
+    candidates: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    candidate_by_id = {
+        str(candidate["action_id"]): candidate
+        for candidate in candidates
+    }
+    if candidate_by_id:
+        floor_score = min(float(candidate["score"]) for candidate in candidates) - 5.0
+    else:
+        floor_score = -5.0
+    targets: list[dict[str, Any]] = []
+    for action_id in legal_action_ids:
+        candidate = candidate_by_id.get(action_id)
+        if candidate is not None:
+            targets.append(
+                {
+                    "action_id": action_id,
+                    "score": round(float(candidate["score"]), 6),
+                    "source": "search",
+                }
+            )
+            continue
+        targets.append(
+            {
+                "action_id": action_id,
+                "score": round(floor_score, 6),
+                "source": "pruned",
+            }
+        )
+    return targets

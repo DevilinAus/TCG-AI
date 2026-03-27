@@ -50,6 +50,36 @@ class StandardTrainingScriptTests(unittest.TestCase):
             },
         )
 
+    def test_build_policy_target_vector_uses_soft_targets_when_present(self) -> None:
+        training_module = _load_training_module()
+
+        payload = {
+            "policy_target_probs": {
+                "a": 0.2,
+                "b": 0.3,
+                "c": 0.5,
+            }
+        }
+
+        vector = training_module._build_policy_target_vector(
+            payload=payload,
+            action_ids=["a", "b", "c"],
+            chosen_action_id="b",
+        )
+
+        self.assertEqual(vector, [0.2, 0.3, 0.5])
+
+    def test_build_policy_target_vector_falls_back_to_one_hot(self) -> None:
+        training_module = _load_training_module()
+
+        vector = training_module._build_policy_target_vector(
+            payload={},
+            action_ids=["a", "b", "c"],
+            chosen_action_id="b",
+        )
+
+        self.assertEqual(vector, [0.0, 1.0, 0.0])
+
 
 class StandardCheckpointLoadingTests(unittest.TestCase):
     def test_load_trusted_checkpoint_uses_non_weights_only_load(self) -> None:

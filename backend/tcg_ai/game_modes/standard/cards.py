@@ -63,6 +63,7 @@ class DeckCardDefinition:
     rules_text: tuple[str, ...]
     is_basic_energy: bool
     prize_card_value: int
+    retreat_cost: int
     effect_specs: tuple[EffectSpec, ...]
 
 
@@ -636,6 +637,20 @@ def _catalog_prize_card_value(card_id: str, kind: str) -> int:
     return 2 if "ex" in subtypes else 1
 
 
+def _catalog_retreat_cost(card_id: str, kind: str) -> int:
+    if kind != "pokemon":
+        return 0
+
+    card = _load_card_catalog().get(card_id)
+    if card is None:
+        raise ValueError(f"Missing Standard catalog data for card '{card_id}'.")
+
+    converted_retreat_cost = card.get("converted_retreat_cost")
+    if converted_retreat_cost is None:
+        return 0
+    return max(0, int(converted_retreat_cost))
+
+
 def _effect_specs_for_card(card_id: str) -> tuple[EffectSpec, ...]:
     return TRAINER_EFFECT_SPECS.get(card_id, ())
 
@@ -706,6 +721,7 @@ def load_deck_cards(deck_id: str) -> tuple[DeckCardDefinition, ...]:
                 rules_text=_catalog_rules_text(card_id),
                 is_basic_energy=_catalog_is_basic_energy(kind, name),
                 prize_card_value=_catalog_prize_card_value(card_id, kind),
+                retreat_cost=_catalog_retreat_cost(card_id, kind),
                 effect_specs=_effect_specs_for_card(card_id),
             )
         )

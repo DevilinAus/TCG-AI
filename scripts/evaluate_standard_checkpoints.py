@@ -32,6 +32,7 @@ from backend.tcg_ai.game_modes.standard.ml.neural_policy import (
     DEFAULT_CHECKPOINT_PATH,
     PolicyValueBackend,
 )
+from backend.tcg_ai.game_modes.standard.ml.tactical_suite import run_tactical_suite
 
 DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "standard_ml_data" / "evaluations"
 EVAL_ASSIGNMENTS = (
@@ -69,6 +70,13 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument("--promote-path", type=Path, default=None)
     parser.add_argument("--promotion-threshold", type=float, default=0.55)
+    parser.add_argument("--skip-tactical-suite", action="store_true")
+    parser.add_argument("--tactical-suite", choices=("core", "strategic", "all"), default="core")
+    parser.add_argument(
+        "--allow-tactical-failures",
+        action="store_true",
+        help="Allow promotion even if the candidate fails tactical regression scenarios.",
+    )
     parser.add_argument("--seed", type=int, default=random.randint(1, 999_999))
     parser.add_argument("--log-every-seconds", type=float, default=5.0)
     return parser.parse_args()
@@ -113,6 +121,9 @@ def main() -> int:
         "planner_config": asdict(planner_config),
         "max_actions_per_game": args.max_actions_per_game,
         "promotion_threshold": args.promotion_threshold,
+        "skip_tactical_suite": args.skip_tactical_suite,
+        "tactical_suite": args.tactical_suite,
+        "allow_tactical_failures": args.allow_tactical_failures,
     }
     (output_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
 
@@ -124,6 +135,18 @@ def main() -> int:
     )
     print(f"[eval] candidate-status={json.dumps(candidate_spec['status'], sort_keys=True)}")
     print(f"[eval] baseline-status={json.dumps(baseline_spec['status'], sort_keys=True)}")
+    tactical_summary = _run_candidate_tactical_suite(
+        candidate_spec=candidate_spec,
+        planner_config=planner_config,
+        skip_suite=args.skip_tactical_suite,
+        suite=args.tactical_suite,
+    )
+    if tactical_summary["ran"]:
+        print(
+            "[eval] "
+            f"tactical_passed={tactical_summary['passed']}/{tactical_summary['total']} "
+            f"require_all_pass={not args.allow_tactical_failures}"
+        )
 
     tasks = []
     task_count = math.ceil(args.games / args.chunk_size)
@@ -191,19 +214,35 @@ def main() -> int:
         if decisive_games > 0
         else 0.0
     )
+    tactical_gate_passed = (
+        not tactical_summary["ran"]
+        or args.allow_tactical_failures
+        or tactical_summary["passed"] == tactical_summary["total"]
+    )
     promoted = False
     promoted_path = None
-    if args.promote_path is not None and decisive_games > 0 and candidate_win_rate >= args.promotion_threshold:
+    if (
+        args.promote_path is not None
+        and decisive_games > 0
+        and candidate_win_rate >= args.promotion_threshold
+        and tactical_gate_passed
+    ):
         args.promote_path.parent.mkdir(parents=True, exist_ok=True)
         shutil.copy2(candidate_spec["checkpoint_path"], args.promote_path)
         promoted = True
         promoted_path = str(args.promote_path.resolve())
         print(f"[eval] promoted new champion: {promoted_path}")
     elif args.promote_path is not None:
-        print(
-            "[eval] "
-            f"candidate win rate {candidate_win_rate:.3%} did not clear threshold {args.promotion_threshold:.3%}; champion unchanged"
-        )
+        if decisive_games <= 0 or candidate_win_rate < args.promotion_threshold:
+            print(
+                "[eval] "
+                f"candidate win rate {candidate_win_rate:.3%} did not clear threshold {args.promotion_threshold:.3%}; champion unchanged"
+            )
+        elif not tactical_gate_passed:
+            print(
+                "[eval] "
+                f"candidate passed win-rate gating but failed tactical suite {tactical_summary['passed']}/{tactical_summary['total']}; champion unchanged"
+            )
 
     summary_payload = {
         "run_id": run_id,
@@ -212,6 +251,7 @@ def main() -> int:
         "baseline": baseline_spec,
         "candidate_win_rate": round(candidate_win_rate, 6),
         "decisive_games": decisive_games,
+        "tactical_summary": tactical_summary,
         "promoted": promoted,
         "promoted_path": promoted_path,
         **aggregate,
@@ -328,6 +368,38 @@ def _build_oracle(spec: dict[str, Any]):
         backend = PolicyValueBackend(checkpoint_path=Path(str(spec["checkpoint_path"])))
         return BackendPolicyValueOracle(backend=backend)
     return HeuristicPolicyValueOracle()
+
+
+def _run_candidate_tactical_suite(
+    *,
+    candidate_spec: dict[str, Any],
+    planner_config: PlannerConfig,
+    skip_suite: bool,
+    suite: str,
+) -> dict[str, Any]:
+    if skip_suite:
+        return {"ran": False, "passed": 0, "total": 0, "results": []}
+    oracle = _build_oracle(candidate_spec)
+    results = run_tactical_suite(oracle=oracle, planner_config=planner_config, suite=suite)
+    return {
+        "ran": True,
+        "suite": suite,
+        "passed": sum(1 for result in results if result.passed),
+        "total": len(results),
+        "results": [
+            {
+                "name": result.name,
+                "description": result.description,
+                "tags": list(result.tags),
+                "tier": result.tier,
+                "passed": result.passed,
+                "chosen_action_id": result.chosen_action_id,
+                "chosen_action_type": result.chosen_action_type,
+                "acceptable_reason": result.acceptable_reason,
+            }
+            for result in results
+        ],
+    }
 
 
 def _resolve_model_spec(

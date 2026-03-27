@@ -28,7 +28,7 @@ class SelfPlayRunConfig:
     max_actions_per_game: int = 200
     include_setup_decisions: bool = False
     record_forced_actions: bool = False
-    oracle: str = "heuristic"
+    oracle: str = "auto"
     checkpoint: str | None = None
     matchup_player0_decks: tuple[str, ...] = DEFAULT_MATCHUP_PLAYER0_DECKS
 
@@ -291,11 +291,29 @@ def self_play_run_config_from_payload(payload: dict[str, Any]) -> SelfPlayRunCon
 
 
 def resolve_oracle_status(*, oracle: str, checkpoint: Path | None) -> dict[str, Any]:
+    if oracle == "auto":
+        backend = PolicyValueBackend(checkpoint_path=checkpoint)
+        status = backend.status
+        resolved_oracle = "local-model" if status.model_loaded else "heuristic"
+        return {
+            "requested_oracle": "auto",
+            "resolved_oracle": resolved_oracle,
+            "backend": status.backend,
+            "model_loaded": status.model_loaded,
+            "checkpoint_path": status.checkpoint_path,
+        }
     if oracle != "local-model":
-        return {"backend": "heuristic", "model_loaded": False}
+        return {
+            "requested_oracle": oracle,
+            "resolved_oracle": "heuristic",
+            "backend": "heuristic",
+            "model_loaded": False,
+        }
     backend = PolicyValueBackend(checkpoint_path=checkpoint)
     status = backend.status
     return {
+        "requested_oracle": oracle,
+        "resolved_oracle": "local-model" if status.model_loaded else "heuristic",
         "backend": status.backend,
         "model_loaded": status.model_loaded,
         "checkpoint_path": status.checkpoint_path,
@@ -303,6 +321,11 @@ def resolve_oracle_status(*, oracle: str, checkpoint: Path | None) -> dict[str, 
 
 
 def _build_oracle(oracle_name: str, checkpoint: str | None):
+    if oracle_name == "auto":
+        backend = PolicyValueBackend(checkpoint_path=Path(checkpoint) if checkpoint else None)
+        if backend.status.model_loaded:
+            return BackendPolicyValueOracle(backend=backend)
+        return HeuristicPolicyValueOracle()
     if oracle_name == "local-model":
         backend = PolicyValueBackend(checkpoint_path=Path(checkpoint) if checkpoint else None)
         return BackendPolicyValueOracle(backend=backend)

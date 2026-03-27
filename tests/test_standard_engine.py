@@ -1323,6 +1323,54 @@ class StandardEngineTests(unittest.TestCase):
         self.assertEqual(card_definition(state, state.players[0].bench[0].stack[-1]).name, previous_active_name)
         self.assertEqual(card_definition(state, state.players[0].discard[-1]).name, "Switch")
 
+    def test_retreat_targets_each_benched_pokemon_discards_energy_and_keeps_turn(self) -> None:
+        state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck")
+        state.setup_phase = None
+        state.current_player = 0
+        state.turn_number = 2
+        state.players[0].turns_taken = 2
+        state.players[1].turns_taken = 2
+        self._set_named_active_pokemon(state, 0, "Mareep")
+        self._set_named_bench_pokemon(state, 0, "Wattrel")
+        self._set_named_active_pokemon(state, 1, "Mankey")
+
+        retreat_energy_id = self._take_named_card(state, 0, "Basic Lightning Energy")
+        bench_energy_id = self._take_named_card(state, 0, "Basic Lightning Energy")
+        state.players[0].active.attached_energy = [retreat_energy_id]
+        state.players[0].bench[0].attached_energy = [bench_energy_id]
+
+        retreat_actions = [action for action in list_legal_actions(state) if action["type"] == "retreat"]
+
+        self.assertEqual(len(retreat_actions), 1)
+        self.assertEqual(retreat_actions[0]["target_zone"], "bench")
+        self.assertEqual(retreat_actions[0]["target_bench_index"], 0)
+        self.assertEqual(retreat_actions[0]["discard_attached_energy_ids"], [retreat_energy_id])
+
+        apply_action(state, retreat_actions[0])
+
+        self.assertEqual(card_definition(state, state.players[0].active.stack[-1]).name, "Wattrel")
+        self.assertEqual(card_definition(state, state.players[0].bench[0].stack[-1]).name, "Mareep")
+        self.assertEqual(state.players[0].discard[-1], retreat_energy_id)
+        self.assertTrue(state.players[0].retreated_this_turn)
+        self.assertEqual(state.current_player, 0)
+        self.assertIn("attack", [action["type"] for action in list_legal_actions(state)])
+        self.assertNotIn("retreat", [action["type"] for action in list_legal_actions(state)])
+
+    def test_retreat_is_not_legal_without_enough_attached_energy(self) -> None:
+        state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck")
+        state.setup_phase = None
+        state.current_player = 0
+        state.turn_number = 2
+        state.players[0].turns_taken = 2
+        state.players[1].turns_taken = 2
+        self._set_named_active_pokemon(state, 0, "Mareep")
+        self._set_named_bench_pokemon(state, 0, "Wattrel")
+        self._set_named_active_pokemon(state, 1, "Mankey")
+
+        retreat_actions = [action for action in list_legal_actions(state) if action["type"] == "retreat"]
+
+        self.assertEqual(retreat_actions, [])
+
     def test_ultra_ball_is_not_legal_without_two_other_cards_in_hand(self) -> None:
         state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck")
         self._finish_opening_setup(state)

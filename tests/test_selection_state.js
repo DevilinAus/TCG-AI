@@ -601,6 +601,43 @@ test("resolveSelectedBoardTargetClick uses a two-step promotion flow", () => {
   assert.equal(promoteResult.nextUiState, null);
 });
 
+test("resolveSelectedBoardTargetClick uses a two-step retreat flow", () => {
+  const state = makeState();
+  const refs = makeRefs();
+  const action = {
+    type: "retreat",
+    source: refs.playerActive,
+    target: refs.playerBench,
+  };
+  state.legal_actions = [action];
+
+  const selectActiveResult = resolveSelectedBoardTargetClick({
+    state,
+    uiState: {
+      selectedCardId: null,
+      selectedBoardTarget: null,
+    },
+    targetRef: refs.playerActive,
+    aiIsRunning: false,
+  });
+
+  assert.equal(selectActiveResult.autoAction, null);
+  assert.ok(refsMatch(selectActiveResult.nextUiState.selectedBoardTarget, refs.playerActive));
+
+  const retreatResult = resolveSelectedBoardTargetClick({
+    state,
+    uiState: {
+      selectedCardId: null,
+      selectedBoardTarget: refs.playerActive,
+    },
+    targetRef: refs.playerBench,
+    aiIsRunning: false,
+  });
+
+  assert.equal(retreatResult.autoAction, action);
+  assert.equal(retreatResult.nextUiState, null);
+});
+
 test("resolveSelectedBoardTargetClick toggles the same target off", () => {
   const refs = makeRefs();
   const result = resolveSelectedBoardTargetClick({
