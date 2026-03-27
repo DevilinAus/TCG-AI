@@ -209,6 +209,7 @@ function createMachineAggregate(machineName, worker) {
     status: "offline",
     is_online: false,
     active_workers: 0,
+    total_workers_seen: 0,
     active_shards: 0,
     completed_games: 0,
     completed_actions: 0,
@@ -234,6 +235,7 @@ function createMachineAggregate(machineName, worker) {
 }
 
 function mergeWorkerIntoMachine(machine, worker) {
+  machine.total_workers_seen += 1;
   machine.completed_games += worker.completed_games ?? 0;
   machine.completed_actions += worker.completed_actions ?? 0;
   machine.completed_turns += worker.completed_turns ?? 0;
@@ -242,14 +244,18 @@ function mergeWorkerIntoMachine(machine, worker) {
   machine.current_task_game_count += worker.current_task_game_count ?? 0;
   machine.current_task_completed_games += worker.current_task_completed_games ?? 0;
   machine.recent_games_per_minute_5m += worker.recent_games_per_minute_5m ?? 0;
-  machine.active_workers += 1;
-
-  if (worker.leased_task_index !== null && worker.leased_task_index !== undefined) {
-    machine.active_shards += 1;
-  }
 
   if (worker.is_online) {
     machine.is_online = true;
+    machine.active_workers += 1;
+  }
+
+  if (
+    worker.is_online
+    && worker.leased_task_index !== null
+    && worker.leased_task_index !== undefined
+  ) {
+    machine.active_shards += 1;
   }
 
   machine.status = mergeMachineStatus(machine.status, worker.status);
