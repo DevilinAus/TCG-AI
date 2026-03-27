@@ -56,6 +56,7 @@ class StandardWorkerLauncherTests(unittest.TestCase):
                 project_root=project_root,
                 coordinator_url=DEFAULT_COORDINATOR_URL,
                 worker_id="macbook-01",
+                machine_name="macbook",
                 poll_seconds=5.0,
                 request_timeout_seconds=30.0,
                 heartbeat_interval_seconds=15.0,
@@ -68,6 +69,8 @@ class StandardWorkerLauncherTests(unittest.TestCase):
         self.assertIn(DEFAULT_COORDINATOR_URL, command)
         self.assertIn("--worker-id", command)
         self.assertIn("macbook-01", command)
+        self.assertIn("--machine-name", command)
+        self.assertIn("macbook", command)
         self.assertIn("--progress-log", command)
         self.assertIn(str(progress_dir / "macbook-01.log"), command)
 

@@ -428,6 +428,9 @@ class DistributedSelfPlayCoordinator:
             value = worker_meta.get(key)
             if isinstance(value, str) and value:
                 worker_state[key] = value
+        machine_name = worker_meta.get("machine_name")
+        if isinstance(machine_name, str) and machine_name:
+            worker_state["machine_name"] = machine_name
         for key in ("poll_seconds", "heartbeat_interval_seconds"):
             value = worker_meta.get(key)
             numeric_value = _coerce_float(value)
@@ -465,6 +468,7 @@ class DistributedSelfPlayCoordinator:
         recent_5m = _window_totals(worker_state["progress_buckets"], now=now, window_minutes=5)
         return {
             "worker_id": worker_id,
+            "machine_name": worker_state.get("machine_name"),
             "hostname": worker_state.get("hostname"),
             "platform": worker_state.get("platform"),
             "python_version": worker_state.get("python_version"),
@@ -541,6 +545,7 @@ def encode_chunk_text_gzip_b64(text: str) -> str:
 def _default_worker_state(worker_id: str) -> dict[str, Any]:
     return {
         "worker_id": worker_id,
+        "machine_name": None,
         "hostname": None,
         "platform": None,
         "python_version": None,
@@ -572,6 +577,7 @@ def _normalize_worker_state(worker_id: str, payload: Any) -> dict[str, Any]:
     if not isinstance(payload, dict):
         return worker_state
     for key in (
+        "machine_name",
         "hostname",
         "platform",
         "python_version",

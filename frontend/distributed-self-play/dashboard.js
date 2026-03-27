@@ -36,19 +36,20 @@ function startPolling() {
 }
 
 function renderDashboard(status) {
-  runIdEl.textContent = status.run_id ?? "unknown";
-  lastRefreshEl.textContent = `Updated ${formatClock(new Date())}`;
-
   const workers = Object.values(status.workers ?? {});
-  const onlineWorkers = workers.filter((worker) => worker.is_online);
-  const busyWorkers = workers.filter((worker) => worker.status === "busy");
-  const stalledWorkers = workers.filter((worker) => worker.status === "stalled" || worker.status === "offline");
+  const machines = aggregateMachines(workers);
+  const onlineMachines = machines.filter((machine) => machine.is_online);
+  const busyMachines = machines.filter((machine) => machine.status === "busy");
+  const staleMachines = machines.filter((machine) => machine.status === "stalled" || machine.status === "offline");
   const reported = status.reported ?? {};
   const aggregate = status.aggregate ?? {};
   const throughput = status.throughput ?? {};
 
+  runIdEl.textContent = status.run_id ?? "unknown";
+  lastRefreshEl.textContent = `Updated ${formatClock(new Date())}`;
+
   renderOverview([
-    metricCard("Workers Online", `${onlineWorkers.length}/${workers.length}`, `${busyWorkers.length} busy · ${stalledWorkers.length} dropped/stale`),
+    metricCard("Machines Online", `${onlineMachines.length}/${machines.length}`, `${busyMachines.length} busy · ${staleMachines.length} dropped/stale`),
     metricCard("Reported Games", formatNumber(reported.games ?? 0), `${formatNumber(aggregate.games ?? 0)} committed to shards`),
     metricCard("Throughput", `${formatDecimal(throughput.games_per_minute_5m ?? 0)} gpm`, `${formatDecimal(throughput.games_per_minute_overall ?? 0)} overall`),
     metricCard("Samples", formatNumber(reported.samples ?? 0), `${formatDecimal(throughput.samples_per_minute_5m ?? 0)} samples/min`),
@@ -58,13 +59,13 @@ function renderDashboard(status) {
 
   renderThroughputChart(status.throughput_series ?? []);
   renderThroughputBreakdown(throughput);
-  renderLeaderboard(workers);
-  renderWorkers(workers);
-  leaderboardSummaryEl.textContent = workers.length
-    ? `${busyWorkers.length} busy · ${onlineWorkers.length} online · ${stalledWorkers.length} stale/offline`
+  renderLeaderboard(machines);
+  renderWorkers(machines);
+  leaderboardSummaryEl.textContent = machines.length
+    ? `${busyMachines.length} busy · ${onlineMachines.length} online · ${staleMachines.length} stale/offline`
     : "No workers yet";
-  workerSummaryEl.textContent = workers.length
-    ? `${workers.length} workers · ${formatDecimal(throughput.games_per_minute_5m ?? 0)} games/min over the last 5 minutes`
+  workerSummaryEl.textContent = machines.length
+    ? `${machines.length} machines · ${workers.length} worker processes · ${formatDecimal(throughput.games_per_minute_5m ?? 0)} games/min over the last 5 minutes`
     : "No workers connected";
 }
 
@@ -94,36 +95,36 @@ function renderThroughputBreakdown(throughput) {
   ].join("");
 }
 
-function renderLeaderboard(workers) {
-  if (!workers.length) {
-    leaderboard.innerHTML = `<div class="empty-state">Workers will appear here once they lease a chunk.</div>`;
+function renderLeaderboard(machines) {
+  if (!machines.length) {
+    leaderboard.innerHTML = `<div class="empty-state">Machines will appear here once workers lease chunks.</div>`;
     return;
   }
-  const rows = [...workers].sort((left, right) => {
+  const rows = [...machines].sort((left, right) => {
     if (right.completed_games !== left.completed_games) {
       return right.completed_games - left.completed_games;
     }
-    return (right.submitted_tasks ?? 0) - (left.submitted_tasks ?? 0);
+    return (right.active_workers ?? 0) - (left.active_workers ?? 0);
   });
   leaderboard.innerHTML = rows.map((worker, index) => `
     <div class="leaderboard-row">
       <div>
         <span class="leaderboard-rank">${index + 1}</span>
-        <strong>${escapeHtml(worker.worker_id)}</strong>
+        <strong>${escapeHtml(worker.machine_name)}</strong>
       </div>
       <div>${formatNumber(worker.completed_games ?? 0)} games</div>
       <div>${formatDecimal(worker.recent_games_per_minute_5m ?? 0)} gpm</div>
-      <div>${formatNumber(worker.submitted_tasks ?? 0)} shards</div>
+      <div>${formatNumber(worker.active_workers ?? 0)} workers</div>
     </div>
   `).join("");
 }
 
-function renderWorkers(workers) {
-  if (!workers.length) {
-    workersGrid.innerHTML = `<div class="empty-state">No workers have connected yet. Start a worker and it will show up here automatically.</div>`;
+function renderWorkers(machines) {
+  if (!machines.length) {
+    workersGrid.innerHTML = `<div class="empty-state">No machines have connected yet. Start a worker and it will show up here automatically.</div>`;
     return;
   }
-  workersGrid.innerHTML = [...workers].sort((left, right) => {
+  workersGrid.innerHTML = [...machines].sort((left, right) => {
     const statusOrder = { busy: 0, idle: 1, stalled: 2, offline: 3 };
     return (statusOrder[left.status] ?? 9) - (statusOrder[right.status] ?? 9);
   }).map((worker) => renderWorkerCard(worker)).join("");
@@ -136,8 +137,8 @@ function renderWorkerCard(worker) {
     <article class="worker-card">
       <div class="worker-head">
         <div>
-          <h3 class="worker-title">${escapeHtml(worker.worker_id)}</h3>
-          <p class="worker-platform">${escapeHtml(worker.hostname ?? "unknown host")} · ${escapeHtml(shortPlatform(worker.platform))}</p>
+          <h3 class="worker-title">${escapeHtml(worker.machine_name)}</h3>
+          <p class="worker-platform">${escapeHtml(worker.hostname ?? "unknown host")} · ${escapeHtml(shortPlatform(worker.platform))} · ${formatNumber(worker.active_workers ?? 0)} workers</p>
         </div>
         <span class="status-pill status-${escapeHtml(worker.status)}">${onlineLabel}</span>
       </div>
@@ -147,8 +148,8 @@ function renderWorkerCard(worker) {
       </div>
 
       <div class="worker-meta">
-        ${worker.leased_task_index !== null && worker.leased_task_index !== undefined
-          ? `Shard ${worker.leased_task_index} · ${worker.current_task_completed_games}/${worker.current_task_game_count} games`
+        ${worker.active_shards > 0
+          ? `${formatNumber(worker.active_shards)} active shards · ${worker.current_task_completed_games}/${worker.current_task_game_count} games`
           : "No chunk currently leased"}
       </div>
 
@@ -185,6 +186,117 @@ function renderWorkerCard(worker) {
       </div>
     </article>
   `;
+}
+
+function aggregateMachines(workers) {
+  const machinesByName = new Map();
+
+  for (const worker of workers) {
+    const machineName = worker.machine_name ?? worker.hostname ?? worker.worker_id ?? "unknown-machine";
+    const machine = machinesByName.get(machineName) ?? createMachineAggregate(machineName, worker);
+    mergeWorkerIntoMachine(machine, worker);
+    machinesByName.set(machineName, machine);
+  }
+
+  return [...machinesByName.values()];
+}
+
+function createMachineAggregate(machineName, worker) {
+  return {
+    machine_name: machineName,
+    hostname: worker.hostname ?? machineName,
+    platform: worker.platform ?? null,
+    status: "offline",
+    is_online: false,
+    active_workers: 0,
+    active_shards: 0,
+    completed_games: 0,
+    completed_actions: 0,
+    completed_turns: 0,
+    completed_samples: 0,
+    truncated_games: 0,
+    deck_wins: {
+      "ampharos-ex-battle-deck": 0,
+      "lucario-ex-battle-deck": 0,
+    },
+    current_task_game_count: 0,
+    current_task_completed_games: 0,
+    current_task_progress: 0,
+    last_duration_seconds: null,
+    seconds_since_seen: null,
+    recent_games_per_minute_5m: 0,
+    average_actions_per_game: 0,
+    throughput_series: [],
+    _seriesMap: new Map(),
+    _lastProgressRank: Number.POSITIVE_INFINITY,
+    _lastProgressValue: null,
+  };
+}
+
+function mergeWorkerIntoMachine(machine, worker) {
+  machine.completed_games += worker.completed_games ?? 0;
+  machine.completed_actions += worker.completed_actions ?? 0;
+  machine.completed_turns += worker.completed_turns ?? 0;
+  machine.completed_samples += worker.completed_samples ?? 0;
+  machine.truncated_games += worker.truncated_games ?? 0;
+  machine.current_task_game_count += worker.current_task_game_count ?? 0;
+  machine.current_task_completed_games += worker.current_task_completed_games ?? 0;
+  machine.recent_games_per_minute_5m += worker.recent_games_per_minute_5m ?? 0;
+  machine.active_workers += 1;
+
+  if (worker.leased_task_index !== null && worker.leased_task_index !== undefined) {
+    machine.active_shards += 1;
+  }
+
+  if (worker.is_online) {
+    machine.is_online = true;
+  }
+
+  machine.status = mergeMachineStatus(machine.status, worker.status);
+
+  for (const [deckId, wins] of Object.entries(worker.deck_wins ?? {})) {
+    machine.deck_wins[deckId] = (machine.deck_wins[deckId] ?? 0) + Number(wins ?? 0);
+  }
+
+  if (machine.seconds_since_seen === null || (worker.seconds_since_seen ?? Number.POSITIVE_INFINITY) < machine.seconds_since_seen) {
+    machine.seconds_since_seen = worker.seconds_since_seen ?? null;
+  }
+
+  const workerProgressRank = worker.seconds_since_progress ?? Number.POSITIVE_INFINITY;
+  if (workerProgressRank < machine._lastProgressRank) {
+    machine._lastProgressRank = workerProgressRank;
+    machine._lastProgressValue = worker.last_duration_seconds ?? null;
+    machine.hostname = worker.hostname ?? machine.hostname;
+    machine.platform = worker.platform ?? machine.platform;
+  }
+
+  if (worker.throughput_series?.length) {
+    for (const entry of worker.throughput_series) {
+      const existing = machine._seriesMap.get(entry.minute) ?? { ...entry };
+      existing.games = (existing.games ?? 0) + Number(entry.games ?? 0);
+      existing.actions = (existing.actions ?? 0) + Number(entry.actions ?? 0);
+      existing.turns = (existing.turns ?? 0) + Number(entry.turns ?? 0);
+      existing.samples = (existing.samples ?? 0) + Number(entry.samples ?? 0);
+      existing.duration_seconds = (existing.duration_seconds ?? 0) + Number(entry.duration_seconds ?? 0);
+      machine._seriesMap.set(entry.minute, existing);
+    }
+  }
+
+  machine.average_actions_per_game = machine.completed_games
+    ? machine.completed_actions / machine.completed_games
+    : 0;
+  machine.current_task_progress = machine.current_task_game_count
+    ? machine.current_task_completed_games / machine.current_task_game_count
+    : 0;
+  machine.last_duration_seconds = machine._lastProgressValue;
+  machine.throughput_series = [...machine._seriesMap.values()].sort((left, right) => left.minute.localeCompare(right.minute));
+}
+
+function mergeMachineStatus(currentStatus, workerStatus) {
+  const statusOrder = { busy: 0, idle: 1, stalled: 2, offline: 3 };
+  return (statusOrder[workerStatus] ?? 9) < (statusOrder[currentStatus] ?? 9)
+    ? workerStatus
+    : currentStatus;
 }
 
 function renderError(error) {

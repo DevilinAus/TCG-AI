@@ -28,6 +28,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Run a distributed Standard self-play worker.")
     parser.add_argument("--coordinator-url", required=True, help="Coordinator base URL, for example http://192.168.1.10:8787")
     parser.add_argument("--worker-id", default=None, help="Stable worker ID. Defaults to hostname-pid.")
+    parser.add_argument("--machine-name", default=None, help="Human-friendly machine label used for dashboard grouping.")
     parser.add_argument("--poll-seconds", type=float, default=5.0)
     parser.add_argument("--request-timeout-seconds", type=float, default=30.0)
     parser.add_argument("--heartbeat-interval-seconds", type=float, default=30.0)
@@ -38,15 +39,18 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     worker_id = args.worker_id or f"{socket.gethostname()}-{os_getpid()}"
+    machine_name = args.machine_name or socket.gethostname()
     coordinator_url = args.coordinator_url.rstrip("/")
     worker_meta = {
         "hostname": socket.gethostname(),
+        "machine_name": machine_name,
         "platform": platform.platform(),
         "python_version": sys.version.split()[0],
         "poll_seconds": args.poll_seconds,
         "heartbeat_interval_seconds": args.heartbeat_interval_seconds,
     }
     print(f"[worker] worker_id={worker_id}")
+    print(f"[worker] machine_name={machine_name}")
     print(f"[worker] coordinator={coordinator_url}")
     while True:
         lease_response = _post_json(
