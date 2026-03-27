@@ -29,24 +29,21 @@ DEFAULT_SELF_PLAY_ROOT = PROJECT_ROOT / "standard_ml_data" / "self_play"
 DEFAULT_CHECKPOINT_ROOT = PROJECT_ROOT / "standard_ml_data" / "checkpoints"
 torch = None
 F = None
-DataLoader = None
 
 
 def _require_torch_modules():
-    global torch, F, DataLoader
-    if torch is not None and F is not None and DataLoader is not None:
+    global torch, F
+    if torch is not None and F is not None:
         return
     try:
         import torch as torch_module
         from torch.nn import functional as functional_module
-        from torch.utils.data import DataLoader as dataloader_class
     except Exception as exc:  # pragma: no cover - runtime dependency path
         raise SystemExit(
             "PyTorch is required for training. Install the optional standard-ml dependencies before running this script."
         ) from exc
     torch = torch_module
     F = functional_module
-    DataLoader = dataloader_class
 
 
 class SelfPlayDecisionDataset:
@@ -153,21 +150,12 @@ def main() -> int:
         validation_bucket=args.validation_bucket,
         max_records=args.max_eval_records,
     )
-    train_loader = DataLoader(
-        train_dataset,
-        batch_size=max(1, args.batch_size),
-        collate_fn=_collate_training_batch,
-    )
-    eval_loader = DataLoader(
-        eval_dataset,
-        batch_size=max(1, args.batch_size),
-        collate_fn=_collate_training_batch,
-    )
+    batch_size = max(1, args.batch_size)
 
     print(
         "[train] "
         f"input={input_dir} output={output_dir} device={device} "
-        f"files={len(decision_paths)} batch_size={args.batch_size}"
+        f"files={len(decision_paths)} batch_size={batch_size}"
     )
 
     global_step = 0
@@ -181,7 +169,7 @@ def main() -> int:
             "batches": 0,
             "samples": 0,
         }
-        for batch in train_loader:
+        for batch in _iter_collated_batches(train_dataset, batch_size=batch_size):
             if batch is None:
                 continue
             global_step += 1
@@ -240,7 +228,7 @@ def main() -> int:
 
         eval_metrics = _run_eval(
             model=model,
-            eval_loader=eval_loader,
+            eval_loader=_iter_collated_batches(eval_dataset, batch_size=batch_size),
             device=device,
             max_batches=max(0, args.eval_batches),
             value_loss_weight=args.value_loss_weight,
@@ -345,6 +333,17 @@ def _collate_training_batch(samples: list[dict[str, object]]):
         "chosen_indices": chosen_indices,
         "value_targets": value_targets,
     }
+
+
+def _iter_collated_batches(dataset: Iterable[dict[str, object]], *, batch_size: int) -> Iterable[dict[str, object] | None]:
+    pending: list[dict[str, object]] = []
+    for sample in dataset:
+        pending.append(sample)
+        if len(pending) >= batch_size:
+            yield _collate_training_batch(pending)
+            pending = []
+    if pending:
+        yield _collate_training_batch(pending)
 
 
 def _move_batch_to_device(batch: dict[str, torch.Tensor], device: torch.device) -> dict[str, torch.Tensor]:

@@ -1,3 +1,7 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
 [project]
 name = "tcg-ai"
 version = "0.1.0"
@@ -17,3 +21,8 @@ standard-ml = [
 
 [tool.pytest.ini_options]
 pythonpath = ["."]
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["backend*"]
+exclude = ["frontend*", "tests*", "standard_ml_data*", "docs*", "scripts*"]
