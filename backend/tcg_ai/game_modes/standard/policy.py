@@ -9,12 +9,15 @@ from urllib.parse import urlsplit, urlunsplit
 
 from .decision_payload import build_decision_request
 from .engine import action_id_for, apply_action_for_player, card_definition, list_legal_actions
+from .ml.canonical_state import serialize_state
+from .ml.planner import PlannerConfig
 from .models import GameState
 from .policy_store import OpenerPolicyStats, StandardPolicyStore
 
 DEFAULT_REMOTE_TIMEOUT_MS = 2_000
 DEFAULT_EXPLORATION_RATE = 0.20
 DEFAULT_MIN_EXPLORATION_RATE = 0.05
+FULL_STATE_REQUEST_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -219,7 +222,7 @@ class StandardDecisionProvider:
         }
 
     def _remember_decision(self, request: DecisionRequest, result: DecisionResult) -> None:
-        chosen_card_id = _action_card_id(request.state, result.chosen_action)
+        chosen_card_id = _chosen_card_id_for_action(request.state, result.chosen_action)
         self.last_decision = {
             "decision_id": request.decision_id,
             "decision_type": request.decision_type,
@@ -378,6 +381,13 @@ class FallbackStandardDecisionProvider(StandardDecisionProvider):
         )
 
     def choose_action(self, request: DecisionRequest) -> DecisionResult:
+        if request.decision_type != "opening_active":
+            if not self.config.remote_enabled or not self.config.remote_url:
+                raise StandardRemoteDecisionError("Remote Standard policy is disabled.")
+            result = self._remote.choose_action(request)
+            self._remember_decision(request, result)
+            return result
+
         if self.config.remote_enabled and self.config.remote_url:
             try:
                 result = self._remote.choose_action(request)
@@ -475,10 +485,59 @@ def runtime_snapshot(runtime: StandardDecisionRuntime | None) -> dict[str, Any]:
     return runtime.provider.snapshot()
 
 
+def build_turn_action_request(
+    state: GameState,
+    *,
+    runtime: StandardDecisionRuntime,
+    acting_player_index: int,
+    legal_actions: list[dict[str, Any]],
+) -> DecisionRequest:
+    decision_id = runtime.next_decision_id("turn_action", state.turn_number, acting_player_index)
+    payload = {
+        "schema_version": FULL_STATE_REQUEST_SCHEMA_VERSION,
+        "decision_id": decision_id,
+        "decision_type": "turn_action",
+        "session_id": runtime.provider.session_id,
+        "turn_number": state.turn_number,
+        "acting_player_index": acting_player_index,
+        "search_config": _serialize_planner_config(PlannerConfig()),
+        "state": serialize_state(state),
+    }
+    return DecisionRequest(
+        state=state,
+        acting_player_index=acting_player_index,
+        decision_type="turn_action",
+        decision_id=decision_id,
+        legal_actions=legal_actions,
+        payload=payload,
+    )
+
+
 def _action_card_id(state: GameState, action: dict[str, Any]) -> str:
     if action["type"] != "play_basic_to_active":
         raise ValueError(f"Unsupported Standard policy action type: {action['type']}")
     return card_definition(state, action["hand_card_id"]).card_id
+
+
+def _chosen_card_id_for_action(state: GameState, action: dict[str, Any]) -> str | None:
+    if action.get("type") == "play_basic_to_active":
+        return _action_card_id(state, action)
+    hand_card_id = action.get("hand_card_id")
+    if isinstance(hand_card_id, str):
+        try:
+            return card_definition(state, hand_card_id).card_id
+        except Exception:
+            return None
+    return None
+
+
+def _serialize_planner_config(config: PlannerConfig) -> dict[str, Any]:
+    return {
+        "max_depth": int(config.max_depth),
+        "beam_width": int(config.beam_width),
+        "opponent_branch_width": int(config.opponent_branch_width),
+        "include_opponent_turn": bool(config.include_opponent_turn),
+    }
 
 
 def _exploit_sort_key(stats: OpenerPolicyStats, card_id: str) -> tuple[float, float, int, str]:

@@ -2096,6 +2096,106 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(ai_step["ai_step"]["action"]["type"], "play_energy")
         self.assertEqual(ai_step["ai_step"]["delay_ms"], 0)
 
+    def test_standard_remote_ai_step_uses_full_state_decision_endpoint_without_batch_eval(self) -> None:
+        from backend.tcg_ai.game_modes.standard.engine import action_id_for, list_legal_actions
+
+        app = TcgApplication(
+            trainer_state_path=self.state_path,
+            standard_policy_state_path=self.policy_state_path,
+            standard_policy_config=StandardPolicyConfig(
+                remote_enabled=True,
+                remote_url="http://127.0.0.1:8100/api/standard-ml/decision",
+                remote_batch_eval_url="http://127.0.0.1:8100/api/standard-ml/batch-eval",
+            ),
+        )
+
+        state, session = self._start_standard_remote_ai_turn(app)
+        energy_id = self._move_standard_named_card_to_hand(session.state, 1, "Basic Fighting Energy")
+        self._set_standard_exact_hand(session.state, 1, [energy_id])
+        request_payloads: list[dict[str, object]] = []
+        request_urls: list[str] = []
+
+        def fake_remote_decision(request, timeout):
+            del timeout
+            if request.full_url.endswith("/batch-eval"):
+                raise AssertionError("live remote turns should not call /batch-eval")
+            request_urls.append(request.full_url)
+            payload = json.loads((request.data or b"{}").decode("utf-8"))
+            request_payloads.append(payload)
+            self.assertEqual(payload["decision_type"], "turn_action")
+            self.assertIn("state", payload)
+            self.assertIn("search_config", payload)
+            self.assertNotIn("legal_actions", payload)
+            legal_actions = list_legal_actions(session.state, player_index=1)
+            chosen_action = next(action for action in legal_actions if action["type"] == "play_energy")
+            return _FakeResponse(
+                {
+                    "decision_id": payload["decision_id"],
+                    "chosen_action_id": action_id_for(chosen_action),
+                    "diagnostics": {"planner": "remote"},
+                }
+            )
+
+        with patch(
+            "backend.tcg_ai.game_modes.standard.policy.urllib_request.urlopen",
+            side_effect=fake_remote_decision,
+        ):
+            ai_step = app.ai_step({"session_id": state["session_id"]})
+
+        self.assertEqual(ai_step["ai_step"]["action"]["type"], "play_energy")
+        self.assertEqual(request_urls, ["http://127.0.0.1:8100/api/standard-ml/decision"])
+        self.assertIn("cards", request_payloads[0]["state"])
+
+    def test_standard_remote_ai_turn_uses_full_state_decision_endpoint_without_batch_eval(self) -> None:
+        from backend.tcg_ai.game_modes.standard.engine import action_id_for, list_legal_actions
+
+        app = TcgApplication(
+            trainer_state_path=self.state_path,
+            standard_policy_state_path=self.policy_state_path,
+            standard_policy_config=StandardPolicyConfig(
+                remote_enabled=True,
+                remote_url="http://127.0.0.1:8100/api/standard-ml/decision",
+                remote_batch_eval_url="http://127.0.0.1:8100/api/standard-ml/batch-eval",
+            ),
+        )
+
+        state, session = self._start_standard_remote_ai_turn(app)
+        energy_id = self._move_standard_named_card_to_hand(session.state, 1, "Basic Fighting Energy")
+        self._set_standard_exact_hand(session.state, 1, [energy_id])
+        request_urls: list[str] = []
+
+        def fake_remote_decision(request, timeout):
+            del timeout
+            if request.full_url.endswith("/batch-eval"):
+                raise AssertionError("live remote turns should not call /batch-eval")
+            request_urls.append(request.full_url)
+            payload = json.loads((request.data or b"{}").decode("utf-8"))
+            legal_actions = list_legal_actions(session.state, player_index=1)
+            if any(action["type"] == "play_energy" for action in legal_actions):
+                chosen_action = next(action for action in legal_actions if action["type"] == "play_energy")
+            elif any(action["type"] == "attack" for action in legal_actions):
+                chosen_action = next(action for action in legal_actions if action["type"] == "attack")
+            else:
+                chosen_action = legal_actions[0]
+            return _FakeResponse(
+                {
+                    "decision_id": payload["decision_id"],
+                    "chosen_action_id": action_id_for(chosen_action),
+                    "diagnostics": {"planner": "remote"},
+                }
+            )
+
+        with patch(
+            "backend.tcg_ai.game_modes.standard.policy.urllib_request.urlopen",
+            side_effect=fake_remote_decision,
+        ):
+            replay = app.ai_turn({"session_id": state["session_id"]})
+
+        step_types = [step["action"]["type"] for step in replay["ai_turn_replay"]["steps"]]
+        self.assertEqual(step_types, ["play_energy", "end_turn"])
+        self.assertTrue(request_urls)
+        self.assertTrue(all(url == "http://127.0.0.1:8100/api/standard-ml/decision" for url in request_urls))
+
     def test_standard_remote_ai_turn_replay_skips_fake_replay_delay(self) -> None:
         app = TcgApplication(
             trainer_state_path=self.state_path,
@@ -2224,6 +2324,54 @@ class ApiTests(unittest.TestCase):
                 if state.cards[instance_id].card_id == card_id:
                     return instance_id
         self.fail(f"Could not find instance of {card_id} for player {player_index}")
+
+    def _start_standard_remote_ai_turn(self, app: TcgApplication):
+        with patch(
+            "backend.tcg_ai.server.urllib_request.urlopen",
+            return_value=_FakeResponse(
+                {
+                    "ready": True,
+                    "backend": "torch:cuda",
+                    "model_loaded": True,
+                    "checkpoint_path": "/models/champion.pt",
+                }
+            ),
+        ):
+            state = app.new_game(
+                {
+                    "game_mode": "standard",
+                    "human_first": True,
+                    "human_deck_id": "ampharos-ex-battle-deck",
+                    "seed": 1,
+                    "standard_ai_mode": "remote",
+                }
+            )
+        session = app.sessions.get(state["session_id"])
+        after_active = app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": state["legal_actions"][0]["action"],
+            }
+        )
+        end_setup_action = next(
+            action for action in after_active["legal_actions"] if action["type"] == "end_setup"
+        )
+        after_setup = app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": end_setup_action["action"],
+            }
+        )
+        end_turn_action = next(
+            action for action in after_setup["legal_actions"] if action["type"] == "end_turn"
+        )
+        app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": end_turn_action["action"],
+            }
+        )
+        return state, session
 
     def assertDelayInRange(self, delay_ms: int) -> None:
         self.assertGreaterEqual(delay_ms, AI_ACTION_DELAY_MIN_MS)
