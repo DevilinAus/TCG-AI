@@ -159,7 +159,7 @@ class StandardTurnPlanner:
         legal_actions: list[dict[str, Any]],
         root_player_index: int,
     ) -> list[RankedAction]:
-        oracle_result = self.oracle.evaluate_batch(
+        oracle_result = self._evaluate_requests(
             [
                 PolicyValueRequest(
                     state=state,
@@ -171,21 +171,50 @@ class StandardTurnPlanner:
         )[0]
         baseline_score = oracle_result.value
         ranked: list[RankedAction] = []
+        simulated_actions: list[tuple[dict[str, Any], str, GameState, int, list[dict[str, Any]]]] = []
         for action in legal_actions:
             simulated_state = deepcopy(state)
             apply_action_for_player(simulated_state, action, acting_player_index)
-            one_step_score = self._evaluate_state_value(
-                simulated_state,
-                simulated_state.current_player,
-                root_player_index,
-            )
             action_id = _safe_action_id(action)
+            next_player_index = simulated_state.current_player
+            next_legal_actions = list_legal_actions(
+                simulated_state,
+                player_index=next_player_index,
+            )
+            simulated_actions.append(
+                (
+                    action,
+                    action_id,
+                    simulated_state,
+                    next_player_index,
+                    next_legal_actions,
+                )
+            )
+        one_step_requests = [
+            PolicyValueRequest(
+                state=simulated_state,
+                acting_player_index=next_player_index,
+                root_player_index=root_player_index,
+                legal_actions=next_legal_actions,
+            )
+            for _, _, simulated_state, next_player_index, next_legal_actions in simulated_actions
+        ]
+        one_step_results = self._evaluate_requests(one_step_requests)
+        for (
+            action,
+            action_id,
+            simulated_state,
+            _next_player_index,
+            _next_legal_actions,
+        ), one_step_result in zip(simulated_actions, one_step_results):
+            one_step_score = float(one_step_result.value)
             prior = float(oracle_result.action_priors.get(action_id, 0.0))
             continuation_score = self._same_turn_continuation_score(
                 simulated_state,
                 acting_player_index=acting_player_index,
                 root_player_index=root_player_index,
                 max_steps=2,
+                current_score=one_step_score,
             )
             rank_score = round(
                 one_step_score
@@ -214,8 +243,13 @@ class StandardTurnPlanner:
         acting_player_index: int,
         root_player_index: int,
         max_steps: int,
+        current_score: float | None = None,
     ) -> float:
-        best_score = self._evaluate_state_value(state, state.current_player, root_player_index)
+        best_score = (
+            float(current_score)
+            if current_score is not None
+            else self._evaluate_state_value(state, state.current_player, root_player_index)
+        )
         if max_steps <= 0 or state.winner is not None or state.current_player != acting_player_index:
             return best_score
 
@@ -242,14 +276,43 @@ class StandardTurnPlanner:
                 _safe_action_id(action),
             ),
         )[:6]
+        followup_states: list[tuple[dict[str, Any], GameState, int, list[dict[str, Any]]]] = []
         for followup in ordered_followups:
             simulated_state = deepcopy(state)
             apply_action_for_player(simulated_state, followup, acting_player_index)
+            next_player_index = simulated_state.current_player
+            next_legal_actions = list_legal_actions(
+                simulated_state,
+                player_index=next_player_index,
+            )
+            followup_states.append(
+                (
+                    followup,
+                    simulated_state,
+                    next_player_index,
+                    next_legal_actions,
+                )
+            )
+        followup_requests = [
+            PolicyValueRequest(
+                state=simulated_state,
+                acting_player_index=next_player_index,
+                root_player_index=root_player_index,
+                legal_actions=next_legal_actions,
+            )
+            for _, simulated_state, next_player_index, next_legal_actions in followup_states
+        ]
+        followup_results = self._evaluate_requests(followup_requests)
+        for (_, simulated_state, _next_player_index, _next_legal_actions), followup_result in zip(
+            followup_states,
+            followup_results,
+        ):
             followup_score = self._same_turn_continuation_score(
                 simulated_state,
                 acting_player_index=acting_player_index,
                 root_player_index=root_player_index,
                 max_steps=max_steps - 1,
+                current_score=float(followup_result.value),
             )
             if followup_score > best_score:
                 best_score = followup_score
@@ -273,7 +336,7 @@ class StandardTurnPlanner:
         root_player_index: int,
     ) -> float:
         legal_actions = list_legal_actions(state, player_index=acting_player_index)
-        result = self.oracle.evaluate_batch(
+        result = self._evaluate_requests(
             [
                 PolicyValueRequest(
                     state=state,
@@ -284,6 +347,14 @@ class StandardTurnPlanner:
             ]
         )[0]
         return float(result.value)
+
+    def _evaluate_requests(
+        self,
+        requests: list[PolicyValueRequest],
+    ):
+        if not requests:
+            return []
+        return self.oracle.evaluate_batch(requests)
 
 
 def _safe_action_id(action: dict[str, Any]) -> str:
