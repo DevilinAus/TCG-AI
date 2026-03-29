@@ -33,7 +33,7 @@ def serialize_state(
         "shared_assets": {
             "face_down_card_image_url": facedown_card_image_url(),
         },
-        "log": _serialize_log_entries(state.log[-30:]),
+        "log": _serialize_log_entries(state.log[-30:], state=state, viewer=viewer),
         "players": [
             _serialize_player_state(state, index, viewer, action_views)
             for index in range(len(state.players))
@@ -521,11 +521,22 @@ def _serialize_attack_target_ref(
     return None
 
 
-def _serialize_log_entries(entries: list[str]) -> list[dict[str, str]]:
-    return [_serialize_log_entry(entry) for entry in entries]
+def _serialize_log_entries(
+    entries: list[str],
+    *,
+    state: GameState,
+    viewer: int,
+) -> list[dict[str, str]]:
+    return [_serialize_log_entry(entry, state=state, viewer=viewer) for entry in entries]
 
 
-def _serialize_log_entry(entry: str) -> dict[str, str]:
+def _serialize_log_entry(
+    entry: str,
+    *,
+    state: GameState,
+    viewer: int,
+) -> dict[str, str]:
+    entry = _redact_hidden_log_text(entry, state=state, viewer=viewer)
     side = "system"
     if entry.startswith("You ") or entry.startswith("Your "):
         side = "human"
@@ -537,6 +548,37 @@ def _serialize_log_entry(entry: str) -> dict[str, str]:
         kind = "draw"
 
     return {"text": entry, "side": side, "kind": kind}
+
+
+def _redact_hidden_log_text(
+    entry: str,
+    *,
+    state: GameState,
+    viewer: int,
+) -> str:
+    if viewer < 0 or viewer >= len(state.players):
+        return entry
+    for player_index, player in enumerate(state.players):
+        if player_index == viewer:
+            continue
+        prefix = f"{player.name} drew "
+        if not entry.startswith(prefix):
+            continue
+        remainder = entry[len(prefix):].strip()
+        if _is_public_draw_log_remainder(remainder):
+            return entry
+        return f"{player.name} drew a card."
+    return entry
+
+
+def _is_public_draw_log_remainder(remainder: str) -> bool:
+    if not remainder:
+        return False
+    if remainder.startswith("a card"):
+        return True
+    if remainder.startswith("no card"):
+        return True
+    return remainder[0].isdigit()
 
 
 def _ref_matches(reference: dict[str, Any] | None, expected: dict[str, Any]) -> bool:

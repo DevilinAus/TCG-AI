@@ -13,7 +13,7 @@ from backend.tcg_ai.server import (
     TcgApplication,
 )
 from backend.tcg_ai.game_modes.standard.cards import load_deck_cards
-from backend.tcg_ai.game_modes.standard.policy import StandardPolicyConfig
+from backend.tcg_ai.game_modes.standard.policy import StandardPolicyConfig, StandardRemoteDecisionError
 from backend.tcg_ai.learning import RewardLearner
 from backend.tcg_ai.models import PokemonInPlay
 
@@ -1770,6 +1770,47 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(ai_step["players"][1]["active"]["attached_energy"][0]["name"], "Basic Fighting Energy")
         self.assertIn("attached Basic Fighting Energy", ai_step["log"][-1]["text"])
 
+    def test_standard_player_view_redacts_opponent_named_turn_draw(self) -> None:
+        state = self.app.new_game(
+            {
+                "game_mode": "standard",
+                "human_first": True,
+                "human_deck_id": "ampharos-ex-battle-deck",
+                "seed": 1,
+            }
+        )
+        session = self.app.sessions.get(state["session_id"])
+
+        after_active = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": state["legal_actions"][0]["action"],
+            }
+        )
+        end_setup_action = next(
+            action for action in after_active["legal_actions"] if action["type"] == "end_setup"
+        )
+        after_setup = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": end_setup_action["action"],
+            }
+        )
+        end_turn_action = next(
+            action for action in after_setup["legal_actions"] if action["type"] == "end_turn"
+        )
+        after_end_turn = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": end_turn_action["action"],
+            }
+        )
+
+        opponent_name = session.state.players[1].name
+        self.assertRegex(session.state.log[-1], rf"^{opponent_name} drew .+\.$")
+        self.assertNotEqual(after_end_turn["log"][-1]["text"], session.state.log[-1])
+        self.assertEqual(after_end_turn["log"][-1]["text"], f"{opponent_name} drew a card.")
+
     def test_new_game_can_select_a_human_deck_and_exposes_available_decks(self) -> None:
         state = self.app.new_game({"human_first": True, "human_deck_id": "bulbasaur"})
 
@@ -1980,6 +2021,154 @@ class ApiTests(unittest.TestCase):
         self.assertDelayInRange(second_step["ai_step"]["delay_ms"])
         self.assertEqual(second_step["players"][0]["active"]["damage"], 10)
         self.assertEqual(second_step["current_player"], 0)
+
+    def test_standard_remote_ai_step_skips_fake_replay_delay(self) -> None:
+        app = TcgApplication(
+            trainer_state_path=self.state_path,
+            standard_policy_state_path=self.policy_state_path,
+            standard_policy_config=StandardPolicyConfig(
+                remote_enabled=True,
+                remote_url="http://127.0.0.1:8100/api/standard-ml/decision",
+                remote_batch_eval_url="http://127.0.0.1:8100/api/standard-ml/batch-eval",
+            ),
+        )
+        app.learner.exploration_rate = 0.0
+
+        with patch(
+            "backend.tcg_ai.server.urllib_request.urlopen",
+            return_value=_FakeResponse(
+                {
+                    "ready": True,
+                    "backend": "torch:cuda",
+                    "model_loaded": True,
+                    "checkpoint_path": "/models/champion.pt",
+                }
+            ),
+        ):
+            state = app.new_game(
+                {
+                    "game_mode": "standard",
+                    "human_first": True,
+                    "human_deck_id": "ampharos-ex-battle-deck",
+                    "seed": 1,
+                    "standard_ai_mode": "remote",
+                }
+            )
+
+        session = app.sessions.get(state["session_id"])
+        after_active = app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": state["legal_actions"][0]["action"],
+            }
+        )
+        end_setup_action = next(
+            action for action in after_active["legal_actions"] if action["type"] == "end_setup"
+        )
+        after_setup = app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": end_setup_action["action"],
+            }
+        )
+        end_turn_action = next(
+            action for action in after_setup["legal_actions"] if action["type"] == "end_turn"
+        )
+        app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": end_turn_action["action"],
+            }
+        )
+
+        energy_id = self._move_standard_named_card_to_hand(session.state, 1, "Basic Fighting Energy")
+        self._set_standard_exact_hand(session.state, 1, [energy_id])
+
+        with patch(
+            "backend.tcg_ai.game_modes.standard.policy.RemoteStandardDecisionProvider.choose_action",
+            side_effect=StandardRemoteDecisionError("worker unavailable"),
+        ):
+            ai_step = app.ai_step({"session_id": state["session_id"]})
+
+        self.assertEqual(session.standard_ai_mode, "remote")
+        self.assertEqual(session.ai_replay_delay_ms, 0)
+        self.assertEqual(ai_step["standard_ai_mode"], "remote")
+        self.assertEqual(ai_step["ai_step"]["action"]["type"], "play_energy")
+        self.assertEqual(ai_step["ai_step"]["delay_ms"], 0)
+
+    def test_standard_remote_ai_turn_replay_skips_fake_replay_delay(self) -> None:
+        app = TcgApplication(
+            trainer_state_path=self.state_path,
+            standard_policy_state_path=self.policy_state_path,
+            standard_policy_config=StandardPolicyConfig(
+                remote_enabled=True,
+                remote_url="http://127.0.0.1:8100/api/standard-ml/decision",
+                remote_batch_eval_url="http://127.0.0.1:8100/api/standard-ml/batch-eval",
+            ),
+        )
+        app.learner.exploration_rate = 0.0
+
+        with patch(
+            "backend.tcg_ai.server.urllib_request.urlopen",
+            return_value=_FakeResponse(
+                {
+                    "ready": True,
+                    "backend": "torch:cuda",
+                    "model_loaded": True,
+                    "checkpoint_path": "/models/champion.pt",
+                }
+            ),
+        ):
+            state = app.new_game(
+                {
+                    "game_mode": "standard",
+                    "human_first": True,
+                    "human_deck_id": "ampharos-ex-battle-deck",
+                    "seed": 1,
+                    "standard_ai_mode": "remote",
+                }
+            )
+
+        session = app.sessions.get(state["session_id"])
+        after_active = app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": state["legal_actions"][0]["action"],
+            }
+        )
+        end_setup_action = next(
+            action for action in after_active["legal_actions"] if action["type"] == "end_setup"
+        )
+        after_setup = app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": end_setup_action["action"],
+            }
+        )
+        end_turn_action = next(
+            action for action in after_setup["legal_actions"] if action["type"] == "end_turn"
+        )
+        app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": end_turn_action["action"],
+            }
+        )
+
+        energy_id = self._move_standard_named_card_to_hand(session.state, 1, "Basic Fighting Energy")
+        self._set_standard_exact_hand(session.state, 1, [energy_id])
+
+        with patch(
+            "backend.tcg_ai.game_modes.standard.policy.RemoteStandardDecisionProvider.choose_action",
+            side_effect=StandardRemoteDecisionError("worker unavailable"),
+        ):
+            replay = app.ai_turn({"session_id": state["session_id"]})
+
+        self.assertEqual(session.standard_ai_mode, "remote")
+        self.assertEqual(replay["standard_ai_mode"], "remote")
+        self.assertEqual(replay["ai_turn_replay"]["step_delay_ms"], 0)
+        self.assertTrue(replay["ai_turn_replay"]["steps"])
+        self.assertTrue(all(step["delay_ms"] == 0 for step in replay["ai_turn_replay"]["steps"]))
 
     def test_promotion_actions_reference_a_benched_source_and_empty_active_target(self) -> None:
         state = self.app.new_game({"human_first": True})

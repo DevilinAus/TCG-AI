@@ -373,7 +373,9 @@ async function runAiTurn() {
   render(currentState);
   updateStatus("AI is thinking...");
   try {
-    await sleep(randomDelay(AI_HUMAN_DELAY_MIN_MS, AI_HUMAN_DELAY_MAX_MS));
+    if (!usesInstantStandardAiReplay(currentState)) {
+      await sleep(randomDelay(AI_HUMAN_DELAY_MIN_MS, AI_HUMAN_DELAY_MAX_MS));
+    }
     if (requestEpoch !== stateRequestEpoch) {
       return;
     }
@@ -405,7 +407,9 @@ async function runAiTurn() {
       updateStatus(buildAiReplayStatus(step));
       await waitForPaint();
 
-      await sleep(step.delay_ms || FALLBACK_AI_STEP_DELAY_MS);
+      if ((step.delay_ms ?? FALLBACK_AI_STEP_DELAY_MS) > 0) {
+        await sleep(step.delay_ms || FALLBACK_AI_STEP_DELAY_MS);
+      }
       if (requestEpoch !== stateRequestEpoch) {
         return;
       }
@@ -450,7 +454,9 @@ async function runAiTurnReplayFallback() {
       break;
     }
 
-    await sleep(replayStep.delay_ms || FALLBACK_AI_STEP_DELAY_MS);
+    if ((replayStep.delay_ms ?? FALLBACK_AI_STEP_DELAY_MS) > 0) {
+      await sleep(replayStep.delay_ms || FALLBACK_AI_STEP_DELAY_MS);
+    }
     if (requestEpoch !== stateRequestEpoch) {
       return;
     }
@@ -499,6 +505,10 @@ function resolveStandardAiMode(state) {
     state?.standard_ai_mode ||
     "local"
   );
+}
+
+function usesInstantStandardAiReplay(state) {
+  return resolveGameMode(state) === "standard" && resolveStandardAiMode(state) === "remote";
 }
 
 function resolveGameModeMetadata(state) {
