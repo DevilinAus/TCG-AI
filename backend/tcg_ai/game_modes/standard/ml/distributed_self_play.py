@@ -52,6 +52,7 @@ class DistributedSelfPlayCoordinator:
         self.state_path = self.output_dir / "coordinator_state.json"
         self.summary_path = self.output_dir / "summary.json"
         self.manifest_path = self.output_dir / "manifest.json"
+        self.completion_flag_path = self.output_dir / "RUN_COMPLETE"
         self._lock = threading.RLock()
         self._last_progress_persist_monotonic = 0.0
         self._recovery_report: dict[str, Any] = {
@@ -546,6 +547,22 @@ class DistributedSelfPlayCoordinator:
             **state["aggregate"],
         }
         _atomic_write_json(self.summary_path, payload)
+        self._write_completion_flag(completed_at=completed_at)
+
+    def _write_completion_flag(self, *, completed_at: datetime | None) -> None:
+        if completed_at is None:
+            try:
+                self.completion_flag_path.unlink()
+            except FileNotFoundError:
+                return
+            return
+        _atomic_write_json(
+            self.completion_flag_path,
+            {
+                "run_id": self.run_id,
+                "completed_at": completed_at.isoformat(),
+            },
+        )
 
     def _task_entry(self, task_index: int) -> dict[str, Any] | None:
         for entry in self._state["tasks"]:
