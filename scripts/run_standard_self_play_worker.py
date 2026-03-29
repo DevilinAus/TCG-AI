@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 from pathlib import Path
 import platform
 import socket
@@ -30,9 +31,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--worker-id", default=None, help="Stable worker ID. Defaults to hostname-pid.")
     parser.add_argument("--machine-name", default=None, help="Human-friendly machine label used for dashboard grouping.")
     parser.add_argument("--poll-seconds", type=float, default=5.0)
+    parser.add_argument(
+        "--reconnect-seconds",
+        type=float,
+        default=300.0,
+        help="How long to wait before retrying after the coordinator is unreachable.",
+    )
     parser.add_argument("--request-timeout-seconds", type=float, default=30.0)
     parser.add_argument("--heartbeat-interval-seconds", type=float, default=30.0)
     parser.add_argument("--progress-log", type=Path, default=None, help="Optional local log file for worker progress.")
+    parser.add_argument(
+        "--exit-when-run-complete",
+        action="store_true",
+        help="Exit instead of idling when the coordinator reports that the current run is complete.",
+    )
     return parser.parse_args()
 
 
@@ -52,22 +64,29 @@ def main() -> int:
     print(f"[worker] worker_id={worker_id}")
     print(f"[worker] machine_name={machine_name}")
     print(f"[worker] coordinator={coordinator_url}")
+    print(f"[worker] reconnect_seconds={max(1.0, args.reconnect_seconds)}")
     while True:
-        lease_response = _post_json(
-            f"{coordinator_url}/api/standard-self-play/lease-chunk",
-            payload={
-                "worker_id": worker_id,
-                "worker_meta": worker_meta,
-            },
-            timeout_seconds=args.request_timeout_seconds,
+        lease_response = _call_coordinator_with_retries(
+            operation_label="lease request",
+            retry_interval_seconds=args.reconnect_seconds,
+            request=lambda: _post_json(
+                f"{coordinator_url}/api/standard-self-play/lease-chunk",
+                payload={
+                    "worker_id": worker_id,
+                    "worker_meta": worker_meta,
+                },
+                timeout_seconds=args.request_timeout_seconds,
+            ),
         )
         task_payload = lease_response.get("task")
         if task_payload is None:
-            if lease_response.get("run_complete"):
-                print("[worker] run complete; exiting")
+            if _handle_idle_lease_response(
+                lease_response=lease_response,
+                poll_seconds=args.poll_seconds,
+                reconnect_seconds=args.reconnect_seconds,
+                exit_when_run_complete=args.exit_when_run_complete,
+            ):
                 return 0
-            print("[worker] no chunk available yet; sleeping")
-            time.sleep(max(0.1, args.poll_seconds))
             continue
 
         task = self_play_task_from_payload(task_payload)
@@ -102,7 +121,7 @@ def main() -> int:
                     },
                     timeout_seconds=args.request_timeout_seconds,
                 )
-            except SystemExit as exc:
+            except (CoordinatorUnavailableError, CoordinatorRequestError) as exc:
                 print(f"[worker] progress update failed for shard={task.task_index:06d}: {exc}", file=sys.stderr)
 
         heartbeat_loop.start()
@@ -114,17 +133,21 @@ def main() -> int:
             )
         finally:
             heartbeat_loop.stop()
-        submit_response = _post_json(
-            f"{coordinator_url}/api/standard-self-play/submit-chunk",
-            payload={
-                "worker_id": worker_id,
-                "task_index": task.task_index,
-                "worker_meta": worker_meta,
-                "summary": chunk_result.summary,
-                "decisions_gzip_b64": encode_chunk_text_gzip_b64(chunk_result.decisions_jsonl),
-                "games_gzip_b64": encode_chunk_text_gzip_b64(chunk_result.games_jsonl),
-            },
-            timeout_seconds=max(args.request_timeout_seconds, 120.0),
+        submit_response = _call_coordinator_with_retries(
+            operation_label=f"submit shard={task.task_index:06d}",
+            retry_interval_seconds=args.reconnect_seconds,
+            request=lambda: _post_json(
+                f"{coordinator_url}/api/standard-self-play/submit-chunk",
+                payload={
+                    "worker_id": worker_id,
+                    "task_index": task.task_index,
+                    "worker_meta": worker_meta,
+                    "summary": chunk_result.summary,
+                    "decisions_gzip_b64": encode_chunk_text_gzip_b64(chunk_result.decisions_jsonl),
+                    "games_gzip_b64": encode_chunk_text_gzip_b64(chunk_result.games_jsonl),
+                },
+                timeout_seconds=max(args.request_timeout_seconds, 120.0),
+            ),
         )
         print(
             "[worker] "
@@ -133,8 +156,22 @@ def main() -> int:
             f"run_complete={submit_response.get('run_complete', False)}"
         )
         if submit_response.get("run_complete"):
-            print("[worker] coordinator reports run complete; exiting")
-            return 0
+            if args.exit_when_run_complete:
+                print("[worker] coordinator reports run complete; exiting")
+                return 0
+            print(
+                "[worker] coordinator reports run complete; "
+                f"idling for {_format_duration(args.reconnect_seconds)} before checking again"
+            )
+            time.sleep(max(1.0, args.reconnect_seconds))
+
+
+class CoordinatorUnavailableError(RuntimeError):
+    pass
+
+
+class CoordinatorRequestError(RuntimeError):
+    pass
 
 
 def _post_json(url: str, *, payload: dict[str, Any], timeout_seconds: float) -> dict[str, Any]:
@@ -150,16 +187,68 @@ def _post_json(url: str, *, payload: dict[str, Any], timeout_seconds: float) -> 
             raw = response.read().decode("utf-8")
     except urllib_error.HTTPError as exc:
         error_body = exc.read().decode("utf-8", errors="replace")
-        raise SystemExit(f"Request failed for {url}: {exc.code} {error_body}") from exc
+        message = f"Request failed for {url}: {exc.code} {error_body}"
+        if exc.code >= 500:
+            raise CoordinatorUnavailableError(message) from exc
+        raise CoordinatorRequestError(message) from exc
     except (urllib_error.URLError, TimeoutError, OSError) as exc:
-        raise SystemExit(f"Could not reach coordinator {url}: {exc}") from exc
+        raise CoordinatorUnavailableError(f"Could not reach coordinator {url}: {exc}") from exc
     try:
         decoded = json.loads(raw)
     except json.JSONDecodeError as exc:
-        raise SystemExit(f"Coordinator returned malformed JSON for {url}.") from exc
+        raise CoordinatorUnavailableError(f"Coordinator returned malformed JSON for {url}.") from exc
     if not isinstance(decoded, dict):
-        raise SystemExit(f"Coordinator returned malformed JSON object for {url}.")
+        raise CoordinatorUnavailableError(f"Coordinator returned malformed JSON object for {url}.")
     return decoded
+
+
+def _call_coordinator_with_retries(
+    *,
+    operation_label: str,
+    retry_interval_seconds: float,
+    request: Any,
+    sleep_fn: Any = None,
+) -> dict[str, Any]:
+    retry_interval_seconds = max(1.0, float(retry_interval_seconds))
+    sleep_fn = sleep_fn or time.sleep
+    while True:
+        try:
+            return request()
+        except CoordinatorUnavailableError as exc:
+            print(
+                f"[worker] {operation_label} failed: {exc}; "
+                f"retrying in {_format_duration(retry_interval_seconds)}",
+                file=sys.stderr,
+            )
+            sleep_fn(retry_interval_seconds)
+        except CoordinatorRequestError as exc:
+            raise SystemExit(str(exc)) from exc
+
+
+def _handle_idle_lease_response(
+    *,
+    lease_response: dict[str, Any],
+    poll_seconds: float,
+    reconnect_seconds: float,
+    exit_when_run_complete: bool,
+    sleep_fn: Any = None,
+) -> bool:
+    sleep_fn = sleep_fn or time.sleep
+    if lease_response.get("run_complete"):
+        if exit_when_run_complete:
+            print("[worker] run complete; exiting")
+            return True
+        idle_seconds = max(1.0, reconnect_seconds)
+        print(
+            "[worker] run complete for now; "
+            f"idling for {_format_duration(idle_seconds)} before checking again"
+        )
+        sleep_fn(idle_seconds)
+        return False
+    idle_seconds = max(0.1, poll_seconds)
+    print("[worker] no chunk available yet; sleeping")
+    sleep_fn(idle_seconds)
+    return False
 
 
 class LeaseHeartbeatLoop:
@@ -203,7 +292,7 @@ class LeaseHeartbeatLoop:
                     },
                     timeout_seconds=self.request_timeout_seconds,
                 )
-            except SystemExit as exc:
+            except (CoordinatorUnavailableError, CoordinatorRequestError) as exc:
                 print(f"[worker] heartbeat failed for shard={self.task_index:06d}: {exc}", file=sys.stderr)
 
 
@@ -218,6 +307,17 @@ def os_getpid() -> int:
     import os
 
     return os.getpid()
+
+
+def _format_duration(seconds: float) -> str:
+    total_seconds = max(1, int(math.ceil(seconds)))
+    minutes, remaining_seconds = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}h{minutes:02d}m"
+    if minutes:
+        return f"{minutes}m{remaining_seconds:02d}s"
+    return f"{remaining_seconds}s"
 
 
 if __name__ == "__main__":

@@ -64,7 +64,8 @@ print(
 )
 print(
     "recovery: "
-    f"completed_on_disk={recovery.get('completed_tasks_from_artifacts', 0)} "
+    f"picked_up_games={aggregate.get('games', 0)}/{payload.get('total_games_target', 0)} "
+    f"picked_up_tasks={payload.get('completed_tasks', 0)}/{payload.get('total_tasks', 0)} "
     f"legacy_upgrades={recovery.get('upgraded_legacy_summaries', 0)} "
     f"issues={recovery.get('integrity_issue_count', 0)}"
 )

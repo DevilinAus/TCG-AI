@@ -36,6 +36,7 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
         help="Number of worker processes to launch. Defaults to one per detected CPU core.",
     )
     parser.add_argument("--poll-seconds", type=float, default=5.0)
+    parser.add_argument("--reconnect-seconds", type=float, default=300.0)
     parser.add_argument("--request-timeout-seconds", type=float, default=30.0)
     parser.add_argument("--heartbeat-interval-seconds", type=float, default=15.0)
     parser.add_argument(
@@ -91,6 +92,7 @@ def build_worker_command(
     worker_id: str,
     machine_name: str,
     poll_seconds: float,
+    reconnect_seconds: float,
     request_timeout_seconds: float,
     heartbeat_interval_seconds: float,
     progress_log_dir: Path | None,
@@ -106,6 +108,8 @@ def build_worker_command(
         machine_name,
         "--poll-seconds",
         str(poll_seconds),
+        "--reconnect-seconds",
+        str(reconnect_seconds),
         "--request-timeout-seconds",
         str(request_timeout_seconds),
         "--heartbeat-interval-seconds",
@@ -128,6 +132,7 @@ def launch_worker_processes(
     worker_prefix: str,
     worker_count: int,
     poll_seconds: float,
+    reconnect_seconds: float,
     request_timeout_seconds: float,
     heartbeat_interval_seconds: float,
     progress_log_dir: Path | None,
@@ -149,6 +154,7 @@ def launch_worker_processes(
             worker_id=worker_id,
             machine_name=worker_prefix,
             poll_seconds=poll_seconds,
+            reconnect_seconds=reconnect_seconds,
             request_timeout_seconds=request_timeout_seconds,
             heartbeat_interval_seconds=heartbeat_interval_seconds,
             progress_log_dir=progress_log_dir,
@@ -210,6 +216,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         worker_prefix=resolve_worker_prefix(args.worker_prefix),
         worker_count=resolve_worker_count(args.workers),
         poll_seconds=args.poll_seconds,
+        reconnect_seconds=args.reconnect_seconds,
         request_timeout_seconds=args.request_timeout_seconds,
         heartbeat_interval_seconds=args.heartbeat_interval_seconds,
         progress_log_dir=args.progress_log_dir,

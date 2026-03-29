@@ -95,10 +95,12 @@ def main() -> int:
     print(f"[coordinator] dashboard=http://{args.host}:{args.port}/dashboard")
     print(f"[coordinator] status=http://{args.host}:{args.port}/api/standard-self-play/status")
     print(f"[coordinator] lease_timeout_seconds={args.lease_timeout_seconds}")
-    recovery = coordinator.status().get("recovery", {})
+    status = coordinator.status()
+    recovery = status.get("recovery", {})
     print(
         "[coordinator] recovery "
-        f"completed_on_disk={recovery.get('completed_tasks_from_artifacts', 0)} "
+        f"picked_up_games={status.get('aggregate', {}).get('games', 0)}/{status.get('total_games_target', 0)} "
+        f"picked_up_tasks={status.get('completed_tasks', 0)}/{status.get('total_tasks', 0)} "
         f"legacy_upgrades={recovery.get('upgraded_legacy_summaries', 0)} "
         f"issues={recovery.get('integrity_issue_count', 0)}"
     )

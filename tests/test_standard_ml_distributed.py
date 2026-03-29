@@ -20,6 +20,9 @@ from backend.tcg_ai.game_modes.standard.ml.self_play_jobs import (
     write_self_play_chunk_artifacts,
 )
 from scripts.run_standard_self_play_worker import LeaseHeartbeatLoop
+from scripts.run_standard_self_play_worker import _call_coordinator_with_retries
+from scripts.run_standard_self_play_worker import _handle_idle_lease_response
+from scripts.run_standard_self_play_worker import CoordinatorUnavailableError
 
 
 class DistributedStandardMlTests(unittest.TestCase):
@@ -314,6 +317,52 @@ class DistributedStandardMlTests(unittest.TestCase):
         self.assertEqual(payload["worker_id"], "worker-a")
         self.assertEqual(payload["task_index"], 3)
         self.assertEqual(timeout_seconds, 2.0)
+
+    def test_worker_retries_until_coordinator_returns(self) -> None:
+        attempts = {"count": 0}
+        sleep_calls: list[float] = []
+
+        def flaky_request() -> dict[str, object]:
+            attempts["count"] += 1
+            if attempts["count"] < 3:
+                raise CoordinatorUnavailableError("coordinator offline")
+            return {"ok": True}
+
+        response = _call_coordinator_with_retries(
+            operation_label="lease request",
+            retry_interval_seconds=300.0,
+            request=flaky_request,
+            sleep_fn=sleep_calls.append,
+        )
+
+        self.assertEqual(response, {"ok": True})
+        self.assertEqual(attempts["count"], 3)
+        self.assertEqual(sleep_calls, [300.0, 300.0])
+
+    def test_worker_stays_alive_when_run_is_complete(self) -> None:
+        sleep_calls: list[float] = []
+
+        should_exit = _handle_idle_lease_response(
+            lease_response={"task": None, "run_complete": True},
+            poll_seconds=5.0,
+            reconnect_seconds=300.0,
+            exit_when_run_complete=False,
+            sleep_fn=sleep_calls.append,
+        )
+
+        self.assertFalse(should_exit)
+        self.assertEqual(sleep_calls, [300.0])
+
+    def test_worker_can_exit_when_run_is_complete_if_requested(self) -> None:
+        should_exit = _handle_idle_lease_response(
+            lease_response={"task": None, "run_complete": True},
+            poll_seconds=5.0,
+            reconnect_seconds=300.0,
+            exit_when_run_complete=True,
+            sleep_fn=lambda _seconds: None,
+        )
+
+        self.assertTrue(should_exit)
 
 
 if __name__ == "__main__":

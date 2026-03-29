@@ -58,6 +58,7 @@ class StandardWorkerLauncherTests(unittest.TestCase):
                 worker_id="macbook-01",
                 machine_name="macbook",
                 poll_seconds=5.0,
+                reconnect_seconds=300.0,
                 request_timeout_seconds=30.0,
                 heartbeat_interval_seconds=15.0,
                 progress_log_dir=progress_dir,
@@ -71,6 +72,8 @@ class StandardWorkerLauncherTests(unittest.TestCase):
         self.assertIn("macbook-01", command)
         self.assertIn("--machine-name", command)
         self.assertIn("macbook", command)
+        self.assertIn("--reconnect-seconds", command)
+        self.assertIn("300.0", command)
         self.assertIn("--progress-log", command)
         self.assertIn(str(progress_dir / "macbook-01.log"), command)
 
