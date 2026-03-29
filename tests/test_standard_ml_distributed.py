@@ -1,4 +1,5 @@
 from __future__ import annotations
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 import tempfile
 import time
@@ -211,6 +212,77 @@ class DistributedStandardMlTests(unittest.TestCase):
         )
 
         self.assertTrue((self.output_dir / "RUN_COMPLETE").exists())
+
+    def test_status_reports_live_worker_counts_and_worker_overall_pace(self) -> None:
+        coordinator = DistributedSelfPlayCoordinator(
+            output_dir=self.output_dir,
+            run_id="run-live-workers",
+            run_config=SelfPlayRunConfig(
+                games=4,
+                chunk_size=2,
+                seed=77,
+            ),
+            lease_timeout_seconds=60,
+        )
+
+        coordinator.lease_chunk(
+            worker_id="worker-a",
+            worker_meta={"hostname": "host-a", "platform": "linux", "poll_seconds": 2, "heartbeat_interval_seconds": 5},
+        )
+        coordinator.record_progress(
+            worker_id="worker-a",
+            task_index=0,
+            worker_meta={"hostname": "host-a", "platform": "linux", "poll_seconds": 2, "heartbeat_interval_seconds": 5},
+            progress={
+                "local_game_index": 1,
+                "task_game_count": 2,
+                "global_game_index": 1,
+                "winner_deck_id": "ampharos-ex-battle-deck",
+                "turns": 8,
+                "actions": 32,
+                "samples": 4,
+                "truncated": False,
+                "duration_seconds": 1.0,
+            },
+        )
+
+        state = coordinator._state  # noqa: SLF001
+        now = datetime.now(UTC)
+        state["created_at"] = (now - timedelta(minutes=20)).isoformat()
+        worker_a = state["workers"]["worker-a"]
+        worker_a["first_seen_at"] = (now - timedelta(minutes=2)).isoformat()
+        worker_a["first_progress_at"] = (now - timedelta(minutes=2)).isoformat()
+        worker_a["last_seen_at"] = now.isoformat()
+        worker_a["last_progress_at"] = now.isoformat()
+
+        coordinator.lease_chunk(
+            worker_id="worker-b",
+            worker_meta={"hostname": "host-b", "platform": "linux", "poll_seconds": 2, "heartbeat_interval_seconds": 5},
+        )
+        stale_timestamp = (now - timedelta(minutes=10)).isoformat()
+        worker_b = state["workers"]["worker-b"]
+        worker_b["first_seen_at"] = None
+        worker_b["last_seen_at"] = stale_timestamp
+        worker_b["first_progress_at"] = None
+        worker_b["last_progress_at"] = None
+        worker_b["completed_games"] = 2
+        worker_b["leased_task_index"] = None
+        worker_b["current_task_started_at"] = None
+        worker_b["current_task_game_count"] = 0
+        worker_b["current_task_completed_games"] = 0
+        state["tasks"][1]["status"] = "pending"
+        state["tasks"][1]["leased_by"] = None
+        state["tasks"][1]["leased_at"] = None
+        state["tasks"][1]["lease_expires_at"] = None
+
+        status = coordinator.status()
+
+        self.assertEqual(status["known_workers"], 2)
+        self.assertEqual(status["online_workers"], 1)
+        self.assertEqual(status["busy_workers"], 1)
+        self.assertEqual(status["workers"]["worker-b"]["status"], "offline")
+        self.assertGreater(status["workers"]["worker-a"]["games_per_minute_overall"], 0.0)
+        self.assertGreater(status["workers"]["worker-b"]["games_per_minute_overall"], 0.0)
 
     def test_coordinator_recovers_completed_shards_from_disk(self) -> None:
         write_self_play_chunk_artifacts(
