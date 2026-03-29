@@ -5,6 +5,7 @@ import mimetypes
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import secrets
 import threading
@@ -13,6 +14,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlparse
 from urllib import error as urllib_error, request as urllib_request
 
+from .env_utils import load_project_env
 from .logging_utils import configure_tcg_ai_logging, default_log_path, get_logger
 from .game_modes import (
     DEFAULT_GAME_MODE,
@@ -886,16 +888,32 @@ def build_server(
 
 
 def run_server(host: str = "127.0.0.1", port: int = 8000) -> None:
+    env_sources = load_project_env(prefixes=("TCG_AI_",))
     log_path = default_log_path("backend-server.log")
     configure_tcg_ai_logging(log_file=log_path)
     application = TcgApplication()
     server = build_server(host=host, port=port, application=application)
+    if env_sources:
+        logger.info(
+            "loaded project env overrides files=%s keys=%s",
+            sorted(set(env_sources.values())),
+            sorted(env_sources),
+        )
+    raw_timeout_ms = os.environ.get("TCG_AI_STANDARD_REMOTE_TIMEOUT_MS")
+    if "TCG_AI_STANDARD_REMOTE_TIMEOUT_MS" in env_sources:
+        timeout_source = env_sources["TCG_AI_STANDARD_REMOTE_TIMEOUT_MS"]
+    elif raw_timeout_ms is not None:
+        timeout_source = "process environment"
+    else:
+        timeout_source = "code default"
     logger.info("backend server logging to %s", log_path)
     logger.info(
-        "standard remote config enabled=%s url=%s timeout_ms=%s",
+        "standard remote config enabled=%s url=%s timeout_ms=%s timeout_source=%s raw_timeout_ms=%s",
         application.standard_policy_config.remote_enabled,
         application.standard_policy_config.remote_url,
         application.standard_policy_config.remote_timeout_ms,
+        timeout_source,
+        raw_timeout_ms,
     )
     print(f"Serving TCG AI starter at http://{host}:{port}")
     try:

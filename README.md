@@ -184,6 +184,8 @@ export TCG_AI_STANDARD_REMOTE_TIMEOUT_MS=1800000
 export TCG_AI_STANDARD_REMOTE_API_TOKEN=<shared-token>
 ```
 
+If your terminal or VS Code session keeps old `TCG_AI_*` exports around, you can put the current values in `.env.local` at the repo root. The backend now loads `.env` and then `.env.local` on startup, and those project-local values override stale shell values.
+
 Launch the worker:
 
 ```bash
