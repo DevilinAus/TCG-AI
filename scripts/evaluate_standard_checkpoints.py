@@ -14,7 +14,7 @@ import shutil
 import threading
 import sys
 import time
-from typing import Any
+from typing import Any, Callable
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
@@ -42,6 +42,16 @@ EVAL_ASSIGNMENTS = (
     {"player0_deck_id": "ampharos-ex-battle-deck", "candidate_player_index": 1},
 )
 _PROGRESS_LOG_LOCK = threading.Lock()
+_EVAL_SPINNER_FRAMES = (
+    "[o....]",
+    "[.o...]",
+    "[..o..]",
+    "[...o.]",
+    "[....o]",
+    "[...o.]",
+    "[..o..]",
+    "[.o...]",
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -169,34 +179,27 @@ def main() -> int:
             }
         )
 
-    aggregate = {
-        "games": 0,
-        "candidate_wins": 0,
-        "baseline_wins": 0,
-        "draws": 0,
-        "truncated": 0,
-        "candidate_deck_wins": {
-            "ampharos-ex-battle-deck": 0,
-            "lucario-ex-battle-deck": 0,
-        },
-        "baseline_deck_wins": {
-            "ampharos-ex-battle-deck": 0,
-            "lucario-ex-battle-deck": 0,
-        },
-        "turns": 0,
-        "actions": 0,
-    }
+    aggregate = _new_aggregate()
     start_time = time.perf_counter()
     last_log_time = start_time
 
     if args.workers == 1:
-        for task in tasks:
-            chunk_summary = _run_evaluation_chunk(task)
-            _merge_chunk_summary(aggregate, chunk_summary)
-            now = time.perf_counter()
-            if now - last_log_time >= args.log_every_seconds or aggregate["games"] == args.games:
-                _print_progress(aggregate, total_games=args.games, start_time=start_time)
-                last_log_time = now
+        reporter = _SingleWorkerProgressReporter(
+            total_games=args.games,
+            start_time=start_time,
+            log_interval_seconds=args.log_every_seconds,
+        )
+        reporter.start()
+        try:
+            for task in tasks:
+                _run_evaluation_chunk(
+                    task,
+                    game_start_callback=reporter.begin_game,
+                    progress_callback=reporter.record_completed_game,
+                )
+        finally:
+            reporter.stop()
+        aggregate = reporter.aggregate_snapshot()
     else:
         with ProcessPoolExecutor(max_workers=args.workers) as executor:
             future_map = {executor.submit(_run_evaluation_chunk, task): task for task in tasks}
@@ -267,7 +270,12 @@ def main() -> int:
     return 0
 
 
-def _run_evaluation_chunk(task: dict[str, Any]) -> dict[str, Any]:
+def _run_evaluation_chunk(
+    task: dict[str, Any],
+    *,
+    game_start_callback: Callable[[dict[str, Any]], None] | None = None,
+    progress_callback: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
     output_dir = Path(str(task["output_dir"]))
     games_path = output_dir / "games" / f"shard_{int(task['task_index']):06d}.jsonl"
     planner_config = PlannerConfig(**dict(task["planner_config"]))
@@ -278,28 +286,21 @@ def _run_evaluation_chunk(task: dict[str, Any]) -> dict[str, Any]:
     baseline_oracle = _build_oracle(baseline_spec)
 
     game_lines: list[str] = []
-    summary = {
-        "games": 0,
-        "candidate_wins": 0,
-        "baseline_wins": 0,
-        "draws": 0,
-        "truncated": 0,
-        "turns": 0,
-        "actions": 0,
-        "candidate_deck_wins": {
-            "ampharos-ex-battle-deck": 0,
-            "lucario-ex-battle-deck": 0,
-        },
-        "baseline_deck_wins": {
-            "ampharos-ex-battle-deck": 0,
-            "lucario-ex-battle-deck": 0,
-        },
-    }
+    summary = _new_aggregate()
 
     for offset in range(int(task["game_count"])):
         global_index = int(task["start_index"]) + offset
         assignment = EVAL_ASSIGNMENTS[global_index % len(EVAL_ASSIGNMENTS)]
         candidate_player_index = int(assignment["candidate_player_index"])
+        if game_start_callback is not None:
+            game_start_callback(
+                {
+                    "task_index": int(task["task_index"]),
+                    "local_game": offset + 1,
+                    "task_game_count": int(task["game_count"]),
+                    "global_game": global_index + 1,
+                }
+            )
         seed = int(task["base_seed"]) + global_index
         game_summary, _ = play_self_play_game(
             game_id=f"{task['run_id']}-g{global_index:07d}",
@@ -323,15 +324,11 @@ def _run_evaluation_chunk(task: dict[str, Any]) -> dict[str, Any]:
 
         candidate_result = "draw"
         if game_summary.winner is None:
-            summary["draws"] += 1
+            candidate_result = "draw"
         elif int(game_summary.winner) == candidate_player_index:
             candidate_result = "win"
-            summary["candidate_wins"] += 1
-            summary["candidate_deck_wins"][candidate_deck_id] += 1
         else:
             candidate_result = "loss"
-            summary["baseline_wins"] += 1
-            summary["baseline_deck_wins"][baseline_deck_id] += 1
 
         game_payload = asdict(game_summary)
         game_payload["candidate_player_index"] = candidate_player_index
@@ -354,10 +351,22 @@ def _run_evaluation_chunk(task: dict[str, Any]) -> dict[str, Any]:
             ),
         )
 
-        summary["games"] += 1
-        summary["truncated"] += 1 if game_summary.truncated else 0
-        summary["turns"] += game_summary.turn_number
-        summary["actions"] += game_summary.action_count
+        game_progress = {
+            "games": 1,
+            "candidate_result": candidate_result,
+            "candidate_deck_id": candidate_deck_id,
+            "baseline_deck_id": baseline_deck_id,
+            "truncated": bool(game_summary.truncated),
+            "turns": int(game_summary.turn_number),
+            "actions": int(game_summary.action_count),
+            "task_index": int(task["task_index"]),
+            "local_game": offset + 1,
+            "task_game_count": int(task["game_count"]),
+            "global_game": global_index + 1,
+        }
+        _merge_game_progress(summary, game_progress)
+        if progress_callback is not None:
+            progress_callback(game_progress)
 
     games_path.write_text("\n".join(game_lines) + ("\n" if game_lines else ""), encoding="utf-8")
     return summary
@@ -473,7 +482,131 @@ def _merge_chunk_summary(aggregate: dict[str, Any], chunk_summary: dict[str, Any
         aggregate["baseline_deck_wins"][deck_id] += int(wins)
 
 
-def _print_progress(aggregate: dict[str, Any], *, total_games: int, start_time: float) -> None:
+def _new_aggregate() -> dict[str, Any]:
+    return {
+        "games": 0,
+        "candidate_wins": 0,
+        "baseline_wins": 0,
+        "draws": 0,
+        "truncated": 0,
+        "candidate_deck_wins": {
+            "ampharos-ex-battle-deck": 0,
+            "lucario-ex-battle-deck": 0,
+        },
+        "baseline_deck_wins": {
+            "ampharos-ex-battle-deck": 0,
+            "lucario-ex-battle-deck": 0,
+        },
+        "turns": 0,
+        "actions": 0,
+    }
+
+
+def _copy_aggregate(aggregate: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "games": int(aggregate["games"]),
+        "candidate_wins": int(aggregate["candidate_wins"]),
+        "baseline_wins": int(aggregate["baseline_wins"]),
+        "draws": int(aggregate["draws"]),
+        "truncated": int(aggregate["truncated"]),
+        "candidate_deck_wins": dict(aggregate["candidate_deck_wins"]),
+        "baseline_deck_wins": dict(aggregate["baseline_deck_wins"]),
+        "turns": int(aggregate["turns"]),
+        "actions": int(aggregate["actions"]),
+    }
+
+
+def _merge_game_progress(aggregate: dict[str, Any], game_progress: dict[str, Any]) -> None:
+    aggregate["games"] += int(game_progress.get("games", 1))
+    candidate_result = str(game_progress["candidate_result"])
+    if candidate_result == "win":
+        aggregate["candidate_wins"] += 1
+        aggregate["candidate_deck_wins"][str(game_progress["candidate_deck_id"])] += 1
+    elif candidate_result == "loss":
+        aggregate["baseline_wins"] += 1
+        aggregate["baseline_deck_wins"][str(game_progress["baseline_deck_id"])] += 1
+    else:
+        aggregate["draws"] += 1
+    aggregate["truncated"] += 1 if bool(game_progress.get("truncated")) else 0
+    aggregate["turns"] += int(game_progress.get("turns", 0))
+    aggregate["actions"] += int(game_progress.get("actions", 0))
+
+
+class _SingleWorkerProgressReporter:
+    def __init__(self, *, total_games: int, start_time: float, log_interval_seconds: float) -> None:
+        self.total_games = total_games
+        self.start_time = start_time
+        self.log_interval_seconds = max(float(log_interval_seconds), 0.0)
+        self._aggregate = _new_aggregate()
+        self._current_game: dict[str, Any] | None = None
+        self._lock = threading.Lock()
+        self._stop_event = threading.Event()
+        self._thread: threading.Thread | None = None
+        self._spinner_index = 0
+        self._last_print_time = start_time
+
+    def start(self) -> None:
+        if self.log_interval_seconds <= 0.0:
+            return
+        self._thread = threading.Thread(
+            target=self._heartbeat_loop,
+            name="standard-checkpoint-eval-progress",
+            daemon=True,
+        )
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop_event.set()
+        if self._thread is not None:
+            self._thread.join(timeout=max(self.log_interval_seconds, 1.0))
+
+    def begin_game(self, progress: dict[str, Any]) -> None:
+        with self._lock:
+            self._current_game = dict(progress)
+            self._current_game["started_at"] = time.perf_counter()
+
+    def record_completed_game(self, progress: dict[str, Any]) -> None:
+        with self._lock:
+            _merge_game_progress(self._aggregate, progress)
+            self._current_game = None
+            force = self._aggregate["games"] >= self.total_games
+        self._print_if_due(force=force)
+
+    def aggregate_snapshot(self) -> dict[str, Any]:
+        with self._lock:
+            return _copy_aggregate(self._aggregate)
+
+    def _heartbeat_loop(self) -> None:
+        while not self._stop_event.wait(self.log_interval_seconds):
+            self._print_if_due(force=False)
+
+    def _print_if_due(self, *, force: bool) -> None:
+        now = time.perf_counter()
+        with self._lock:
+            if not force and self.log_interval_seconds > 0.0 and (now - self._last_print_time) < self.log_interval_seconds:
+                return
+            aggregate = _copy_aggregate(self._aggregate)
+            current_game = dict(self._current_game) if self._current_game is not None else None
+            spinner = _EVAL_SPINNER_FRAMES[self._spinner_index % len(_EVAL_SPINNER_FRAMES)]
+            self._spinner_index += 1
+            self._last_print_time = now
+        _print_progress(
+            aggregate,
+            total_games=self.total_games,
+            start_time=self.start_time,
+            current_game=current_game,
+            spinner=spinner,
+        )
+
+
+def _print_progress(
+    aggregate: dict[str, Any],
+    *,
+    total_games: int,
+    start_time: float,
+    current_game: dict[str, Any] | None = None,
+    spinner: str | None = None,
+) -> None:
     elapsed = max(time.perf_counter() - start_time, 1e-6)
     games = aggregate["games"]
     decisive_games = aggregate["candidate_wins"] + aggregate["baseline_wins"]
@@ -483,16 +616,36 @@ def _print_progress(aggregate: dict[str, Any], *, total_games: int, start_time: 
     remaining_games = max(total_games - games, 0)
     eta_seconds = remaining_games / games_per_second if games_per_second > 0 else float("inf")
     eta_display = "inf" if not math.isfinite(eta_seconds) else f"{eta_seconds:.0f}s"
+    if decisive_games > 0:
+        candidate_display = f"{candidate_win_rate:.1%}"
+        baseline_display = f"{(1.0 - candidate_win_rate):.1%}"
+    else:
+        candidate_display = "n/a"
+        baseline_display = "n/a"
+    current_display = ""
+    if current_game is not None:
+        running_seconds = max(time.perf_counter() - float(current_game["started_at"]), 0.0)
+        current_display = (
+            f" current={int(current_game['global_game'])}/{total_games} "
+            f"shard={int(current_game['task_index']):06d} "
+            f"local={int(current_game['local_game'])}/{int(current_game['task_game_count'])} "
+            f"running={running_seconds:.0f}s"
+        )
+    prefix = "[eval]"
+    if spinner:
+        prefix += f" {spinner}"
     print(
-        "[eval] "
+        f"{prefix} "
         f"games={games}/{total_games} "
         f"games/s={games_per_second:.1f} "
-        f"candidate={candidate_win_rate:.1%} "
-        f"baseline={(1.0 - candidate_win_rate):.1%} "
+        f"candidate={candidate_display} "
+        f"baseline={baseline_display} "
         f"draws={aggregate['draws']} "
         f"truncated={aggregate['truncated']} "
         f"avg_turns={avg_turns:.1f} "
         f"eta={eta_display}"
+        f"{current_display}",
+        flush=True,
     )
 
 
