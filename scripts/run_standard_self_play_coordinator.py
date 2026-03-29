@@ -6,9 +6,12 @@ from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import random
+import signal
 import sys
+import threading
 from typing import Any
 from urllib.parse import urlparse
 
@@ -52,6 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", type=Path, default=None)
     parser.add_argument("--lease-timeout-seconds", type=int, default=1800)
     parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument("--pid-file", type=Path, default=None)
     return parser.parse_args()
 
 
@@ -82,18 +86,50 @@ def main() -> int:
         lease_timeout_seconds=max(1, args.lease_timeout_seconds),
     )
     server = ThreadingHTTPServer((args.host, args.port), make_handler(coordinator))
+    pid_file = args.pid_file.resolve() if args.pid_file is not None else None
+    if pid_file is not None:
+        _write_pid_file(pid_file)
     print(f"[coordinator] run_id={args.run_id}")
     print(f"[coordinator] output={output_dir}")
     print(f"[coordinator] serving=http://{args.host}:{args.port}")
     print(f"[coordinator] dashboard=http://{args.host}:{args.port}/dashboard")
     print(f"[coordinator] status=http://{args.host}:{args.port}/api/standard-self-play/status")
     print(f"[coordinator] lease_timeout_seconds={args.lease_timeout_seconds}")
+    recovery = coordinator.status().get("recovery", {})
+    print(
+        "[coordinator] recovery "
+        f"completed_on_disk={recovery.get('completed_tasks_from_artifacts', 0)} "
+        f"legacy_upgrades={recovery.get('upgraded_legacy_summaries', 0)} "
+        f"issues={recovery.get('integrity_issue_count', 0)}"
+    )
+    stop_requested = threading.Event()
+
+    def request_shutdown(signum: int, _frame: Any) -> None:
+        if stop_requested.is_set():
+            return
+        stop_requested.set()
+        signal_name = signal.Signals(signum).name
+        print(f"\n[coordinator] received {signal_name}; persisting state and stopping")
+        try:
+            coordinator.persist_state()
+        except OSError as exc:
+            print(f"[coordinator] final state save failed: {exc}", file=sys.stderr)
+        threading.Thread(target=server.shutdown, name="coordinator-shutdown", daemon=True).start()
+
+    signal.signal(signal.SIGTERM, request_shutdown)
+    signal.signal(signal.SIGINT, request_shutdown)
     try:
         server.serve_forever()
-    except KeyboardInterrupt:
-        print("\n[coordinator] stopped")
     finally:
+        if not stop_requested.is_set():
+            try:
+                coordinator.persist_state()
+            except OSError as exc:
+                print(f"[coordinator] final state save failed: {exc}", file=sys.stderr)
         server.server_close()
+        if pid_file is not None:
+            _remove_pid_file(pid_file)
+        print("[coordinator] stopped")
     return 0
 
 
@@ -233,6 +269,26 @@ def _require_dict(payload: dict[str, Any], key: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise ValueError(f"Missing object field: {key}")
     return value
+
+
+def _write_pid_file(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(f"{os.getpid()}\n", encoding="utf-8")
+
+
+def _remove_pid_file(path: Path) -> None:
+    try:
+        recorded_pid = path.read_text(encoding="utf-8").strip()
+    except FileNotFoundError:
+        return
+    except OSError:
+        return
+    if recorded_pid and recorded_pid != str(os.getpid()):
+        return
+    try:
+        path.unlink()
+    except FileNotFoundError:
+        return
 
 
 if __name__ == "__main__":

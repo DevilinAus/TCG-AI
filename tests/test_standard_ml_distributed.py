@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 from pathlib import Path
 import tempfile
 import time
@@ -12,10 +11,13 @@ from backend.tcg_ai.game_modes.standard.ml.distributed_self_play import (
 )
 from backend.tcg_ai.game_modes.standard.ml.planner import PlannerConfig
 from backend.tcg_ai.game_modes.standard.ml.self_play_jobs import (
+    SelfPlayChunkResult,
     SelfPlayRunConfig,
     build_self_play_tasks,
+    self_play_chunk_artifact_paths,
     self_play_task_from_payload,
     self_play_task_to_payload,
+    write_self_play_chunk_artifacts,
 )
 from scripts.run_standard_self_play_worker import LeaseHeartbeatLoop
 
@@ -170,6 +172,120 @@ class DistributedStandardMlTests(unittest.TestCase):
         second_lease = coordinator.lease_chunk(worker_id="worker-b", worker_meta=None)
         self.assertEqual(second_lease["task"]["task_index"], 0)
         self.assertEqual(second_lease["status"]["workers"]["worker-b"]["leased_task_index"], 0)
+
+    def test_coordinator_recovers_completed_shards_from_disk(self) -> None:
+        write_self_play_chunk_artifacts(
+            output_dir=self.output_dir,
+            result=SelfPlayChunkResult(
+                task_index=0,
+                summary={
+                    "games": 2,
+                    "samples": 3,
+                    "truncated": 1,
+                    "deck_wins": {
+                        "ampharos-ex-battle-deck": 1,
+                        "lucario-ex-battle-deck": 1,
+                    },
+                    "turns": 18,
+                    "actions": 57,
+                },
+                decisions_jsonl='{"decision":1}\n{"decision":2}\n{"decision":3}\n',
+                games_jsonl=(
+                    '{"winner_deck_id":"ampharos-ex-battle-deck","turn_number":9,"action_count":21,"truncated":false}\n'
+                    '{"winner_deck_id":"lucario-ex-battle-deck","turn_number":9,"action_count":36,"truncated":true}\n'
+                ),
+            ),
+        )
+        artifact_paths = self_play_chunk_artifact_paths(output_dir=self.output_dir, task_index=0)
+        artifact_paths.summary.unlink()
+
+        coordinator = DistributedSelfPlayCoordinator(
+            output_dir=self.output_dir,
+            run_id="run-recover",
+            run_config=SelfPlayRunConfig(
+                games=4,
+                chunk_size=2,
+                seed=33,
+            ),
+            lease_timeout_seconds=60,
+        )
+
+        status = coordinator.status()
+        self.assertEqual(status["completed_tasks"], 1)
+        self.assertEqual(status["pending_tasks"], 1)
+        self.assertEqual(status["aggregate"]["games"], 2)
+        self.assertEqual(status["aggregate"]["samples"], 3)
+        self.assertEqual(status["recovery"]["upgraded_legacy_summaries"], 1)
+        self.assertTrue(artifact_paths.summary.exists())
+
+        lease = coordinator.lease_chunk(worker_id="worker-b", worker_meta=None)
+        self.assertEqual(lease["task"]["task_index"], 1)
+
+    def test_coordinator_rebuilds_from_corrupt_state_file(self) -> None:
+        write_self_play_chunk_artifacts(
+            output_dir=self.output_dir,
+            result=SelfPlayChunkResult(
+                task_index=0,
+                summary={
+                    "games": 2,
+                    "samples": 1,
+                    "truncated": 0,
+                    "deck_wins": {
+                        "ampharos-ex-battle-deck": 2,
+                        "lucario-ex-battle-deck": 0,
+                    },
+                    "turns": 12,
+                    "actions": 24,
+                },
+                decisions_jsonl='{"decision":1}\n',
+                games_jsonl=(
+                    '{"winner_deck_id":"ampharos-ex-battle-deck","turn_number":6,"action_count":12,"truncated":false}\n'
+                    '{"winner_deck_id":"ampharos-ex-battle-deck","turn_number":6,"action_count":12,"truncated":false}\n'
+                ),
+            ),
+        )
+        (self.output_dir / "coordinator_state.json").write_text("{not-valid-json", encoding="utf-8")
+
+        coordinator = DistributedSelfPlayCoordinator(
+            output_dir=self.output_dir,
+            run_id="run-corrupt",
+            run_config=SelfPlayRunConfig(
+                games=4,
+                chunk_size=2,
+                seed=44,
+            ),
+            lease_timeout_seconds=60,
+        )
+
+        status = coordinator.status()
+        self.assertEqual(status["completed_tasks"], 1)
+        self.assertGreaterEqual(status["recovery"]["integrity_issue_count"], 1)
+        self.assertEqual(status["recovery"]["integrity_issues"][0]["reason"], "state_rebuild")
+
+    def test_coordinator_keeps_incomplete_artifacts_pending(self) -> None:
+        artifact_paths = self_play_chunk_artifact_paths(output_dir=self.output_dir, task_index=0)
+        artifact_paths.decisions.parent.mkdir(parents=True, exist_ok=True)
+        artifact_paths.decisions.write_text('{"decision":1}\n', encoding="utf-8")
+
+        coordinator = DistributedSelfPlayCoordinator(
+            output_dir=self.output_dir,
+            run_id="run-incomplete",
+            run_config=SelfPlayRunConfig(
+                games=4,
+                chunk_size=2,
+                seed=55,
+            ),
+            lease_timeout_seconds=60,
+        )
+
+        status = coordinator.status()
+        self.assertEqual(status["completed_tasks"], 0)
+        self.assertEqual(status["pending_tasks"], 2)
+        self.assertGreaterEqual(status["recovery"]["integrity_issue_count"], 1)
+        self.assertEqual(status["recovery"]["integrity_issues"][0]["reason"], "incomplete_artifacts")
+
+        lease = coordinator.lease_chunk(worker_id="worker-c", worker_meta=None)
+        self.assertEqual(lease["task"]["task_index"], 0)
 
     def test_lease_heartbeat_loop_posts_periodically(self) -> None:
         calls: list[tuple[str, dict[str, object], float]] = []
