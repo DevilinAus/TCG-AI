@@ -6,6 +6,7 @@ from ..action_analysis import analyze_legal_actions
 from ..action_metadata import build_action_metadata
 from ..engine import action_id_for, card_definition, get_top_card_definition
 from ..models import GameState, PokemonInPlay
+from .profiling import observe_max, record_counter, time_metric
 
 SCHEMA_VERSION = 1
 
@@ -18,8 +19,10 @@ def serialize_knowledge_state(
     player = state.players[perspective_player_index]
     opponent_index = 1 - perspective_player_index
     opponent = state.players[opponent_index]
-    player_active = _serialize_visible_pokemon(state, player.active)
-    opponent_active = _serialize_visible_pokemon(state, opponent.active)
+    private_player_state = _serialize_private_player_state(state, perspective_player_index)
+    public_player_state = _serialize_public_player_state(state, opponent_index)
+    player_active = private_player_state.get("active")
+    opponent_active = public_player_state.get("active")
     return {
         "schema_version": SCHEMA_VERSION,
         "turn_number": state.turn_number,
@@ -29,8 +32,8 @@ def serialize_knowledge_state(
         "setup_phase": state.setup_phase,
         "perspective_player_index": perspective_player_index,
         "players": [
-            _serialize_private_player_state(state, perspective_player_index),
-            _serialize_public_player_state(state, opponent_index),
+            private_player_state,
+            public_player_state,
         ],
         "derived_features": {
             "player_active_turns_until_ready": _turns_until_ready(player_active),
@@ -45,8 +48,8 @@ def serialize_knowledge_state(
             ),
             "player_energy_at_risk_on_active": _attached_energy_count(player_active),
             "opponent_energy_at_risk_on_active": _attached_energy_count(opponent_active),
-            "player_board_investment": _board_investment(_serialize_private_player_state(state, perspective_player_index)),
-            "opponent_board_investment": _board_investment(_serialize_public_player_state(state, opponent_index)),
+            "player_board_investment": _board_investment(private_player_state),
+            "opponent_board_investment": _board_investment(public_player_state),
         },
     }
 
@@ -57,20 +60,28 @@ def serialize_knowledge_actions(
     acting_player_index: int,
     legal_actions: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
-    analysis_by_action_id = analyze_legal_actions(
-        state,
-        acting_player_index=acting_player_index,
-        legal_actions=legal_actions,
-    )
-    return [
-        _serialize_knowledge_action(
-            state,
-            acting_player_index,
-            action,
-            analysis=analysis_by_action_id.get(action_id_for(action)),
-        )
-        for action in legal_actions
-    ]
+    record_counter("knowledge_actions.calls")
+    record_counter("knowledge_actions.actions", len(legal_actions))
+    observe_max("knowledge_actions.max_actions", len(legal_actions))
+    with time_metric("knowledge_actions.total"):
+        with time_metric("knowledge_actions.analysis"):
+            analysis_by_action_id = analyze_legal_actions(
+                state,
+                acting_player_index=acting_player_index,
+                legal_actions=legal_actions,
+            )
+        card_cache: dict[str, dict[str, Any]] = {}
+        with time_metric("knowledge_actions.serialize_actions"):
+            return [
+                _serialize_knowledge_action(
+                    state,
+                    acting_player_index,
+                    action,
+                    analysis=analysis_by_action_id.get(action_id_for(action)),
+                    card_cache=card_cache,
+                )
+                for action in legal_actions
+            ]
 
 
 def _serialize_private_player_state(
@@ -130,11 +141,14 @@ def _serialize_knowledge_action(
     action: dict[str, Any],
     *,
     analysis: dict[str, Any] | None = None,
+    card_cache: dict[str, dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
+    card_cache = card_cache or {}
     source_card = None
     hand_card_id = action.get("hand_card_id")
     if isinstance(hand_card_id, str):
-        source_card = _serialize_card_instance(state, hand_card_id)
+        with time_metric("knowledge_actions.card_instances"):
+            source_card = _serialize_card_instance_cached(state, hand_card_id, card_cache)
 
     action_type = str(action.get("type", ""))
     discard_ids = [instance_id for instance_id in action.get("discard_from_hand_ids", []) if isinstance(instance_id, str)]
@@ -143,6 +157,17 @@ def _serialize_knowledge_action(
     ]
     recover_ids = [instance_id for instance_id in action.get("recover_from_discard_ids", []) if isinstance(instance_id, str)]
     search_ids = [instance_id for instance_id in action.get("search_deck_ids", []) if isinstance(instance_id, str)]
+    with time_metric("knowledge_actions.card_instances"):
+        discard_from_hand = [_serialize_card_instance_cached(state, instance_id, card_cache) for instance_id in discard_ids]
+        discard_attached_energy = [
+            _serialize_card_instance_cached(state, instance_id, card_cache) for instance_id in retreat_discard_ids
+        ]
+        recover_from_discard = [
+            _serialize_card_instance_cached(state, instance_id, card_cache) for instance_id in recover_ids
+        ]
+        search_selection = [
+            _serialize_card_instance_cached(state, instance_id, card_cache) for instance_id in search_ids
+        ]
     payload = {
         "action_id": action_id_for(action),
         "type": action_type,
@@ -153,10 +178,10 @@ def _serialize_knowledge_action(
             "zone": action.get("target_zone"),
             "bench_index": action.get("target_bench_index"),
         },
-        "discard_from_hand": [_serialize_card_instance(state, instance_id) for instance_id in discard_ids],
-        "discard_attached_energy": [_serialize_card_instance(state, instance_id) for instance_id in retreat_discard_ids],
-        "recover_from_discard": [_serialize_card_instance(state, instance_id) for instance_id in recover_ids],
-        "search_selection": [_serialize_card_instance(state, instance_id) for instance_id in search_ids],
+        "discard_from_hand": discard_from_hand,
+        "discard_attached_energy": discard_attached_energy,
+        "recover_from_discard": recover_from_discard,
+        "search_selection": search_selection,
         "blocked_attack_index": action.get("blocked_attack_index"),
         "consumes_supporter_for_turn": action_type == "play_supporter",
         "consumes_attachment_for_turn": action_type == "play_energy",
@@ -165,7 +190,8 @@ def _serialize_knowledge_action(
         "card_tags": list(source_card.get("card_tags", [])) if isinstance(source_card, dict) else [],
         "effect_specs": list(source_card.get("effect_specs", [])) if isinstance(source_card, dict) else [],
     }
-    payload.update(build_action_metadata(state, acting_player_index, action))
+    with time_metric("knowledge_actions.action_metadata"):
+        payload.update(build_action_metadata(state, acting_player_index, action))
     if isinstance(analysis, dict):
         payload.update(
             {
@@ -242,6 +268,21 @@ def _serialize_card_instance(state: GameState, instance_id: str) -> dict[str, An
             for effect_spec in card.effect_specs
         ],
     }
+
+
+def _serialize_card_instance_cached(
+    state: GameState,
+    instance_id: str,
+    card_cache: dict[str, dict[str, Any]],
+) -> dict[str, Any]:
+    cached = card_cache.get(instance_id)
+    if cached is not None:
+        record_counter("knowledge_actions.card_cache_hits")
+        return cached
+    record_counter("knowledge_actions.card_cache_misses")
+    serialized = _serialize_card_instance(state, instance_id)
+    card_cache[instance_id] = serialized
+    return serialized
 
 
 def _turns_until_ready(pokemon: dict[str, Any] | None) -> int | None:

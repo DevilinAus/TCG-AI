@@ -180,7 +180,7 @@ Backend environment variables for the main app:
 export TCG_AI_STANDARD_REMOTE_ENABLED=1
 export TCG_AI_STANDARD_REMOTE_URL=http://<worker-host>:8100/api/standard-ml/decision
 export TCG_AI_STANDARD_REMOTE_BATCH_EVAL_URL=http://<worker-host>:8100/api/standard-ml/batch-eval
-export TCG_AI_STANDARD_REMOTE_TIMEOUT_MS=1500
+export TCG_AI_STANDARD_REMOTE_TIMEOUT_MS=1800000
 export TCG_AI_STANDARD_REMOTE_API_TOKEN=<shared-token>
 ```
 

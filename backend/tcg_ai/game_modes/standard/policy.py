@@ -16,7 +16,7 @@ from .ml.planner import PlannerConfig
 from .models import GameState
 from .policy_store import OpenerPolicyStats, StandardPolicyStore
 
-DEFAULT_REMOTE_TIMEOUT_MS = 2_000
+DEFAULT_REMOTE_TIMEOUT_MS = 1_800_000
 DEFAULT_EXPLORATION_RATE = 0.20
 DEFAULT_MIN_EXPLORATION_RATE = 0.05
 FULL_STATE_REQUEST_SCHEMA_VERSION = 2
@@ -313,13 +313,14 @@ class RemoteStandardDecisionProvider(StandardDecisionProvider):
         )
         start_time = perf_counter()
         logger.info(
-            "remote decision request start session=%s decision_id=%s type=%s turn=%s player=%s url=%s legal_action_count=%s",
+            "remote decision request start session=%s decision_id=%s type=%s turn=%s player=%s url=%s timeout_ms=%s legal_action_count=%s",
             self.session_id,
             request.decision_id,
             request.decision_type,
             request.state.turn_number,
             request.acting_player_index,
             self.config.remote_url,
+            self.config.remote_timeout_ms,
             len(request.legal_actions),
         )
         try:
@@ -331,10 +332,11 @@ class RemoteStandardDecisionProvider(StandardDecisionProvider):
         except (TimeoutError, error.URLError, json.JSONDecodeError, OSError) as exc:
             elapsed_ms = round((perf_counter() - start_time) * 1000, 1)
             logger.error(
-                "remote decision request failed session=%s decision_id=%s type=%s elapsed_ms=%s error=%s",
+                "remote decision request failed session=%s decision_id=%s type=%s timeout_ms=%s elapsed_ms=%s error=%s",
                 self.session_id,
                 request.decision_id,
                 request.decision_type,
+                self.config.remote_timeout_ms,
                 elapsed_ms,
                 exc,
             )
