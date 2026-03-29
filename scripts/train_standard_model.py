@@ -115,6 +115,121 @@ class SelfPlayDecisionDataset:
                         return
 
 
+class _ShardValidationProgress:
+    def __init__(
+        self,
+        *,
+        total_shards: int,
+        stream: Any = None,
+        enabled: bool | None = None,
+    ) -> None:
+        self.total_shards = max(total_shards, 0)
+        self.stream = stream or sys.stderr
+        self.enabled = bool(enabled) if enabled is not None else bool(getattr(self.stream, "isatty", lambda: False)())
+        self.supports_ansi = self.enabled and os.environ.get("TERM", "").lower() not in {"", "dumb"}
+        self.current_index = 0
+        self.current_name = ""
+        self.current_records = 0
+        self._frames = [".    ", "..   ", "...  ", ".... ", ".....", " ....", "  ...", "   ..", "    ."]
+        self._frame_index = 0
+        self._last_render_monotonic = 0.0
+        self._last_line_length = 0
+        self._started = False
+        self._started_monotonic = 0.0
+
+    def begin(self) -> None:
+        if self._started:
+            return
+        self._started = True
+        self._started_monotonic = time.monotonic()
+        if self.enabled:
+            self._render(force=True)
+            return
+        print(f"[train] validating {self.total_shards} shard(s) for corruption and completeness", file=self.stream)
+
+    def start_shard(self, index: int, path: Path) -> None:
+        self.current_index = max(index, 0)
+        self.current_name = path.name
+        self.current_records = 0
+        self._render(force=True)
+
+    def tick(self) -> None:
+        self.current_records += 2048
+        self._render(force=False)
+
+    def finish(self, *, usable_shards: int, skipped_shards: int) -> None:
+        elapsed = _format_short_duration(max(time.monotonic() - self._started_monotonic, 0.0))
+        if self.enabled:
+            message = (
+                f"{self._label('train', '36')}{self._label('scan', '33')} "
+                f"{self._accent('ready', '32')} "
+                f"{self._detail(f'usable={usable_shards}/{self.total_shards}')} "
+                f"{self._detail(f'skipped={skipped_shards}')} "
+                f"{self._detail(f'elapsed={elapsed}')}"
+            )
+            self._write_line(message, end="\n")
+            return
+        print(
+            "[train] shard validation complete "
+            f"usable={usable_shards}/{self.total_shards} skipped={skipped_shards} elapsed={elapsed}",
+            file=self.stream,
+        )
+
+    def _render(self, *, force: bool) -> None:
+        if not self.enabled:
+            return
+        now = time.monotonic()
+        if not force and (now - self._last_render_monotonic) < 0.15:
+            return
+        self._last_render_monotonic = now
+        frame = self._frames[self._frame_index % len(self._frames)]
+        self._frame_index += 1
+        elapsed = _format_short_duration(max(now - self._started_monotonic, 0.0))
+        message = " ".join(
+            part
+            for part in (
+                self._label("train", "36"),
+                self._label("scan", "33"),
+                self._accent(f"{self.current_index:03d}/{self.total_shards:03d}", "32"),
+                self._pulse_bar(frame),
+                self._detail(self.current_name or "warming_up"),
+                self._detail(f"elapsed={elapsed}"),
+            )
+            if part
+        ).rstrip()
+        self._write_line(message, end="")
+
+    def _write_line(self, message: str, *, end: str) -> None:
+        padding = max(self._last_line_length - len(message), 0)
+        self.stream.write(f"\r{message}{' ' * padding}{end}")
+        flush = getattr(self.stream, "flush", None)
+        if callable(flush):
+            flush()
+        self._last_line_length = len(message)
+
+    def _label(self, text: str, color_code: str) -> str:
+        decorated = f"[{text}]"
+        if not self.supports_ansi:
+            return decorated
+        return f"\033[1;{color_code}m{decorated}\033[0m"
+
+    def _accent(self, text: str, color_code: str) -> str:
+        if not self.supports_ansi:
+            return text
+        return f"\033[1;{color_code}m{text}\033[0m"
+
+    def _detail(self, text: str) -> str:
+        if not self.supports_ansi:
+            return text
+        return f"\033[2m{text}\033[0m"
+
+    def _pulse_bar(self, frame: str) -> str:
+        bar = f"[{frame}]"
+        if not self.supports_ansi:
+            return bar
+        return f"\033[38;5;117m{bar}\033[0m"
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Train the Standard action-conditioned model from self-play shards.")
     parser.add_argument(
@@ -579,15 +694,28 @@ def _validate_training_decision_paths(
 ) -> tuple[list[Path], int]:
     valid_paths: list[Path] = []
     invalid_count = 0
-    for path in decision_paths:
-        if _validate_decision_shard(path, expected_samples=expected_samples_by_path.get(path)):
+    progress = _ShardValidationProgress(total_shards=len(decision_paths))
+    progress.begin()
+    for index, path in enumerate(decision_paths, start=1):
+        progress.start_shard(index, path)
+        if _validate_decision_shard(
+            path,
+            expected_samples=expected_samples_by_path.get(path),
+            progress=progress,
+        ):
             valid_paths.append(path)
             continue
         invalid_count += 1
+    progress.finish(usable_shards=len(valid_paths), skipped_shards=invalid_count)
     return valid_paths, invalid_count
 
 
-def _validate_decision_shard(path: Path, *, expected_samples: int | None) -> bool:
+def _validate_decision_shard(
+    path: Path,
+    *,
+    expected_samples: int | None,
+    progress: _ShardValidationProgress | None = None,
+) -> bool:
     try:
         handle = path.open("r", encoding="utf-8")
     except OSError as exc:
@@ -605,6 +733,8 @@ def _validate_decision_shard(path: Path, *, expected_samples: int | None) -> boo
                 _warn_skipped_shard(path, f"malformed JSON at line {line_number}: {exc}")
                 return False
             record_count += 1
+            if progress is not None and (record_count % 2048) == 0:
+                progress.tick()
     if expected_samples is not None and record_count != expected_samples:
         _warn_skipped_shard(
             path,
@@ -619,6 +749,17 @@ def _validate_decision_shard(path: Path, *, expected_samples: int | None) -> boo
 
 def _warn_skipped_shard(path: Path, detail: str) -> None:
     print(f"[train] skipping shard {path.name}: {detail}", file=sys.stderr)
+
+
+def _format_short_duration(seconds: float) -> str:
+    total_seconds = max(int(seconds), 0)
+    minutes, remainder = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours > 0:
+        return f"{hours}h{minutes:02d}m"
+    if minutes > 0:
+        return f"{minutes}m{remainder:02d}s"
+    return f"{remainder}s"
 
 
 def _resolve_input_dir(input_dir: Path | None) -> Path:
