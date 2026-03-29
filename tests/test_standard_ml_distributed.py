@@ -176,6 +176,42 @@ class DistributedStandardMlTests(unittest.TestCase):
         self.assertEqual(second_lease["task"]["task_index"], 0)
         self.assertEqual(second_lease["status"]["workers"]["worker-b"]["leased_task_index"], 0)
 
+    def test_coordinator_writes_run_complete_flag_when_finished(self) -> None:
+        coordinator = DistributedSelfPlayCoordinator(
+            output_dir=self.output_dir,
+            run_id="run-finished",
+            run_config=SelfPlayRunConfig(
+                games=2,
+                chunk_size=2,
+                seed=66,
+            ),
+            lease_timeout_seconds=60,
+        )
+
+        lease = coordinator.lease_chunk(worker_id="worker-a", worker_meta=None)
+        self.assertEqual(lease["task"]["task_index"], 0)
+
+        coordinator.submit_chunk(
+            worker_id="worker-a",
+            task_index=0,
+            summary={
+                "games": 2,
+                "samples": 2,
+                "truncated": 0,
+                "deck_wins": {
+                    "ampharos-ex-battle-deck": 1,
+                    "lucario-ex-battle-deck": 1,
+                },
+                "turns": 10,
+                "actions": 20,
+            },
+            decisions_jsonl='{"decision":1}\n{"decision":2}\n',
+            games_jsonl='{"game":1}\n{"game":2}\n',
+            worker_meta=None,
+        )
+
+        self.assertTrue((self.output_dir / "RUN_COMPLETE").exists())
+
     def test_coordinator_recovers_completed_shards_from_disk(self) -> None:
         write_self_play_chunk_artifacts(
             output_dir=self.output_dir,

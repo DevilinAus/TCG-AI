@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib.util
 from pathlib import Path
+import tempfile
 import unittest
 from unittest.mock import Mock
 
@@ -79,6 +80,24 @@ class StandardTrainingScriptTests(unittest.TestCase):
         )
 
         self.assertEqual(vector, [0.0, 1.0, 0.0])
+
+    def test_resolve_input_dir_can_point_at_latest_incomplete_run(self) -> None:
+        training_module = _load_training_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            (root / "run_20260329T090000Z").mkdir()
+            latest_run = root / "run_20260329T100000Z"
+            latest_run.mkdir()
+            (latest_run / "coordinator_state.json").write_text("{}", encoding="utf-8")
+
+            original_root = training_module.DEFAULT_SELF_PLAY_ROOT
+            training_module.DEFAULT_SELF_PLAY_ROOT = root
+            try:
+                resolved = training_module._resolve_input_dir(None)
+            finally:
+                training_module.DEFAULT_SELF_PLAY_ROOT = original_root
+
+        self.assertEqual(resolved, latest_run.resolve())
 
 
 class StandardCheckpointLoadingTests(unittest.TestCase):

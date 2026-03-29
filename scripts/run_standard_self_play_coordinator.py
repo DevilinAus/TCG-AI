@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from http import HTTPStatus
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -26,7 +27,8 @@ from backend.tcg_ai.game_modes.standard.ml.distributed_self_play import (
 )
 from backend.tcg_ai.game_modes.standard.ml.self_play_jobs import SelfPlayRunConfig
 
-DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "standard_ml_data" / "self_play"
+DEFAULT_OUTPUT_ROOT = PROJECT_ROOT / "standard_ml_data" / "distributed_self_play"
+RUN_COMPLETE_FLAG_NAME = "RUN_COMPLETE"
 DASHBOARD_ROOT = PROJECT_ROOT / "frontend" / "distributed-self-play"
 DASHBOARD_ASSETS = {
     "/": ("dashboard.html", "text/html; charset=utf-8"),
@@ -36,11 +38,19 @@ DASHBOARD_ASSETS = {
 }
 
 
+@dataclass(frozen=True)
+class ResolvedCoordinatorRun:
+    run_id: str
+    output_dir: Path
+    output_root: Path
+    resumed: bool
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Serve distributed Standard self-play chunks over LAN.")
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8787)
-    parser.add_argument("--run-id", default=datetime.now(UTC).strftime("run_%Y%m%dT%H%M%SZ"))
+    parser.add_argument("--run-id", default=None)
     parser.add_argument("--games", type=int, default=10000)
     parser.add_argument("--chunk-size", type=int, default=50)
     parser.add_argument("--seed", type=int, default=random.randint(1, 999_999))
@@ -55,12 +65,18 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--checkpoint", type=Path, default=None)
     parser.add_argument("--lease-timeout-seconds", type=int, default=1800)
     parser.add_argument("--output-dir", type=Path, default=None)
+    parser.add_argument("--output-root", type=Path, default=None)
     parser.add_argument("--pid-file", type=Path, default=None)
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
+    resolved_run = resolve_coordinator_run(
+        run_id=args.run_id,
+        output_dir=args.output_dir,
+        output_root=args.output_root,
+    )
     planner_config = PlannerConfig(
         max_depth=max(1, args.max_depth),
         beam_width=max(1, args.beam_width),
@@ -78,19 +94,20 @@ def main() -> int:
         oracle=args.oracle,
         checkpoint=str(args.checkpoint.resolve()) if args.checkpoint else None,
     )
-    output_dir = (args.output_dir or (DEFAULT_OUTPUT_ROOT / args.run_id)).resolve()
     coordinator = DistributedSelfPlayCoordinator(
-        output_dir=output_dir,
-        run_id=args.run_id,
+        output_dir=resolved_run.output_dir,
+        run_id=resolved_run.run_id,
         run_config=run_config,
         lease_timeout_seconds=max(1, args.lease_timeout_seconds),
     )
     server = ThreadingHTTPServer((args.host, args.port), make_handler(coordinator))
-    pid_file = args.pid_file.resolve() if args.pid_file is not None else None
-    if pid_file is not None:
-        _write_pid_file(pid_file)
-    print(f"[coordinator] run_id={args.run_id}")
-    print(f"[coordinator] output={output_dir}")
+    pid_file = args.pid_file.resolve() if args.pid_file is not None else resolved_run.output_dir / "coordinator.pid"
+    _write_pid_file(pid_file)
+    print(f"[coordinator] run_id={resolved_run.run_id}")
+    print(f"[coordinator] output={resolved_run.output_dir}")
+    print(f"[coordinator] output_root={resolved_run.output_root}")
+    print(f"[coordinator] launch_mode={'resume' if resolved_run.resumed else 'new'}")
+    print(f"[coordinator] pid_file={pid_file}")
     print(f"[coordinator] serving=http://{args.host}:{args.port}")
     print(f"[coordinator] dashboard=http://{args.host}:{args.port}/dashboard")
     print(f"[coordinator] status=http://{args.host}:{args.port}/api/standard-self-play/status")
@@ -133,6 +150,170 @@ def main() -> int:
             _remove_pid_file(pid_file)
         print("[coordinator] stopped")
     return 0
+
+
+def resolve_coordinator_run(
+    *,
+    run_id: str | None,
+    output_dir: Path | None,
+    output_root: Path | None,
+) -> ResolvedCoordinatorRun:
+    if output_dir is not None:
+        resolved_output_dir = output_dir.resolve()
+        existing_run_id = _load_run_id_from_dir(resolved_output_dir)
+        if run_id is None:
+            resolved_run_id = existing_run_id or _infer_run_id_from_path(resolved_output_dir)
+        else:
+            if existing_run_id is not None and existing_run_id != run_id:
+                raise ValueError(
+                    f"Explicit run_id '{run_id}' does not match the persisted run_id '{existing_run_id}' in {resolved_output_dir}."
+                )
+            resolved_run_id = run_id
+        return ResolvedCoordinatorRun(
+            run_id=resolved_run_id,
+            output_dir=resolved_output_dir,
+            output_root=resolved_output_dir.parent,
+            resumed=existing_run_id is not None,
+        )
+
+    resolved_output_root = (output_root or DEFAULT_OUTPUT_ROOT).resolve()
+    resolved_output_root.mkdir(parents=True, exist_ok=True)
+    if run_id is not None:
+        candidate_dir = resolved_output_root / run_id
+        existing_run_id = _load_run_id_from_dir(candidate_dir)
+        if existing_run_id is not None and existing_run_id != run_id:
+            raise ValueError(
+                f"Explicit run_id '{run_id}' does not match the persisted run_id '{existing_run_id}' in {candidate_dir}."
+            )
+        return ResolvedCoordinatorRun(
+            run_id=run_id,
+            output_dir=candidate_dir,
+            output_root=resolved_output_root,
+            resumed=existing_run_id is not None,
+        )
+
+    resumable_run = _find_latest_incomplete_run(resolved_output_root)
+    if resumable_run is not None:
+        return resumable_run
+
+    generated_run_id = _generate_run_id()
+    return ResolvedCoordinatorRun(
+        run_id=generated_run_id,
+        output_dir=resolved_output_root / generated_run_id,
+        output_root=resolved_output_root,
+        resumed=False,
+    )
+
+
+def _find_latest_incomplete_run(output_root: Path) -> ResolvedCoordinatorRun | None:
+    candidates: list[tuple[float, ResolvedCoordinatorRun]] = []
+    for candidate_dir in output_root.glob("run_*"):
+        if not candidate_dir.is_dir():
+            continue
+        if not _run_has_meaningful_state(candidate_dir):
+            continue
+        if _run_is_complete(candidate_dir):
+            continue
+        run_id = _load_run_id_from_dir(candidate_dir) or _infer_run_id_from_path(candidate_dir)
+        candidates.append(
+            (
+                _run_last_activity_timestamp(candidate_dir),
+                ResolvedCoordinatorRun(
+                    run_id=run_id,
+                    output_dir=candidate_dir.resolve(),
+                    output_root=output_root.resolve(),
+                    resumed=True,
+                ),
+            )
+        )
+    if not candidates:
+        return None
+    candidates.sort(key=lambda item: item[0])
+    return candidates[-1][1]
+
+
+def _run_has_meaningful_state(run_dir: Path) -> bool:
+    if any((run_dir / filename).exists() for filename in ("coordinator_state.json", "manifest.json", "summary.json")):
+        return True
+    for directory_name in ("decisions", "games", "summaries"):
+        directory = run_dir / directory_name
+        if not directory.exists():
+            continue
+        if any(directory.iterdir()):
+            return True
+    return False
+
+
+def _run_is_complete(run_dir: Path) -> bool:
+    if (run_dir / RUN_COMPLETE_FLAG_NAME).exists():
+        return True
+    summary_payload = _load_json_if_exists(run_dir / "summary.json")
+    if isinstance(summary_payload, dict) and isinstance(summary_payload.get("completed_at"), str) and summary_payload.get("completed_at"):
+        return True
+    state_payload = _load_json_if_exists(run_dir / "coordinator_state.json")
+    if not isinstance(state_payload, dict):
+        return False
+    tasks = state_payload.get("tasks")
+    return isinstance(tasks, list) and bool(tasks) and all(
+        isinstance(entry, dict) and entry.get("status") == "completed"
+        for entry in tasks
+    )
+
+
+def _run_last_activity_timestamp(run_dir: Path) -> float:
+    timestamps: list[float] = []
+    for path in (
+        run_dir,
+        run_dir / "coordinator_state.json",
+        run_dir / "manifest.json",
+        run_dir / "summary.json",
+        run_dir / RUN_COMPLETE_FLAG_NAME,
+    ):
+        try:
+            timestamps.append(path.stat().st_mtime)
+        except FileNotFoundError:
+            continue
+    for directory_name in ("decisions", "games", "summaries"):
+        directory = run_dir / directory_name
+        if not directory.exists():
+            continue
+        for child in directory.iterdir():
+            try:
+                timestamps.append(child.stat().st_mtime)
+            except FileNotFoundError:
+                continue
+    return max(timestamps) if timestamps else 0.0
+
+
+def _load_run_id_from_dir(run_dir: Path) -> str | None:
+    for filename in ("coordinator_state.json", "manifest.json", "summary.json", RUN_COMPLETE_FLAG_NAME):
+        payload = _load_json_if_exists(run_dir / filename)
+        if not isinstance(payload, dict):
+            continue
+        run_id = payload.get("run_id")
+        if isinstance(run_id, str) and run_id:
+            return run_id
+    return None
+
+
+def _load_json_if_exists(path: Path) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except FileNotFoundError:
+        return None
+    except (OSError, json.JSONDecodeError):
+        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _infer_run_id_from_path(path: Path) -> str:
+    if path.name.startswith("run_"):
+        return path.name
+    return _generate_run_id()
+
+
+def _generate_run_id() -> str:
+    return datetime.now(UTC).strftime("run_%Y%m%dT%H%M%SZ")
 
 
 def make_handler(coordinator: DistributedSelfPlayCoordinator) -> type[BaseHTTPRequestHandler]:
