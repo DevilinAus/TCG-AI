@@ -37,7 +37,12 @@ function startPolling() {
 
 function renderDashboard(status) {
   const workers = Object.values(status.workers ?? {});
-  const machines = aggregateMachines(workers);
+  const liveWorkers = workers.filter((worker) => worker.is_online);
+  const renderedAtIso = new Date().toISOString();
+  const machines = aggregateMachines(workers, {
+    renderedAtIso,
+    runCreatedAt: status.created_at ?? null,
+  });
   const onlineMachines = machines.filter((machine) => machine.is_online);
   const busyMachines = machines.filter((machine) => machine.status === "busy");
   const staleMachines = machines.filter((machine) => machine.status === "stalled" || machine.status === "offline");
@@ -65,7 +70,7 @@ function renderDashboard(status) {
     ? `${busyMachines.length} busy · ${onlineMachines.length} online · ${staleMachines.length} stale/offline`
     : "No workers yet";
   workerSummaryEl.textContent = machines.length
-    ? `${machines.length} machines · ${workers.length} worker processes · ${formatDecimal(throughput.games_per_minute_5m ?? 0)} games/min over the last 5 minutes`
+    ? `${machines.length} machines · ${formatNumber(status.online_workers ?? liveWorkers.length)} live worker processes · ${formatDecimal(throughput.games_per_minute_5m ?? 0)} games/min over the last 5 minutes`
     : "No workers connected";
 }
 
@@ -113,8 +118,9 @@ function renderLeaderboard(machines) {
         <strong>${escapeHtml(worker.machine_name)}</strong>
       </div>
       <div>${formatNumber(worker.completed_games ?? 0)} games</div>
-      <div>${formatDecimal(worker.recent_games_per_minute_5m ?? 0)} gpm</div>
-      <div>${formatNumber(worker.active_workers ?? 0)} workers</div>
+      <div>${formatDecimal(worker.recent_games_per_minute_5m ?? 0)} current</div>
+      <div>${formatDecimal(worker.games_per_minute_overall ?? 0)} overall</div>
+      <div>${formatNumber(worker.active_workers ?? 0)} live</div>
     </div>
   `).join("");
 }
@@ -138,7 +144,7 @@ function renderWorkerCard(worker) {
       <div class="worker-head">
         <div>
           <h3 class="worker-title">${escapeHtml(worker.machine_name)}</h3>
-          <p class="worker-platform">${escapeHtml(worker.hostname ?? "unknown host")} · ${escapeHtml(shortPlatform(worker.platform))} · ${formatNumber(worker.active_workers ?? 0)} workers</p>
+          <p class="worker-platform">${escapeHtml(worker.hostname ?? "unknown host")} · ${escapeHtml(shortPlatform(worker.platform))} · ${formatNumber(worker.active_workers ?? 0)} live workers</p>
         </div>
         <span class="status-pill status-${escapeHtml(worker.status)}">${onlineLabel}</span>
       </div>
@@ -159,8 +165,12 @@ function renderWorkerCard(worker) {
           <div class="mini-metric-value">${formatNumber(worker.completed_games ?? 0)}</div>
         </div>
         <div class="worker-stat">
-          <div class="metric-label">Recent Pace</div>
+          <div class="metric-label">Current Pace</div>
           <div class="mini-metric-value">${formatDecimal(worker.recent_games_per_minute_5m ?? 0)} gpm</div>
+        </div>
+        <div class="worker-stat">
+          <div class="metric-label">Overall Pace</div>
+          <div class="mini-metric-value">${formatDecimal(worker.games_per_minute_overall ?? 0)} gpm</div>
         </div>
         <div class="worker-stat">
           <div class="metric-label">Avg Game Size</div>
@@ -188,7 +198,7 @@ function renderWorkerCard(worker) {
   `;
 }
 
-function aggregateMachines(workers) {
+function aggregateMachines(workers, context = {}) {
   const machinesByName = new Map();
 
   for (const worker of workers) {
@@ -198,7 +208,7 @@ function aggregateMachines(workers) {
     machinesByName.set(machineName, machine);
   }
 
-  return [...machinesByName.values()];
+  return [...machinesByName.values()].map((machine) => finalizeMachineAggregate(machine, context));
 }
 
 function createMachineAggregate(machineName, worker) {
@@ -224,8 +234,13 @@ function createMachineAggregate(machineName, worker) {
     current_task_completed_games: 0,
     current_task_progress: 0,
     last_duration_seconds: null,
+    first_seen_at: null,
+    last_seen_at: null,
     seconds_since_seen: null,
+    first_progress_at: null,
+    last_progress_at: null,
     recent_games_per_minute_5m: 0,
+    games_per_minute_overall: 0,
     average_actions_per_game: 0,
     throughput_series: [],
     _seriesMap: new Map(),
@@ -268,6 +283,17 @@ function mergeWorkerIntoMachine(machine, worker) {
     machine.seconds_since_seen = worker.seconds_since_seen ?? null;
   }
 
+  machine.first_seen_at = firstIsoDate(worker.first_seen_at, machine.first_seen_at) ?? machine.first_seen_at;
+  machine.last_seen_at = laterIsoDate(worker.last_seen_at, machine.last_seen_at) ?? machine.last_seen_at;
+
+  if (!machine.first_progress_at || firstIsoDate(worker.first_progress_at, machine.first_progress_at) === worker.first_progress_at) {
+    machine.first_progress_at = worker.first_progress_at ?? machine.first_progress_at;
+  }
+
+  if (!machine.last_progress_at || laterIsoDate(worker.last_progress_at, machine.last_progress_at) === worker.last_progress_at) {
+    machine.last_progress_at = worker.last_progress_at ?? machine.last_progress_at;
+  }
+
   const workerProgressRank = worker.seconds_since_progress ?? Number.POSITIVE_INFINITY;
   if (workerProgressRank < machine._lastProgressRank) {
     machine._lastProgressRank = workerProgressRank;
@@ -296,6 +322,19 @@ function mergeWorkerIntoMachine(machine, worker) {
     : 0;
   machine.last_duration_seconds = machine._lastProgressValue;
   machine.throughput_series = [...machine._seriesMap.values()].sort((left, right) => left.minute.localeCompare(right.minute));
+}
+
+function finalizeMachineAggregate(machine, context = {}) {
+  const overallStartedAt = machine.first_progress_at ?? machine.first_seen_at ?? context.runCreatedAt ?? null;
+  const overallReferenceAt = machine.is_online
+    ? context.renderedAtIso ?? null
+    : machine.last_progress_at ?? machine.last_seen_at ?? context.renderedAtIso ?? null;
+  machine.games_per_minute_overall = computeGamesPerMinute(
+    machine.completed_games ?? 0,
+    overallStartedAt,
+    overallReferenceAt,
+  );
+  return machine;
 }
 
 function mergeMachineStatus(currentStatus, workerStatus) {
@@ -388,6 +427,46 @@ function shortPlatform(platform) {
     return "unknown platform";
   }
   return platform.replaceAll("-64bit", "").replaceAll("-ARM64", "").replaceAll("-x86_64", "");
+}
+
+function computeGamesPerMinute(games, startedAt, endedAt) {
+  const elapsedSeconds = secondsBetweenIso(startedAt, endedAt);
+  if (!elapsedSeconds || elapsedSeconds <= 0) {
+    return 0;
+  }
+  return (Number(games ?? 0) / elapsedSeconds) * 60;
+}
+
+function secondsBetweenIso(startedAt, endedAt) {
+  if (!startedAt || !endedAt) {
+    return null;
+  }
+  const startValue = Date.parse(startedAt);
+  const endValue = Date.parse(endedAt);
+  if (Number.isNaN(startValue) || Number.isNaN(endValue)) {
+    return null;
+  }
+  return Math.max((endValue - startValue) / 1000, 0);
+}
+
+function firstIsoDate(left, right) {
+  if (!left) {
+    return right;
+  }
+  if (!right) {
+    return left;
+  }
+  return left <= right ? left : right;
+}
+
+function laterIsoDate(left, right) {
+  if (!left) {
+    return right;
+  }
+  if (!right) {
+    return left;
+  }
+  return left >= right ? left : right;
 }
 
 function escapeHtml(value) {

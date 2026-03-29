@@ -156,6 +156,8 @@ class DistributedSelfPlayCoordinator:
                     int(worker_state.get("current_task_completed_games", 0)),
                     local_game_index,
                 )
+                if not isinstance(worker_state.get("first_progress_at"), str):
+                    worker_state["first_progress_at"] = now.isoformat()
                 worker_state["last_progress_at"] = now.isoformat()
                 worker_state["last_completed_global_game"] = _coerce_int(progress.get("global_game_index"), default=0)
                 worker_state["last_duration_seconds"] = _coerce_float(progress.get("duration_seconds"))
@@ -259,13 +261,15 @@ class DistributedSelfPlayCoordinator:
             self._reclaim_expired_leases(now)
             self._prune_progress_buckets(now)
             tasks = self._state["tasks"]
-            workers = {
-                worker_id: self._serialize_worker_status(worker_id, worker_state, now)
-                for worker_id, worker_state in self._state["workers"].items()
-            }
-            reported = _build_reported_totals(workers)
             created_at_text = self._state.get("created_at")
             created_at = datetime.fromisoformat(created_at_text) if isinstance(created_at_text, str) else now
+            workers = {
+                worker_id: self._serialize_worker_status(worker_id, worker_state, now, created_at)
+                for worker_id, worker_state in self._state["workers"].items()
+            }
+            online_workers = sum(1 for worker in workers.values() if worker.get("is_online"))
+            busy_workers = sum(1 for worker in workers.values() if worker.get("status") == "busy")
+            reported = _build_reported_totals(workers)
             elapsed_seconds = max((now - created_at).total_seconds(), 0.0)
             throughput = _build_throughput_metrics(
                 buckets=self._state["progress_buckets"],
@@ -286,6 +290,9 @@ class DistributedSelfPlayCoordinator:
                 "leased_tasks": sum(1 for entry in tasks if entry["status"] == "leased"),
                 "completed_tasks": sum(1 for entry in tasks if entry["status"] == "completed"),
                 "run_complete": self._all_tasks_completed(),
+                "known_workers": len(workers),
+                "online_workers": online_workers,
+                "busy_workers": busy_workers,
                 "aggregate": dict(self._state["aggregate"]),
                 "reported": reported,
                 "recovery": dict(self._recovery_report),
@@ -627,6 +634,8 @@ class DistributedSelfPlayCoordinator:
         now: datetime,
     ) -> None:
         worker_state = self._state["workers"].setdefault(worker_id, _default_worker_state(worker_id))
+        if not isinstance(worker_state.get("first_seen_at"), str):
+            worker_state["first_seen_at"] = now.isoformat()
         worker_state["last_seen_at"] = now.isoformat()
         if not isinstance(worker_meta, dict):
             return
@@ -648,7 +657,10 @@ class DistributedSelfPlayCoordinator:
         worker_id: str,
         worker_state: dict[str, Any],
         now: datetime,
+        run_created_at: datetime,
     ) -> dict[str, Any]:
+        first_seen_at = worker_state.get("first_seen_at")
+        first_progress_at = worker_state.get("first_progress_at")
         seconds_since_seen = _seconds_since(worker_state.get("last_seen_at"), now)
         seconds_since_progress = _seconds_since(worker_state.get("last_progress_at"), now)
         contact_threshold_seconds = _contact_threshold_seconds(worker_state)
@@ -672,6 +684,18 @@ class DistributedSelfPlayCoordinator:
         current_task_elapsed_seconds = _seconds_since(worker_state.get("current_task_started_at"), now)
         recent_1m = _window_totals(worker_state["progress_buckets"], now=now, window_minutes=1)
         recent_5m = _window_totals(worker_state["progress_buckets"], now=now, window_minutes=5)
+        overall_started_at = first_progress_at or first_seen_at or run_created_at.isoformat()
+        overall_reference_at = (
+            now.isoformat()
+            if is_online
+            else worker_state.get("last_progress_at") or worker_state.get("last_seen_at") or now.isoformat()
+        )
+        overall_elapsed_seconds = _seconds_between(overall_started_at, overall_reference_at)
+        games_per_minute_overall = (
+            round((completed_games / max(overall_elapsed_seconds, 1.0)) * 60.0, 3)
+            if completed_games > 0 and overall_elapsed_seconds is not None
+            else 0.0
+        )
         return {
             "worker_id": worker_id,
             "machine_name": worker_state.get("machine_name"),
@@ -680,6 +704,8 @@ class DistributedSelfPlayCoordinator:
             "python_version": worker_state.get("python_version"),
             "status": status,
             "is_online": is_online,
+            "first_seen_at": first_seen_at,
+            "first_progress_at": first_progress_at,
             "last_seen_at": worker_state.get("last_seen_at"),
             "last_progress_at": worker_state.get("last_progress_at"),
             "seconds_since_seen": round(seconds_since_seen, 3) if seconds_since_seen is not None else None,
@@ -705,6 +731,7 @@ class DistributedSelfPlayCoordinator:
             "last_duration_seconds": worker_state.get("last_duration_seconds"),
             "last_chunk_submitted_at": worker_state.get("last_chunk_submitted_at"),
             "last_completed_task_index": worker_state.get("last_completed_task_index"),
+            "games_per_minute_overall": games_per_minute_overall,
             "recent_games_per_minute_1m": round(recent_1m["games"] / 1.0, 3),
             "recent_games_per_minute_5m": round(recent_5m["games"] / 5.0, 3),
             "throughput_series": _bucket_series(worker_state["progress_buckets"], now=now, window_minutes=THROUGHPUT_SERIES_MINUTES),
@@ -757,6 +784,8 @@ def _default_worker_state(worker_id: str) -> dict[str, Any]:
         "python_version": None,
         "poll_seconds": None,
         "heartbeat_interval_seconds": None,
+        "first_seen_at": None,
+        "first_progress_at": None,
         "last_seen_at": None,
         "last_progress_at": None,
         "leased_task_index": None,
@@ -787,6 +816,8 @@ def _normalize_worker_state(worker_id: str, payload: Any) -> dict[str, Any]:
         "hostname",
         "platform",
         "python_version",
+        "first_seen_at",
+        "first_progress_at",
         "last_seen_at",
         "last_progress_at",
         "current_task_started_at",
@@ -988,6 +1019,17 @@ def _seconds_since(value: Any, now: datetime) -> float | None:
     except ValueError:
         return None
     return max((now - then).total_seconds(), 0.0)
+
+
+def _seconds_between(start: Any, end: Any) -> float | None:
+    if not isinstance(start, str) or not isinstance(end, str):
+        return None
+    try:
+        start_value = datetime.fromisoformat(start)
+        end_value = datetime.fromisoformat(end)
+    except ValueError:
+        return None
+    return max((end_value - start_value).total_seconds(), 0.0)
 
 
 def _minute_floor(moment: datetime) -> datetime:

@@ -52,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--port", type=int, default=8787)
     parser.add_argument("--run-id", default=None)
     parser.add_argument("--games", type=int, default=10000)
-    parser.add_argument("--chunk-size", type=int, default=50)
+    parser.add_argument("--chunk-size", type=int, default=10)
     parser.add_argument("--seed", type=int, default=random.randint(1, 999_999))
     parser.add_argument("--max-actions-per-game", type=int, default=200)
     parser.add_argument("--max-depth", type=int, default=2)
