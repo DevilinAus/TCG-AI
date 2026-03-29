@@ -99,6 +99,52 @@ class StandardTrainingScriptTests(unittest.TestCase):
 
         self.assertEqual(resolved, latest_run.resolve())
 
+    def test_resolve_training_decision_paths_prefers_committed_summary_backed_shards(self) -> None:
+        training_module = _load_training_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_dir = Path(temp_dir)
+            decisions_dir = input_dir / "decisions"
+            summaries_dir = input_dir / "summaries"
+            decisions_dir.mkdir()
+            summaries_dir.mkdir()
+
+            committed = decisions_dir / "shard_000000.jsonl"
+            committed.write_text('{"decision":1}\n', encoding="utf-8")
+            orphaned = decisions_dir / "shard_000001.jsonl"
+            orphaned.write_text('{"decision":2}\n', encoding="utf-8")
+            (summaries_dir / "shard_000000.json").write_text('{"samples":1}', encoding="utf-8")
+
+            decision_paths, report = training_module._resolve_training_decision_paths(input_dir)
+
+        self.assertEqual([path.name for path in decision_paths], ["shard_000000.jsonl"])
+        self.assertEqual(report["selection_mode"], "summary_backed")
+        self.assertEqual(report["usable_shards"], 1)
+        self.assertEqual(report["ignored_uncommitted_shards"], 1)
+        self.assertEqual(report["skipped_invalid_shards"], 0)
+
+    def test_resolve_training_decision_paths_skips_malformed_committed_shards(self) -> None:
+        training_module = _load_training_module()
+        with tempfile.TemporaryDirectory() as temp_dir:
+            input_dir = Path(temp_dir)
+            decisions_dir = input_dir / "decisions"
+            summaries_dir = input_dir / "summaries"
+            decisions_dir.mkdir()
+            summaries_dir.mkdir()
+
+            valid_path = decisions_dir / "shard_000000.jsonl"
+            valid_path.write_text('{"decision":1}\n', encoding="utf-8")
+            invalid_path = decisions_dir / "shard_000001.jsonl"
+            invalid_path.write_text('{"decision":2}\n{"decision":"unterminated}\n', encoding="utf-8")
+            (summaries_dir / "shard_000000.json").write_text('{"samples":1}', encoding="utf-8")
+            (summaries_dir / "shard_000001.json").write_text('{"samples":2}', encoding="utf-8")
+
+            decision_paths, report = training_module._resolve_training_decision_paths(input_dir)
+
+        self.assertEqual([path.name for path in decision_paths], ["shard_000000.jsonl"])
+        self.assertEqual(report["selection_mode"], "summary_backed")
+        self.assertEqual(report["usable_shards"], 1)
+        self.assertEqual(report["skipped_invalid_shards"], 1)
+
 
 class StandardCheckpointLoadingTests(unittest.TestCase):
     def test_load_trusted_checkpoint_uses_non_weights_only_load(self) -> None:

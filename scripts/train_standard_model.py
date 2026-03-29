@@ -70,13 +70,31 @@ class SelfPlayDecisionDataset:
         self.validation_mod = max(2, validation_mod)
         self.validation_bucket = validation_bucket % self.validation_mod
         self.max_records = max_records
+        self._warned_runtime_corruption: set[Path] = set()
 
     def __iter__(self):
         yielded = 0
         for path in self.decision_paths:
-            with path.open("r", encoding="utf-8") as handle:
-                for line in handle:
-                    payload = json.loads(line)
+            try:
+                handle = path.open("r", encoding="utf-8")
+            except OSError as exc:
+                _warn_skipped_shard(path, f"could not open shard: {exc}")
+                continue
+            with handle:
+                for line_number, line in enumerate(handle, start=1):
+                    stripped = line.strip()
+                    if not stripped:
+                        continue
+                    try:
+                        payload = json.loads(stripped)
+                    except json.JSONDecodeError as exc:
+                        if path not in self._warned_runtime_corruption:
+                            _warn_skipped_shard(
+                                path,
+                                f"encountered malformed JSON at line {line_number}: {exc}",
+                            )
+                            self._warned_runtime_corruption.add(path)
+                        break
                     if not _record_in_split(
                         payload,
                         split=self.split,
@@ -128,9 +146,9 @@ def main() -> int:
     args = parse_args()
     _require_torch_modules()
     input_dir = _resolve_input_dir(args.input_dir)
-    decision_paths = sorted((input_dir / "decisions").glob("*.jsonl"))
+    decision_paths, shard_report = _resolve_training_decision_paths(input_dir)
     if not decision_paths:
-        raise SystemExit(f"No decision shards found under {input_dir / 'decisions'}")
+        raise SystemExit(f"No usable decision shards found under {input_dir / 'decisions'}")
 
     output_dir = _resolve_output_dir(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -179,6 +197,13 @@ def main() -> int:
         f"input={input_dir} output={output_dir} device={device} "
         f"files={len(decision_paths)} batch_size={batch_size} "
         f"state_dim={model_state_dim} action_dim={model_action_dim}"
+    )
+    print(
+        "[train] "
+        f"shard_selection mode={shard_report['selection_mode']} "
+        f"usable={shard_report['usable_shards']} "
+        f"skipped_invalid={shard_report['skipped_invalid_shards']} "
+        f"ignored_uncommitted={shard_report['ignored_uncommitted_shards']}"
     )
 
     global_step = 0
@@ -481,6 +506,119 @@ def _save_checkpoint(
         latest_path = output_dir / latest_name
         shutil.copy2(checkpoint_path, latest_path)
     return checkpoint_path
+
+
+def _resolve_training_decision_paths(input_dir: Path) -> tuple[list[Path], dict[str, int | str]]:
+    decisions_dir = input_dir / "decisions"
+    summaries_dir = input_dir / "summaries"
+    raw_decision_paths = sorted(decisions_dir.glob("*.jsonl"))
+    expected_samples_by_path: dict[Path, int] = {}
+    ignored_uncommitted_shards = 0
+
+    if summaries_dir.exists():
+        summary_paths = sorted(summaries_dir.glob("shard_*.json"))
+        if summary_paths:
+            selected_paths: list[Path] = []
+            for summary_path in summary_paths:
+                decision_path = decisions_dir / f"{summary_path.stem}.jsonl"
+                if not decision_path.exists():
+                    _warn_skipped_shard(
+                        decision_path,
+                        f"missing decision shard for committed summary {summary_path.name}",
+                    )
+                    continue
+                expected_samples = _load_expected_summary_samples(summary_path)
+                if expected_samples is None:
+                    continue
+                expected_samples_by_path[decision_path] = expected_samples
+                selected_paths.append(decision_path)
+            ignored_uncommitted_shards = max(0, len(raw_decision_paths) - len(selected_paths))
+            validated_paths, invalid_count = _validate_training_decision_paths(
+                selected_paths,
+                expected_samples_by_path=expected_samples_by_path,
+            )
+            return validated_paths, {
+                "selection_mode": "summary_backed",
+                "usable_shards": len(validated_paths),
+                "skipped_invalid_shards": invalid_count,
+                "ignored_uncommitted_shards": ignored_uncommitted_shards,
+            }
+
+    validated_paths, invalid_count = _validate_training_decision_paths(
+        raw_decision_paths,
+        expected_samples_by_path=expected_samples_by_path,
+    )
+    return validated_paths, {
+        "selection_mode": "raw_decisions",
+        "usable_shards": len(validated_paths),
+        "skipped_invalid_shards": invalid_count,
+        "ignored_uncommitted_shards": 0,
+    }
+
+
+def _load_expected_summary_samples(summary_path: Path) -> int | None:
+    try:
+        payload = json.loads(summary_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        _warn_skipped_shard(summary_path, f"invalid shard summary: {exc}")
+        return None
+    if not isinstance(payload, dict):
+        _warn_skipped_shard(summary_path, "invalid shard summary: expected a JSON object")
+        return None
+    samples = payload.get("samples")
+    if not isinstance(samples, int):
+        _warn_skipped_shard(summary_path, "invalid shard summary: missing integer 'samples'")
+        return None
+    return max(samples, 0)
+
+
+def _validate_training_decision_paths(
+    decision_paths: list[Path],
+    *,
+    expected_samples_by_path: dict[Path, int],
+) -> tuple[list[Path], int]:
+    valid_paths: list[Path] = []
+    invalid_count = 0
+    for path in decision_paths:
+        if _validate_decision_shard(path, expected_samples=expected_samples_by_path.get(path)):
+            valid_paths.append(path)
+            continue
+        invalid_count += 1
+    return valid_paths, invalid_count
+
+
+def _validate_decision_shard(path: Path, *, expected_samples: int | None) -> bool:
+    try:
+        handle = path.open("r", encoding="utf-8")
+    except OSError as exc:
+        _warn_skipped_shard(path, f"could not open shard: {exc}")
+        return False
+    record_count = 0
+    with handle:
+        for line_number, line in enumerate(handle, start=1):
+            stripped = line.strip()
+            if not stripped:
+                continue
+            try:
+                json.loads(stripped)
+            except json.JSONDecodeError as exc:
+                _warn_skipped_shard(path, f"malformed JSON at line {line_number}: {exc}")
+                return False
+            record_count += 1
+    if expected_samples is not None and record_count != expected_samples:
+        _warn_skipped_shard(
+            path,
+            f"summary expected {expected_samples} decision samples but found {record_count}",
+        )
+        return False
+    if record_count == 0:
+        _warn_skipped_shard(path, "shard contained no decision records")
+        return False
+    return True
+
+
+def _warn_skipped_shard(path: Path, detail: str) -> None:
+    print(f"[train] skipping shard {path.name}: {detail}", file=sys.stderr)
 
 
 def _resolve_input_dir(input_dir: Path | None) -> Path:
