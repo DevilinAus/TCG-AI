@@ -63,6 +63,28 @@ class StandardMlTests(unittest.TestCase):
             legal_action_ids,
         )
 
+    def test_planner_batches_oracle_requests_for_sibling_states(self) -> None:
+        class RecordingOracle:
+            def __init__(self, checkpoint_path: Path) -> None:
+                self.batch_sizes: list[int] = []
+                self.delegate = BackendPolicyValueOracle(
+                    backend=PolicyValueBackend(checkpoint_path=checkpoint_path)
+                )
+
+            def evaluate_batch(self, requests):
+                self.batch_sizes.append(len(requests))
+                return self.delegate.evaluate_batch(requests)
+
+        state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck", ai_name="Brock")
+        oracle = RecordingOracle(Path(self.temp_dir.name) / "missing.pt")
+        planner = StandardTurnPlanner(config=PlannerConfig(max_depth=1, beam_width=2), oracle=oracle)
+
+        planner.plan(state, acting_player_index=0)
+
+        self.assertGreater(len(list_legal_actions(state, player_index=0)), 1)
+        self.assertGreater(max(oracle.batch_sizes), 1)
+        self.assertGreater(sum(oracle.batch_sizes), len(oracle.batch_sizes))
+
     def test_service_handles_full_state_payload(self) -> None:
         state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck", ai_name="Brock")
         payload = {
