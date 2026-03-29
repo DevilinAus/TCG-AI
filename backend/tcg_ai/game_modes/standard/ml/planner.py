@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import nullcontext
 from copy import deepcopy
 from dataclasses import dataclass
 from math import inf
@@ -12,6 +13,14 @@ from .oracle import (
     HeuristicPolicyValueOracle,
     PolicyValueOracle,
     PolicyValueRequest,
+)
+from .profiling import (
+    DecisionProfile,
+    current_profile,
+    observe_max,
+    record_counter,
+    time_metric,
+    use_profile,
 )
 
 
@@ -56,52 +65,64 @@ class StandardTurnPlanner:
         if not legal_actions:
             raise ValueError("Planner needs at least one legal action.")
 
-        self._nodes_evaluated = 0
-        root_analysis = analyze_legal_actions(
-            state,
-            acting_player_index=acting_player_index,
-            legal_actions=legal_actions,
-        )
-        baseline_score, ranked_actions = self._rank_actions(
-            state,
-            acting_player_index,
-            legal_actions,
-            acting_player_index,
-            analysis_by_action_id=root_analysis,
-        )
-        candidates: list[dict[str, Any]] = []
-        for ranked_action in ranked_actions[: self.config.beam_width]:
-            score, line = self._search(
-                ranked_action.successor_state,
-                acting_player_index,
-                depth=1,
-                legal_actions=ranked_action.successor_legal_actions,
-                current_score=ranked_action.one_step_score,
-            )
-            candidates.append(
-                {
-                    "action": ranked_action.action,
-                    "action_id": ranked_action.action_id,
-                    "score": round(score, 6),
-                    "delta": round(score - baseline_score, 6),
-                    "line": [ranked_action.action_id, *line],
-                    "rank_score": round(ranked_action.rank_score, 6),
-                    "prior": round(ranked_action.prior, 6),
-                    "one_step_score": round(ranked_action.one_step_score, 6),
-                    "continuation_score": round(ranked_action.continuation_score, 6),
-                    "reason_tags": list(ranked_action.analysis.get("reason_tags") or []),
-                    "reason_summary": ranked_action.analysis.get("reason_summary"),
-                    "penalty_breakdown": dict(ranked_action.analysis.get("penalty_breakdown") or {}),
-                    "dominance_context": dict(ranked_action.analysis.get("dominance_context") or {}),
-                }
-            )
+        profile = current_profile() or DecisionProfile()
+        profile_context = use_profile(profile) if current_profile() is None else nullcontext(profile)
+        with profile_context:
+            self._nodes_evaluated = 0
+            record_counter("planner.plan.calls")
+            observe_max("planner.max_legal_actions", len(legal_actions))
+            observe_max("planner.max_depth_config", self.config.max_depth)
+            observe_max("planner.max_beam_width_config", self.config.beam_width)
+            observe_max("planner.max_opponent_branch_width_config", self.config.opponent_branch_width)
+            with time_metric("planner.plan_total"):
+                with time_metric("planner.root_analysis"):
+                    root_analysis = analyze_legal_actions(
+                        state,
+                        acting_player_index=acting_player_index,
+                        legal_actions=legal_actions,
+                    )
+                baseline_score, ranked_actions = self._rank_actions(
+                    state,
+                    acting_player_index,
+                    legal_actions,
+                    acting_player_index,
+                    analysis_by_action_id=root_analysis,
+                )
+                candidates: list[dict[str, Any]] = []
+                with time_metric("planner.root_search_total"):
+                    for ranked_action in ranked_actions[: self.config.beam_width]:
+                        score, line = self._search(
+                            ranked_action.successor_state,
+                            acting_player_index,
+                            depth=1,
+                            legal_actions=ranked_action.successor_legal_actions,
+                            current_score=ranked_action.one_step_score,
+                        )
+                        candidates.append(
+                            {
+                                "action": ranked_action.action,
+                                "action_id": ranked_action.action_id,
+                                "score": round(score, 6),
+                                "delta": round(score - baseline_score, 6),
+                                "line": [ranked_action.action_id, *line],
+                                "rank_score": round(ranked_action.rank_score, 6),
+                                "prior": round(ranked_action.prior, 6),
+                                "one_step_score": round(ranked_action.one_step_score, 6),
+                                "continuation_score": round(ranked_action.continuation_score, 6),
+                                "reason_tags": list(ranked_action.analysis.get("reason_tags") or []),
+                                "reason_summary": ranked_action.analysis.get("reason_summary"),
+                                "penalty_breakdown": dict(ranked_action.analysis.get("penalty_breakdown") or {}),
+                                "dominance_context": dict(ranked_action.analysis.get("dominance_context") or {}),
+                            }
+                        )
 
-        best_score = max(candidate["score"] for candidate in candidates)
-        best = next(candidate for candidate in candidates if candidate["score"] == best_score)
-        policy_target_scores = _build_policy_target_scores(
-            legal_action_ids=[ranked_action.action_id for ranked_action in ranked_actions],
-            candidates=candidates,
-        )
+                best_score = max(candidate["score"] for candidate in candidates)
+                best = next(candidate for candidate in candidates if candidate["score"] == best_score)
+                policy_target_scores = _build_policy_target_scores(
+                    legal_action_ids=[ranked_action.action_id for ranked_action in ranked_actions],
+                    candidates=candidates,
+                )
+            performance_profile = profile.snapshot()
         return {
             "chosen_action": best["action"],
             "chosen_action_id": best["action_id"],
@@ -133,6 +154,7 @@ class StandardTurnPlanner:
                 "penalty_breakdown": best["penalty_breakdown"],
                 "dominance_context": best["dominance_context"],
                 "policy_target_scores": policy_target_scores,
+                "performance_profile": performance_profile,
             },
         }
 
@@ -144,7 +166,11 @@ class StandardTurnPlanner:
         legal_actions: list[dict[str, Any]] | None = None,
         current_score: float | None = None,
     ) -> tuple[float, list[str]]:
+        record_counter("planner.search.calls")
+        record_counter(f"planner.search.depth_{depth}.calls")
+        observe_max("planner.max_depth_reached", depth)
         self._nodes_evaluated += 1
+        record_counter("planner.nodes_evaluated")
         if state.winner is not None or depth >= self.config.max_depth:
             return (
                 self._evaluate_state_value(
@@ -225,98 +251,106 @@ class StandardTurnPlanner:
         baseline_score: float | None = None,
         analysis_by_action_id: dict[str, dict[str, Any]] | None = None,
     ) -> tuple[float, list[RankedAction]]:
-        if analysis_by_action_id is None:
-            analysis_by_action_id = analyze_legal_actions(
-                state,
-                acting_player_index=acting_player_index,
-                legal_actions=legal_actions,
-            )
-        oracle_result = self._evaluate_requests(
-            [
+        record_counter("planner.rank_actions.calls")
+        observe_max("planner.rank_actions.max_legal_actions", len(legal_actions))
+        with time_metric("planner.rank_actions.total"):
+            if analysis_by_action_id is None:
+                with time_metric("planner.rank_actions.analysis"):
+                    analysis_by_action_id = analyze_legal_actions(
+                        state,
+                        acting_player_index=acting_player_index,
+                        legal_actions=legal_actions,
+                    )
+            oracle_result = self._evaluate_requests(
+                [
+                    PolicyValueRequest(
+                        state=state,
+                        acting_player_index=acting_player_index,
+                        root_player_index=root_player_index,
+                        legal_actions=legal_actions,
+                    )
+                ]
+            )[0]
+            baseline_score = float(oracle_result.value) if baseline_score is None else float(baseline_score)
+            ranked: list[RankedAction] = []
+            simulated_actions: list[tuple[dict[str, Any], str, GameState, int, list[dict[str, Any]]]] = []
+            for action in legal_actions:
+                record_counter("planner.simulated_actions")
+                with time_metric("planner.simulation.deepcopy"):
+                    simulated_state = deepcopy(state)
+                with time_metric("planner.simulation.apply_action"):
+                    apply_action_for_player(simulated_state, action, acting_player_index)
+                action_id = _safe_action_id(action)
+                next_player_index = simulated_state.current_player
+                with time_metric("planner.simulation.legal_actions"):
+                    next_legal_actions = list_legal_actions(
+                        simulated_state,
+                        player_index=next_player_index,
+                    )
+                simulated_actions.append(
+                    (
+                        action,
+                        action_id,
+                        simulated_state,
+                        next_player_index,
+                        next_legal_actions,
+                    )
+                )
+            one_step_requests = [
                 PolicyValueRequest(
-                    state=state,
+                    state=simulated_state,
+                    acting_player_index=next_player_index,
+                    root_player_index=root_player_index,
+                    legal_actions=next_legal_actions,
+                )
+                for _, _, simulated_state, next_player_index, next_legal_actions in simulated_actions
+            ]
+            one_step_results = self._evaluate_requests(one_step_requests)
+            for (
+                action,
+                action_id,
+                simulated_state,
+                _next_player_index,
+                _next_legal_actions,
+            ), one_step_result in zip(simulated_actions, one_step_results):
+                one_step_score = float(one_step_result.value)
+                prior = float(oracle_result.action_priors.get(action_id, 0.0))
+                analysis = analysis_by_action_id.get(action_id, {})
+                planner_adjustment, penalty_breakdown = planner_adjustment_for_analysis(analysis)
+                continuation_score = self._same_turn_continuation_score(
+                    simulated_state,
                     acting_player_index=acting_player_index,
                     root_player_index=root_player_index,
-                    legal_actions=legal_actions,
+                    max_steps=2,
+                    current_score=one_step_score,
                 )
-            ]
-        )[0]
-        baseline_score = float(oracle_result.value) if baseline_score is None else float(baseline_score)
-        ranked: list[RankedAction] = []
-        simulated_actions: list[tuple[dict[str, Any], str, GameState, int, list[dict[str, Any]]]] = []
-        for action in legal_actions:
-            simulated_state = deepcopy(state)
-            apply_action_for_player(simulated_state, action, acting_player_index)
-            action_id = _safe_action_id(action)
-            next_player_index = simulated_state.current_player
-            next_legal_actions = list_legal_actions(
-                simulated_state,
-                player_index=next_player_index,
-            )
-            simulated_actions.append(
-                (
-                    action,
-                    action_id,
-                    simulated_state,
-                    next_player_index,
-                    next_legal_actions,
+                rank_score = round(
+                    one_step_score
+                    + prior * 8.0
+                    + (one_step_score - baseline_score) * 0.3
+                    + self._continuation_rank_bonus(one_step_score, continuation_score)
+                    + planner_adjustment,
+                    6,
                 )
-            )
-        one_step_requests = [
-            PolicyValueRequest(
-                state=simulated_state,
-                acting_player_index=next_player_index,
-                root_player_index=root_player_index,
-                legal_actions=next_legal_actions,
-            )
-            for _, _, simulated_state, next_player_index, next_legal_actions in simulated_actions
-        ]
-        one_step_results = self._evaluate_requests(one_step_requests)
-        for (
-            action,
-            action_id,
-            simulated_state,
-            _next_player_index,
-            _next_legal_actions,
-        ), one_step_result in zip(simulated_actions, one_step_results):
-            one_step_score = float(one_step_result.value)
-            prior = float(oracle_result.action_priors.get(action_id, 0.0))
-            analysis = analysis_by_action_id.get(action_id, {})
-            planner_adjustment, penalty_breakdown = planner_adjustment_for_analysis(analysis)
-            continuation_score = self._same_turn_continuation_score(
-                simulated_state,
-                acting_player_index=acting_player_index,
-                root_player_index=root_player_index,
-                max_steps=2,
-                current_score=one_step_score,
-            )
-            rank_score = round(
-                one_step_score
-                + prior * 8.0
-                + (one_step_score - baseline_score) * 0.3
-                + self._continuation_rank_bonus(one_step_score, continuation_score)
-                + planner_adjustment,
-                6,
-            )
-            ranked.append(
-                RankedAction(
-                    action=action,
-                    action_id=action_id,
-                    rank_score=rank_score,
-                    prior=prior,
-                    one_step_score=one_step_score,
-                    continuation_score=continuation_score,
-                    successor_state=simulated_state,
-                    successor_legal_actions=_next_legal_actions,
-                    analysis={
-                        **analysis,
-                        "penalty_breakdown": penalty_breakdown,
-                        "planner_adjustment": planner_adjustment,
-                    },
+                ranked.append(
+                    RankedAction(
+                        action=action,
+                        action_id=action_id,
+                        rank_score=rank_score,
+                        prior=prior,
+                        one_step_score=one_step_score,
+                        continuation_score=continuation_score,
+                        successor_state=simulated_state,
+                        successor_legal_actions=_next_legal_actions,
+                        analysis={
+                            **analysis,
+                            "penalty_breakdown": penalty_breakdown,
+                            "planner_adjustment": planner_adjustment,
+                        },
+                    )
                 )
-            )
-        ranked.sort(key=lambda item: (-item.rank_score, item.action_id))
-        return baseline_score, ranked
+            ranked.sort(key=lambda item: (-item.rank_score, item.action_id))
+            return baseline_score, ranked
 
     def _same_turn_continuation_score(
         self,
@@ -327,78 +361,87 @@ class StandardTurnPlanner:
         max_steps: int,
         current_score: float | None = None,
     ) -> float:
-        best_score = (
-            float(current_score)
-            if current_score is not None
-            else self._evaluate_state_value(state, state.current_player, root_player_index)
-        )
-        if max_steps <= 0 or state.winner is not None or state.current_player != acting_player_index:
-            return best_score
-
-        legal_actions = list_legal_actions(state, player_index=acting_player_index)
-        if not legal_actions:
-            return best_score
-
-        tactical_followups = [
-            action
-            for action in legal_actions
-            if str(action.get("type", "")) in {
-                "attack",
-                "evolve",
-                "play_energy",
-                "retreat",
-                "bench_basic",
-                "play_basic_to_active",
-            }
-        ]
-        ordered_followups = sorted(
-            tactical_followups,
-            key=lambda action: (
-                -_same_turn_followup_priority(action),
-                _safe_action_id(action),
-            ),
-        )[:6]
-        followup_states: list[tuple[dict[str, Any], GameState, int, list[dict[str, Any]]]] = []
-        for followup in ordered_followups:
-            simulated_state = deepcopy(state)
-            apply_action_for_player(simulated_state, followup, acting_player_index)
-            next_player_index = simulated_state.current_player
-            next_legal_actions = list_legal_actions(
-                simulated_state,
-                player_index=next_player_index,
+        record_counter("planner.same_turn_continuation.calls")
+        observe_max("planner.same_turn_continuation.max_steps", max_steps)
+        with time_metric("planner.same_turn_continuation.total"):
+            best_score = (
+                float(current_score)
+                if current_score is not None
+                else self._evaluate_state_value(state, state.current_player, root_player_index)
             )
-            followup_states.append(
-                (
-                    followup,
-                    simulated_state,
-                    next_player_index,
-                    next_legal_actions,
+            if max_steps <= 0 or state.winner is not None or state.current_player != acting_player_index:
+                return best_score
+
+            with time_metric("planner.same_turn_continuation.legal_actions"):
+                legal_actions = list_legal_actions(state, player_index=acting_player_index)
+            if not legal_actions:
+                return best_score
+
+            tactical_followups = [
+                action
+                for action in legal_actions
+                if str(action.get("type", "")) in {
+                    "attack",
+                    "evolve",
+                    "play_energy",
+                    "retreat",
+                    "bench_basic",
+                    "play_basic_to_active",
+                }
+            ]
+            ordered_followups = sorted(
+                tactical_followups,
+                key=lambda action: (
+                    -_same_turn_followup_priority(action),
+                    _safe_action_id(action),
+                ),
+            )[:6]
+            observe_max("planner.same_turn_continuation.max_followups", len(ordered_followups))
+            followup_states: list[tuple[dict[str, Any], GameState, int, list[dict[str, Any]]]] = []
+            for followup in ordered_followups:
+                record_counter("planner.same_turn_continuation.followups")
+                with time_metric("planner.same_turn_continuation.deepcopy"):
+                    simulated_state = deepcopy(state)
+                with time_metric("planner.same_turn_continuation.apply_action"):
+                    apply_action_for_player(simulated_state, followup, acting_player_index)
+                next_player_index = simulated_state.current_player
+                with time_metric("planner.same_turn_continuation.legal_actions"):
+                    next_legal_actions = list_legal_actions(
+                        simulated_state,
+                        player_index=next_player_index,
+                    )
+                followup_states.append(
+                    (
+                        followup,
+                        simulated_state,
+                        next_player_index,
+                        next_legal_actions,
+                    )
                 )
-            )
-        followup_requests = [
-            PolicyValueRequest(
-                state=simulated_state,
-                acting_player_index=next_player_index,
-                root_player_index=root_player_index,
-                legal_actions=next_legal_actions,
-            )
-            for _, simulated_state, next_player_index, next_legal_actions in followup_states
-        ]
-        followup_results = self._evaluate_requests(followup_requests)
-        for (_, simulated_state, _next_player_index, _next_legal_actions), followup_result in zip(
-            followup_states,
-            followup_results,
-        ):
-            followup_score = self._same_turn_continuation_score(
-                simulated_state,
-                acting_player_index=acting_player_index,
-                root_player_index=root_player_index,
-                max_steps=max_steps - 1,
-                current_score=float(followup_result.value),
-            )
-            if followup_score > best_score:
-                best_score = followup_score
-        return round(best_score, 6)
+            followup_requests = [
+                PolicyValueRequest(
+                    state=simulated_state,
+                    acting_player_index=next_player_index,
+                    root_player_index=root_player_index,
+                    legal_actions=next_legal_actions,
+                )
+                for _, simulated_state, next_player_index, next_legal_actions in followup_states
+            ]
+            followup_results = self._evaluate_requests(followup_requests)
+            for (_, simulated_state, _next_player_index, _next_legal_actions), followup_result in zip(
+                followup_states,
+                followup_results,
+            ):
+                followup_score = self._same_turn_continuation_score(
+                    simulated_state,
+                    acting_player_index=acting_player_index,
+                    root_player_index=root_player_index,
+                    max_steps=max_steps - 1,
+                    current_score=float(followup_result.value),
+                )
+                if followup_score > best_score:
+                    best_score = followup_score
+            return round(best_score, 6)
 
     @staticmethod
     def _continuation_rank_bonus(one_step_score: float, continuation_score: float) -> float:
@@ -421,19 +464,23 @@ class StandardTurnPlanner:
         current_score: float | None = None,
     ) -> float:
         if current_score is not None:
+            record_counter("planner.evaluate_state_value.cached")
             return float(current_score)
-        legal_actions = legal_actions or list_legal_actions(state, player_index=acting_player_index)
-        result = self._evaluate_requests(
-            [
-                PolicyValueRequest(
-                    state=state,
-                    acting_player_index=acting_player_index,
-                    root_player_index=root_player_index,
-                    legal_actions=legal_actions,
-                )
-            ]
-        )[0]
-        return float(result.value)
+        with time_metric("planner.evaluate_state_value.total"):
+            if legal_actions is None:
+                with time_metric("planner.evaluate_state_value.legal_actions"):
+                    legal_actions = list_legal_actions(state, player_index=acting_player_index)
+            result = self._evaluate_requests(
+                [
+                    PolicyValueRequest(
+                        state=state,
+                        acting_player_index=acting_player_index,
+                        root_player_index=root_player_index,
+                        legal_actions=legal_actions,
+                    )
+                ]
+            )[0]
+            return float(result.value)
 
     def _evaluate_requests(
         self,
@@ -441,7 +488,11 @@ class StandardTurnPlanner:
     ):
         if not requests:
             return []
-        return self.oracle.evaluate_batch(requests)
+        record_counter("planner.oracle.calls")
+        record_counter("planner.oracle.requests", len(requests))
+        observe_max("planner.oracle.max_batch_size", len(requests))
+        with time_metric("planner.oracle.total"):
+            return self.oracle.evaluate_batch(requests)
 
 
 def _safe_action_id(action: dict[str, Any]) -> str:

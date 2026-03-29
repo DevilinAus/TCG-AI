@@ -888,8 +888,15 @@ def build_server(
 def run_server(host: str = "127.0.0.1", port: int = 8000) -> None:
     log_path = default_log_path("backend-server.log")
     configure_tcg_ai_logging(log_file=log_path)
-    server = build_server(host=host, port=port)
+    application = TcgApplication()
+    server = build_server(host=host, port=port, application=application)
     logger.info("backend server logging to %s", log_path)
+    logger.info(
+        "standard remote config enabled=%s url=%s timeout_ms=%s",
+        application.standard_policy_config.remote_enabled,
+        application.standard_policy_config.remote_url,
+        application.standard_policy_config.remote_timeout_ms,
+    )
     print(f"Serving TCG AI starter at http://{host}:{port}")
     try:
         server.serve_forever()

@@ -12,6 +12,7 @@ from .experience import StandardExperienceStore
 from .neural_policy import PolicyValueBackend
 from .oracle import BackendPolicyValueOracle
 from .planner import PlannerConfig, StandardTurnPlanner
+from .profiling import DecisionProfile, set_metadata, time_metric, use_profile
 
 logger = get_logger(__name__)
 
@@ -50,6 +51,13 @@ class StandardMlService:
             diagnostics.get("reason_summary"),
             response.get("planned_action_sequence"),
         )
+        performance_profile = diagnostics.get("performance_profile")
+        if isinstance(performance_profile, dict):
+            logger.info(
+                "worker decision profile decision_id=%s profile=%s",
+                response.get("decision_id"),
+                performance_profile,
+            )
         return response
 
     def record_outcome(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -90,19 +98,32 @@ class StandardMlService:
         }
 
     def _choose_full_state_action(self, payload: dict[str, Any]) -> dict[str, Any]:
-        state = deserialize_state(payload["state"])
-        acting_player_index = int(payload.get("acting_player_index", state.current_player))
-        legal_actions = list_legal_actions(state, player_index=acting_player_index)
-        config = _planner_config_from_payload(payload.get("search_config"))
-        planner = StandardTurnPlanner(
-            config=config,
-            oracle=BackendPolicyValueOracle(backend=self.policy_backend),
-        )
-        decision = planner.plan(
-            state,
-            acting_player_index=acting_player_index,
-            legal_actions=legal_actions,
-        )
+        profile = DecisionProfile()
+        with use_profile(profile):
+            set_metadata("service.decision_type", payload.get("decision_type", "turn_action"))
+            with time_metric("service.full_state_decision.total"):
+                with time_metric("service.deserialize_state"):
+                    state = deserialize_state(payload["state"])
+                acting_player_index = int(payload.get("acting_player_index", state.current_player))
+                config = _planner_config_from_payload(payload.get("search_config"))
+                set_metadata("service.acting_player_index", acting_player_index)
+                set_metadata("service.search_config", _planner_config_snapshot(config))
+                with time_metric("service.list_legal_actions"):
+                    legal_actions = list_legal_actions(state, player_index=acting_player_index)
+                set_metadata("service.legal_action_count", len(legal_actions))
+                planner = StandardTurnPlanner(
+                    config=config,
+                    oracle=BackendPolicyValueOracle(backend=self.policy_backend),
+                )
+                with time_metric("service.planner.plan"):
+                    decision = planner.plan(
+                        state,
+                        acting_player_index=acting_player_index,
+                        legal_actions=legal_actions,
+                    )
+            decision_diagnostics = decision.get("diagnostics") or {}
+            if isinstance(decision_diagnostics, dict):
+                decision_diagnostics["performance_profile"] = profile.snapshot()
         return {
             "schema_version": FULL_STATE_SCHEMA_VERSION,
             "decision_id": payload.get("decision_id"),
@@ -180,3 +201,12 @@ def _planner_config_from_payload(payload: Any) -> PlannerConfig:
 def _legacy_attack_score(damage_text: str) -> float:
     digits = "".join(character for character in str(damage_text) if character.isdigit())
     return float(digits or 0)
+
+
+def _planner_config_snapshot(config: PlannerConfig) -> dict[str, Any]:
+    return {
+        "max_depth": config.max_depth,
+        "beam_width": config.beam_width,
+        "opponent_branch_width": config.opponent_branch_width,
+        "include_opponent_turn": config.include_opponent_turn,
+    }

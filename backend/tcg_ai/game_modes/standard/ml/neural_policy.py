@@ -8,6 +8,7 @@ import pickle
 from typing import Any
 
 from ..action_analysis import INTENT_TAGS, QUALITY_FLAGS
+from .profiling import observe_max, record_counter, set_metadata, time_metric
 
 try:
     import torch
@@ -104,9 +105,15 @@ class PolicyValueBackend:
         return self._status
 
     def evaluate_batch(self, evaluations: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        if self._model is None or torch is None:
-            return [self._heuristic_evaluation(evaluation) for evaluation in evaluations]
-        return self._model_evaluate_batch(evaluations)
+        record_counter("backend.evaluate_batch.calls")
+        record_counter("backend.evaluate_batch.evaluations", len(evaluations))
+        observe_max("backend.evaluate_batch.max_batch_size", len(evaluations))
+        set_metadata("backend.status", self._status.backend)
+        with time_metric("backend.evaluate_batch.total"):
+            if self._model is None or torch is None:
+                with time_metric("backend.heuristic.total"):
+                    return [self._heuristic_evaluation(evaluation) for evaluation in evaluations]
+            return self._model_evaluate_batch(evaluations)
 
     def _try_load_model(self) -> None:
         if torch is None or nn is None or self.checkpoint_path is None or not self.checkpoint_path.exists():
@@ -180,69 +187,85 @@ class PolicyValueBackend:
 
         model = self._model
         device = next(model.parameters()).device
+        record_counter("backend.model.evaluate_batch.calls")
+        record_counter("backend.model.evaluate_batch.evaluations", len(evaluations))
+        observe_max("backend.model.evaluate_batch.max_batch_size", len(evaluations))
+        set_metadata("backend.model.device", str(device))
         encoded_state_vectors: list[list[float]] = []
         action_ids_by_evaluation: list[list[str]] = []
         encoded_action_vectors: list[list[list[float]]] = []
         max_action_count = 0
 
-        for evaluation in evaluations:
-            belief_state = evaluation.get("belief_state", {})
-            encoded_state_vectors.append(
-                encode_state_vector(belief_state, vector_size=self._state_dim)
-            )
-            legal_actions = list(evaluation.get("legal_actions", []))
-            action_ids = [str(action.get("action_id", "")) for action in legal_actions]
-            action_vectors = [
-                encode_action_vector(action, belief_state=belief_state, vector_size=self._action_dim)
-                for action in legal_actions
-            ]
-            action_ids_by_evaluation.append(action_ids)
-            encoded_action_vectors.append(action_vectors)
-            max_action_count = max(max_action_count, len(action_vectors))
+        with time_metric("backend.model.total"):
+            for evaluation in evaluations:
+                belief_state = evaluation.get("belief_state", {})
+                with time_metric("backend.model.encode_state"):
+                    encoded_state_vectors.append(
+                        encode_state_vector(belief_state, vector_size=self._state_dim)
+                    )
+                legal_actions = list(evaluation.get("legal_actions", []))
+                action_ids = [str(action.get("action_id", "")) for action in legal_actions]
+                with time_metric("backend.model.encode_actions"):
+                    action_vectors = [
+                        encode_action_vector(action, belief_state=belief_state, vector_size=self._action_dim)
+                        for action in legal_actions
+                    ]
+                record_counter("backend.model.actions_encoded", len(action_vectors))
+                action_ids_by_evaluation.append(action_ids)
+                encoded_action_vectors.append(action_vectors)
+                max_action_count = max(max_action_count, len(action_vectors))
 
-        state_tensor = torch.tensor(
-            encoded_state_vectors,
-            dtype=torch.float32,
-            device=device,
-        )
-
-        with torch.no_grad():
-            if max_action_count > 0:
-                padded_action_vectors = [
-                    action_vectors
-                    + ([[0.0] * self._action_dim] * (max_action_count - len(action_vectors)))
-                    for action_vectors in encoded_action_vectors
-                ]
-                action_tensor = torch.tensor(
-                    padded_action_vectors,
+            observe_max("backend.model.max_action_count", max_action_count)
+            with time_metric("backend.model.build_state_tensor"):
+                state_tensor = torch.tensor(
+                    encoded_state_vectors,
                     dtype=torch.float32,
                     device=device,
                 )
-                policy_logits, values, _intent_logits, _quality_logits = model(state_tensor, action_tensor)
-                policy_logits_rows = policy_logits.detach().cpu().tolist()
-            else:
-                state_hidden = model.state_encoder(state_tensor)
-                values = torch.tanh(model.value_head(state_hidden)).squeeze(-1) * 100.0
-                policy_logits_rows = []
 
-        value_rows = values.detach().cpu().tolist()
-        results: list[dict[str, Any]] = []
-        for index, action_ids in enumerate(action_ids_by_evaluation):
-            priors = {}
-            if action_ids:
-                logits = [float(logit) for logit in policy_logits_rows[index][: len(action_ids)]]
-                priors = _softmax_from_logits(logits, action_ids)
-            results.append(
-                {
-                    "value": round(float(value_rows[index]), 6),
-                    "action_priors": priors,
-                    "diagnostics": {
-                        "backend": self._status.backend,
-                        "model_loaded": self._status.model_loaded,
-                    },
-                }
-            )
-        return results
+            with torch.no_grad():
+                if max_action_count > 0:
+                    with time_metric("backend.model.build_action_tensor"):
+                        padded_action_vectors = [
+                            action_vectors
+                            + ([[0.0] * self._action_dim] * (max_action_count - len(action_vectors)))
+                            for action_vectors in encoded_action_vectors
+                        ]
+                        action_tensor = torch.tensor(
+                            padded_action_vectors,
+                            dtype=torch.float32,
+                            device=device,
+                        )
+                    with time_metric("backend.model.forward"):
+                        policy_logits, values, _intent_logits, _quality_logits = model(state_tensor, action_tensor)
+                    with time_metric("backend.model.detach_logits"):
+                        policy_logits_rows = policy_logits.detach().cpu().tolist()
+                else:
+                    with time_metric("backend.model.forward_no_actions"):
+                        state_hidden = model.state_encoder(state_tensor)
+                        values = torch.tanh(model.value_head(state_hidden)).squeeze(-1) * 100.0
+                    policy_logits_rows = []
+
+            with time_metric("backend.model.detach_values"):
+                value_rows = values.detach().cpu().tolist()
+            results: list[dict[str, Any]] = []
+            with time_metric("backend.model.build_results"):
+                for index, action_ids in enumerate(action_ids_by_evaluation):
+                    priors = {}
+                    if action_ids:
+                        logits = [float(logit) for logit in policy_logits_rows[index][: len(action_ids)]]
+                        priors = _softmax_from_logits(logits, action_ids)
+                    results.append(
+                        {
+                            "value": round(float(value_rows[index]), 6),
+                            "action_priors": priors,
+                            "diagnostics": {
+                                "backend": self._status.backend,
+                                "model_loaded": self._status.model_loaded,
+                            },
+                        }
+                    )
+            return results
 
     def _heuristic_evaluation(self, evaluation: dict[str, Any]) -> dict[str, Any]:
         belief_state = evaluation.get("belief_state", {})

@@ -9,6 +9,7 @@ from ..models import GameState
 from .evaluator import evaluate_state, score_action_prior
 from .knowledge_state import serialize_knowledge_actions, serialize_knowledge_state
 from .neural_policy import PolicyValueBackend
+from .profiling import observe_max, record_counter, set_metadata, time_metric
 
 
 @dataclass(frozen=True)
@@ -41,23 +42,34 @@ class BackendPolicyValueOracle:
         self.backend = backend or PolicyValueBackend()
 
     def evaluate_batch(self, requests: list[PolicyValueRequest]) -> list[PolicyValueResult]:
-        payload = [
-            {
-                "acting_player_index": request.acting_player_index,
-                "root_player_index": request.root_player_index,
-                "belief_state": serialize_knowledge_state(
-                    request.state,
-                    perspective_player_index=request.acting_player_index,
-                ),
-                "legal_actions": serialize_knowledge_actions(
-                    request.state,
-                    acting_player_index=request.acting_player_index,
-                    legal_actions=request.legal_actions,
-                ),
-            }
-            for request in requests
-        ]
-        responses = self.backend.evaluate_batch(payload)
+        record_counter("oracle.evaluate_batch.calls")
+        record_counter("oracle.requests", len(requests))
+        observe_max("oracle.max_batch_size", len(requests))
+        set_metadata("oracle.backend", self.backend.status.backend)
+        payload = []
+        with time_metric("oracle.evaluate_batch.total"):
+            for request in requests:
+                with time_metric("oracle.serialize_state"):
+                    belief_state = serialize_knowledge_state(
+                        request.state,
+                        perspective_player_index=request.acting_player_index,
+                    )
+                with time_metric("oracle.serialize_actions"):
+                    legal_actions = serialize_knowledge_actions(
+                        request.state,
+                        acting_player_index=request.acting_player_index,
+                        legal_actions=request.legal_actions,
+                    )
+                payload.append(
+                    {
+                        "acting_player_index": request.acting_player_index,
+                        "root_player_index": request.root_player_index,
+                        "belief_state": belief_state,
+                        "legal_actions": legal_actions,
+                    }
+                )
+            with time_metric("oracle.backend.evaluate_batch"):
+                responses = self.backend.evaluate_batch(payload)
         return [
             PolicyValueResult(
                 value=float(response.get("value", 0.0)),

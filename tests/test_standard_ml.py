@@ -63,6 +63,8 @@ class StandardMlTests(unittest.TestCase):
         legal_action_ids = {action_id_for(action) for action in list_legal_actions(state, player_index=0)}
         self.assertIn(decision["chosen_action_id"], legal_action_ids)
         self.assertIn("top_candidates", decision["diagnostics"])
+        self.assertIn("performance_profile", decision["diagnostics"])
+        self.assertIn("planner.plan_total", decision["diagnostics"]["performance_profile"]["timing_ms"])
         self.assertEqual(
             {entry["action_id"] for entry in decision["diagnostics"]["policy_target_scores"]},
             legal_action_ids,
@@ -110,6 +112,8 @@ class StandardMlTests(unittest.TestCase):
         legal_action_ids = {action_id_for(action) for action in list_legal_actions(state, player_index=0)}
         self.assertIn(response["chosen_action_id"], legal_action_ids)
         self.assertEqual(response["decision_id"], "session-a:turn_action")
+        self.assertIn("performance_profile", response["diagnostics"])
+        self.assertIn("service.full_state_decision.total", response["diagnostics"]["performance_profile"]["timing_ms"])
         self.assertTrue((Path(self.temp_dir.name) / "decisions.jsonl").exists())
 
     def test_service_full_state_path_uses_backend_oracle(self) -> None:
