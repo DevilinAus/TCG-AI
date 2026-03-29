@@ -1419,8 +1419,11 @@ class StandardEngineTests(unittest.TestCase):
         self.assertIn(mareep_id, state.players[0].discard)
         self.assertIn(potion_id, state.players[0].discard)
         self.assertIn(pokemon_from_deck, state.players[0].hand)
-        self.assertIn("discarded 2 cards from hand", " ".join(state.log).lower())
-        self.assertIn("searched the deck and added 1 card to hand", " ".join(state.log).lower())
+        log_text = " ".join(state.log)
+        self.assertIn("discarded 2 cards from hand", log_text.lower())
+        self.assertIn("searched the deck and added 1 card to hand", log_text.lower())
+        self.assertIn("revealing", log_text.lower())
+        self.assertIn(card_definition(state, pokemon_from_deck).name, log_text)
 
     def test_nest_ball_puts_a_basic_pokemon_from_deck_onto_the_bench_without_a_discard_cost(self) -> None:
         state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck")

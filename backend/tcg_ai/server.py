@@ -97,7 +97,7 @@ class GameSession:
         self.ai_episode_steps: list[EpisodeStep] = []
         self.ai_episode_reward = 0.0
         self.ai_episode_finished = False
-        self.ai_replay_delay_ms = AI_ACTION_DELAY_MIN_MS
+        self.ai_replay_delay_ms = self._resolved_ai_replay_delay_ms()
         self.ai_damage_dealt = 0
         self.ai_prizes_taken = 0
         self.ai_progress_awarded = False
@@ -146,6 +146,7 @@ class GameSession:
             self.ai_episode_steps.clear()
             self.ai_episode_reward = 0.0
             self.ai_episode_finished = False
+            self.ai_replay_delay_ms = self._resolved_ai_replay_delay_ms()
             self.ai_damage_dealt = 0
             self.ai_prizes_taken = 0
             self.ai_progress_awarded = False
@@ -184,6 +185,8 @@ class GameSession:
         if self.state.winner is not None or self.state.current_player != 1:
             return None
 
+        delay_ms = self._resolved_ai_replay_delay_ms()
+
         action = self.mode.choose_action(
             self.state,
             1,
@@ -207,7 +210,7 @@ class GameSession:
                     "type": action["type"],
                     "label": action["label"],
                 },
-                "delay_ms": _replay_delay_for_action(self.state),
+                "delay_ms": delay_ms,
                 "state": self._serialize_state(session_id),
             }
 
@@ -229,9 +232,14 @@ class GameSession:
                 "type": action["type"],
                 "label": action["label"],
             },
-            "delay_ms": _replay_delay_for_action(self.state),
+            "delay_ms": delay_ms,
             "state": self._serialize_state(session_id),
         }
+
+    def _resolved_ai_replay_delay_ms(self) -> int:
+        if self.game_mode == STANDARD_GAME_MODE and self.standard_ai_mode == STANDARD_AI_MODE_REMOTE:
+            return 0
+        return _replay_delay_for_action(self.state)
 
     def _finalize_ai_episode_if_finished(self, completed_by_ai_action: bool) -> None:
         if self.ai_episode_finished or self.state.winner is None or self.learner is None:

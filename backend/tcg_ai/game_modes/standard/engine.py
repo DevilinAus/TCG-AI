@@ -770,15 +770,21 @@ def _resolve_search_deck_effect(
         else:
             state.log.append(f"{actor_name} searched the deck but did not put a card onto the Bench.")
     elif destination_zone == "hand":
-        state.log.append(
+        log_entry = (
             f"{actor_name} searched the deck and added {len(chosen_ids)} card"
             f"{'' if len(chosen_ids) == 1 else 's'} to hand."
         )
+        if effect_spec.revealed_to == "all":
+            log_entry += f" Revealing {_format_revealed_card_names(state, chosen_ids)}."
+        state.log.append(log_entry)
     else:
-        state.log.append(
+        log_entry = (
             f"{actor_name} searched the deck and put {len(chosen_ids)} card"
             f"{'' if len(chosen_ids) == 1 else 's'} onto the Bench."
         )
+        if effect_spec.revealed_to == "all":
+            log_entry += f" Revealing {_format_revealed_card_names(state, chosen_ids)}."
+        state.log.append(log_entry)
 
 
 def _resolve_recover_from_discard_effect(
@@ -816,6 +822,17 @@ def _resolve_recover_from_discard_effect(
             f"{actor_name} recovered {len(chosen_ids)} card"
             f"{'' if len(chosen_ids) == 1 else 's'} from the discard pile."
         )
+
+
+def _format_revealed_card_names(state: GameState, instance_ids: list[str]) -> str:
+    card_names = [card_definition(state, instance_id).name for instance_id in instance_ids]
+    if not card_names:
+        return "no cards"
+    if len(card_names) == 1:
+        return card_names[0]
+    if len(card_names) == 2:
+        return f"{card_names[0]} and {card_names[1]}"
+    return f"{', '.join(card_names[:-1])}, and {card_names[-1]}"
 
 
 def _list_bench_basic_actions(
