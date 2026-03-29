@@ -3,6 +3,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 import json
+import os
 from pathlib import Path
 import time
 from typing import Any, Callable
@@ -56,6 +57,13 @@ class SelfPlayChunkResult:
     summary: dict[str, Any]
     decisions_jsonl: str
     games_jsonl: str
+
+
+@dataclass(frozen=True)
+class SelfPlayChunkArtifactPaths:
+    decisions: Path
+    games: Path
+    summary: Path
 
 
 def build_self_play_tasks(
@@ -203,18 +211,11 @@ def write_self_play_chunk_artifacts(
     output_dir: Path,
     result: SelfPlayChunkResult,
 ) -> None:
-    decisions_dir = output_dir / "decisions"
-    games_dir = output_dir / "games"
-    decisions_dir.mkdir(parents=True, exist_ok=True)
-    games_dir.mkdir(parents=True, exist_ok=True)
-    (decisions_dir / f"shard_{result.task_index:06d}.jsonl").write_text(
-        result.decisions_jsonl,
-        encoding="utf-8",
-    )
-    (games_dir / f"shard_{result.task_index:06d}.jsonl").write_text(
-        result.games_jsonl,
-        encoding="utf-8",
-    )
+    artifact_paths = self_play_chunk_artifact_paths(output_dir=output_dir, task_index=result.task_index)
+    _atomic_write_text(artifact_paths.decisions, result.decisions_jsonl)
+    _atomic_write_text(artifact_paths.games, result.games_jsonl)
+    # Write the summary last so restart recovery can treat it as the shard commit marker.
+    _atomic_write_json(artifact_paths.summary, normalize_self_play_summary(result.summary))
 
 
 def merge_chunk_summary(aggregate: dict[str, Any], chunk_summary: dict[str, Any]) -> None:
@@ -229,6 +230,82 @@ def merge_chunk_summary(aggregate: dict[str, Any], chunk_summary: dict[str, Any]
 
 def empty_self_play_summary() -> dict[str, Any]:
     return _empty_aggregate_summary()
+
+
+def normalize_self_play_summary(payload: Any) -> dict[str, Any]:
+    summary = _empty_aggregate_summary()
+    if isinstance(payload, dict):
+        summary["games"] = _coerce_summary_int(payload.get("games"), default=0)
+        summary["samples"] = _coerce_summary_int(payload.get("samples"), default=0)
+        summary["truncated"] = _coerce_summary_int(payload.get("truncated"), default=0)
+        summary["turns"] = _coerce_summary_int(payload.get("turns"), default=0)
+        summary["actions"] = _coerce_summary_int(payload.get("actions"), default=0)
+        for deck_id, wins in (payload.get("deck_wins") or {}).items():
+            if isinstance(deck_id, str):
+                summary["deck_wins"][deck_id] = _coerce_summary_int(wins, default=0)
+    return summary
+
+
+def self_play_chunk_artifact_paths(*, output_dir: Path, task_index: int) -> SelfPlayChunkArtifactPaths:
+    shard_name = f"shard_{task_index:06d}"
+    return SelfPlayChunkArtifactPaths(
+        decisions=output_dir / "decisions" / f"{shard_name}.jsonl",
+        games=output_dir / "games" / f"{shard_name}.jsonl",
+        summary=output_dir / "summaries" / f"{shard_name}.json",
+    )
+
+
+def load_self_play_chunk_summary(*, output_dir: Path, task_index: int) -> dict[str, Any]:
+    artifact_paths = self_play_chunk_artifact_paths(output_dir=output_dir, task_index=task_index)
+    try:
+        payload = json.loads(artifact_paths.summary.read_text(encoding="utf-8"))
+    except FileNotFoundError as exc:
+        raise ValueError(f"Missing shard summary for task {task_index}.") from exc
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"Malformed shard summary for task {task_index}.") from exc
+    if not isinstance(payload, dict):
+        raise ValueError(f"Shard summary for task {task_index} must be a JSON object.")
+    return normalize_self_play_summary(payload)
+
+
+def derive_self_play_chunk_summary_from_artifacts(*, output_dir: Path, task_index: int) -> dict[str, Any]:
+    artifact_paths = self_play_chunk_artifact_paths(output_dir=output_dir, task_index=task_index)
+    summary = _empty_aggregate_summary()
+
+    try:
+        with artifact_paths.games.open("r", encoding="utf-8") as handle:
+            for line_number, raw_line in enumerate(handle, start=1):
+                line = raw_line.strip()
+                if not line:
+                    continue
+                try:
+                    payload = json.loads(line)
+                except json.JSONDecodeError as exc:
+                    raise ValueError(
+                        f"Malformed games shard for task {task_index} at line {line_number}."
+                    ) from exc
+                if not isinstance(payload, dict):
+                    raise ValueError(f"Games shard for task {task_index} contains a non-object record.")
+                summary["games"] += 1
+                summary["turns"] += _coerce_summary_int(payload.get("turn_number"), default=0)
+                summary["actions"] += _coerce_summary_int(payload.get("action_count"), default=0)
+                summary["truncated"] += 1 if bool(payload.get("truncated")) else 0
+                winner_deck_id = payload.get("winner_deck_id")
+                if isinstance(winner_deck_id, str):
+                    summary["deck_wins"].setdefault(winner_deck_id, 0)
+                    summary["deck_wins"][winner_deck_id] += 1
+    except FileNotFoundError as exc:
+        raise ValueError(f"Missing games shard for task {task_index}.") from exc
+
+    try:
+        with artifact_paths.decisions.open("r", encoding="utf-8") as handle:
+            for raw_line in handle:
+                if raw_line.strip():
+                    summary["samples"] += 1
+    except FileNotFoundError as exc:
+        raise ValueError(f"Missing decisions shard for task {task_index}.") from exc
+
+    return summary
 
 
 def self_play_task_from_payload(payload: dict[str, Any]) -> SelfPlayChunkTask:
@@ -344,3 +421,46 @@ def _empty_aggregate_summary() -> dict[str, Any]:
         "turns": 0,
         "actions": 0,
     }
+
+
+def _coerce_summary_int(value: Any, *, default: int) -> int:
+    if isinstance(value, bool):
+        return default
+    if isinstance(value, int):
+        return value
+    if isinstance(value, float):
+        return int(value)
+    if isinstance(value, str):
+        try:
+            return int(value)
+        except ValueError:
+            return default
+    return default
+
+
+def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
+    _atomic_write_text(path, json.dumps(payload, indent=2, sort_keys=True))
+
+
+def _atomic_write_text(path: Path, text: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path = path.with_suffix(path.suffix + ".tmp")
+    with temp_path.open("w", encoding="utf-8") as handle:
+        handle.write(text)
+        handle.flush()
+        os.fsync(handle.fileno())
+    temp_path.replace(path)
+    _fsync_directory(path.parent)
+
+
+def _fsync_directory(path: Path) -> None:
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)

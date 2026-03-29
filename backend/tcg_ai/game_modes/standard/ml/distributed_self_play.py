@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 import json
+import os
 from pathlib import Path
 import threading
 import time
@@ -13,9 +14,12 @@ from .self_play_jobs import (
     SelfPlayRunConfig,
     build_self_play_manifest,
     build_self_play_tasks,
+    derive_self_play_chunk_summary_from_artifacts,
     empty_self_play_summary,
+    load_self_play_chunk_summary,
     merge_chunk_summary,
     resolve_oracle_status,
+    self_play_chunk_artifact_paths,
     self_play_run_config_from_payload,
     self_play_run_config_to_payload,
     self_play_task_to_payload,
@@ -50,6 +54,13 @@ class DistributedSelfPlayCoordinator:
         self.manifest_path = self.output_dir / "manifest.json"
         self._lock = threading.RLock()
         self._last_progress_persist_monotonic = 0.0
+        self._recovery_report: dict[str, Any] = {
+            "reconciled_at": None,
+            "completed_tasks_from_artifacts": 0,
+            "upgraded_legacy_summaries": 0,
+            "integrity_issue_count": 0,
+            "integrity_issues": [],
+        }
         self.output_dir.mkdir(parents=True, exist_ok=True)
         self._state = self._load_or_initialize_state()
 
@@ -276,6 +287,7 @@ class DistributedSelfPlayCoordinator:
                 "run_complete": self._all_tasks_completed(),
                 "aggregate": dict(self._state["aggregate"]),
                 "reported": reported,
+                "recovery": dict(self._recovery_report),
                 "throughput": throughput,
                 "throughput_series": _bucket_series(
                     self._state["progress_buckets"],
@@ -285,19 +297,65 @@ class DistributedSelfPlayCoordinator:
                 "workers": workers,
             }
 
+    def persist_state(self) -> None:
+        with self._lock:
+            now = _utc_now()
+            self._reclaim_expired_leases(now)
+            self._prune_progress_buckets(now)
+            self._write_summary_file(completed_at=now if self._all_tasks_completed() else None)
+            self._save_state()
+
     def _load_or_initialize_state(self) -> dict[str, Any]:
+        bootstrap_issues: list[dict[str, Any]] = []
         if self.state_path.exists():
-            payload = json.loads(self.state_path.read_text(encoding="utf-8"))
-            if payload.get("run_id") != self.run_id:
-                raise ValueError("Existing coordinator state run_id does not match.")
-            self.run_config = self_play_run_config_from_payload(dict(payload["run_config"]))
-            normalized = self._normalize_state(payload)
-            self._write_manifest_if_missing()
-            self._write_summary_file_if_missing(normalized)
-            return normalized
+            try:
+                payload = json.loads(self.state_path.read_text(encoding="utf-8"))
+            except (OSError, json.JSONDecodeError) as exc:
+                normalized = self._build_default_state()
+                bootstrap_issues.append(
+                    {
+                        "task_index": None,
+                        "reason": "state_rebuild",
+                        "detail": f"Coordinator state could not be loaded cleanly and was rebuilt: {exc}",
+                    }
+                )
+            else:
+                if payload.get("run_id") != self.run_id:
+                    raise ValueError("Existing coordinator state run_id does not match.")
+                try:
+                    self.run_config = self_play_run_config_from_payload(dict(payload["run_config"]))
+                    normalized = self._normalize_state(payload)
+                except (KeyError, TypeError, ValueError) as exc:
+                    normalized = self._build_default_state()
+                    bootstrap_issues.append(
+                        {
+                            "task_index": None,
+                            "reason": "state_rebuild",
+                            "detail": f"Coordinator state could not be normalized and was rebuilt: {exc}",
+                        }
+                    )
+        else:
+            normalized = self._build_default_state()
 
         self._write_manifest_if_missing()
-        state = self._normalize_state(
+        self._recovery_report = self._reconcile_state_with_artifacts(normalized)
+        if bootstrap_issues:
+            self._recovery_report["integrity_issues"] = (
+                bootstrap_issues + list(self._recovery_report["integrity_issues"])
+            )[:50]
+            self._recovery_report["integrity_issue_count"] = int(self._recovery_report["integrity_issue_count"]) + len(
+                bootstrap_issues
+            )
+        self._reclaim_expired_leases_in_state(normalized, _utc_now())
+        self._write_summary_file_for_state(
+            normalized,
+            completed_at=_utc_now() if all(entry["status"] == "completed" for entry in normalized["tasks"]) else None,
+        )
+        _atomic_write_json(self.state_path, normalized)
+        return normalized
+
+    def _build_default_state(self) -> dict[str, Any]:
+        return self._normalize_state(
             {
                 "schema_version": SELF_PLAY_JOB_SCHEMA_VERSION,
                 "run_id": self.run_id,
@@ -320,9 +378,6 @@ class DistributedSelfPlayCoordinator:
                 "workers": {},
             }
         )
-        _atomic_write_json(self.state_path, state)
-        self._write_summary_file_if_missing(state)
-        return state
 
     def _normalize_state(self, payload: dict[str, Any]) -> dict[str, Any]:
         aggregate = payload.get("aggregate")
@@ -348,6 +403,119 @@ class DistributedSelfPlayCoordinator:
         payload["workers"] = normalized_workers
         return payload
 
+    def _reconcile_state_with_artifacts(self, state: dict[str, Any]) -> dict[str, Any]:
+        recovered_summaries: dict[int, dict[str, Any]] = {}
+        integrity_issues: list[dict[str, Any]] = []
+        upgraded_legacy_summaries = 0
+        known_task_indices = {int(entry["task"]["task_index"]) for entry in state["tasks"]}
+
+        for entry in state["tasks"]:
+            task_index = int(entry["task"]["task_index"])
+            expected_games = int(entry["task"]["game_count"])
+            artifact_paths = self_play_chunk_artifact_paths(output_dir=self.output_dir, task_index=task_index)
+            decisions_exists = artifact_paths.decisions.exists()
+            games_exists = artifact_paths.games.exists()
+            summary_exists = artifact_paths.summary.exists()
+
+            summary: dict[str, Any] | None = None
+            if summary_exists and decisions_exists and games_exists:
+                try:
+                    summary = load_self_play_chunk_summary(output_dir=self.output_dir, task_index=task_index)
+                except ValueError as exc:
+                    integrity_issues.append(
+                        {
+                            "task_index": task_index,
+                            "reason": "invalid_summary",
+                            "detail": str(exc),
+                        }
+                    )
+            elif decisions_exists and games_exists:
+                try:
+                    summary = derive_self_play_chunk_summary_from_artifacts(
+                        output_dir=self.output_dir,
+                        task_index=task_index,
+                    )
+                    _atomic_write_json(artifact_paths.summary, summary)
+                    upgraded_legacy_summaries += 1
+                except ValueError as exc:
+                    integrity_issues.append(
+                        {
+                            "task_index": task_index,
+                            "reason": "invalid_artifacts",
+                            "detail": str(exc),
+                        }
+                    )
+            elif decisions_exists or games_exists or summary_exists:
+                integrity_issues.append(
+                    {
+                        "task_index": task_index,
+                        "reason": "incomplete_artifacts",
+                        "detail": _artifact_presence_detail(
+                            decisions_exists=decisions_exists,
+                            games_exists=games_exists,
+                            summary_exists=summary_exists,
+                        ),
+                    }
+                )
+
+            if summary is None:
+                if entry["status"] == "completed":
+                    integrity_issues.append(
+                        {
+                            "task_index": task_index,
+                            "reason": "missing_persisted_chunk",
+                            "detail": "Coordinator state marked this task completed, but no recoverable shard was found.",
+                        }
+                    )
+                    self._clear_task_lease(entry)
+                    entry["status"] = "pending"
+                    entry["submitted_at"] = None
+                continue
+
+            if int(summary["games"]) != expected_games:
+                integrity_issues.append(
+                    {
+                        "task_index": task_index,
+                        "reason": "unexpected_game_count",
+                        "detail": f"Expected {expected_games} games but recovered {summary['games']}.",
+                    }
+                )
+                if entry["status"] == "completed":
+                    self._clear_task_lease(entry)
+                    entry["status"] = "pending"
+                    entry["submitted_at"] = None
+                continue
+
+            recovered_summaries[task_index] = summary
+            entry["status"] = "completed"
+            self._clear_task_lease(entry)
+            if not isinstance(entry.get("submitted_at"), str):
+                entry["submitted_at"] = _artifact_submitted_at(artifact_paths)
+
+        aggregate = empty_self_play_summary()
+        for task_index in sorted(recovered_summaries):
+            merge_chunk_summary(aggregate, recovered_summaries[task_index])
+        state["aggregate"] = aggregate
+        self._normalize_worker_leases(state)
+
+        unexpected_indices = _scan_unexpected_artifact_indices(output_dir=self.output_dir, known_task_indices=known_task_indices)
+        for task_index in unexpected_indices:
+            integrity_issues.append(
+                {
+                    "task_index": task_index,
+                    "reason": "unexpected_artifacts",
+                    "detail": "Found shard artifacts that do not belong to this run configuration.",
+                }
+            )
+
+        return {
+            "reconciled_at": _utc_now().isoformat(),
+            "completed_tasks_from_artifacts": len(recovered_summaries),
+            "upgraded_legacy_summaries": upgraded_legacy_summaries,
+            "integrity_issue_count": len(integrity_issues),
+            "integrity_issues": integrity_issues[:50],
+        }
+
     def _write_manifest_if_missing(self) -> None:
         if self.manifest_path.exists():
             return
@@ -366,18 +534,16 @@ class DistributedSelfPlayCoordinator:
     def _write_summary_file_if_missing(self, state: dict[str, Any]) -> None:
         if self.summary_path.exists():
             return
-        summary = {
-            "run_id": self.run_id,
-            "completed_at": None,
-            **state["aggregate"],
-        }
-        _atomic_write_json(self.summary_path, summary)
+        self._write_summary_file_for_state(state, completed_at=None)
 
     def _write_summary_file(self, *, completed_at: datetime | None) -> None:
+        self._write_summary_file_for_state(self._state, completed_at=completed_at)
+
+    def _write_summary_file_for_state(self, state: dict[str, Any], *, completed_at: datetime | None) -> None:
         payload = {
             "run_id": self.run_id,
             "completed_at": completed_at.isoformat() if completed_at is not None else None,
-            **self._state["aggregate"],
+            **state["aggregate"],
         }
         _atomic_write_json(self.summary_path, payload)
 
@@ -387,8 +553,31 @@ class DistributedSelfPlayCoordinator:
                 return entry
         return None
 
+    def _clear_task_lease(self, entry: dict[str, Any]) -> None:
+        entry["leased_by"] = None
+        entry["leased_at"] = None
+        entry["lease_expires_at"] = None
+
+    def _normalize_worker_leases(self, state: dict[str, Any]) -> None:
+        leased_task_indices = {
+            int(entry["task"]["task_index"])
+            for entry in state["tasks"]
+            if entry["status"] == "leased"
+        }
+        for worker_state in state["workers"].values():
+            leased_task_index = worker_state.get("leased_task_index")
+            if leased_task_index in leased_task_indices:
+                continue
+            worker_state["leased_task_index"] = None
+            worker_state["current_task_started_at"] = None
+            worker_state["current_task_game_count"] = 0
+            worker_state["current_task_completed_games"] = 0
+
     def _reclaim_expired_leases(self, now: datetime) -> None:
-        for entry in self._state["tasks"]:
+        self._reclaim_expired_leases_in_state(self._state, now)
+
+    def _reclaim_expired_leases_in_state(self, state: dict[str, Any], now: datetime) -> None:
+        for entry in state["tasks"]:
             if entry["status"] != "leased":
                 continue
             expiry_text = entry.get("lease_expires_at")
@@ -398,8 +587,8 @@ class DistributedSelfPlayCoordinator:
             if expires_at > now:
                 continue
             worker_id = entry.get("leased_by")
-            if isinstance(worker_id, str) and worker_id in self._state["workers"]:
-                worker_state = self._state["workers"][worker_id]
+            if isinstance(worker_id, str) and worker_id in state["workers"]:
+                worker_state = state["workers"][worker_id]
                 worker_state["leased_task_index"] = None
                 worker_state["current_task_started_at"] = None
                 worker_state["current_task_game_count"] = 0
@@ -819,8 +1008,75 @@ def _coerce_float(value: Any) -> float | None:
 def _atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temp_path = path.with_suffix(path.suffix + ".tmp")
-    temp_path.write_text(json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8")
+    with temp_path.open("w", encoding="utf-8") as handle:
+        handle.write(json.dumps(payload, indent=2, sort_keys=True))
+        handle.flush()
+        os.fsync(handle.fileno())
     temp_path.replace(path)
+    _fsync_directory(path.parent)
+
+
+def _artifact_presence_detail(*, decisions_exists: bool, games_exists: bool, summary_exists: bool) -> str:
+    return (
+        f"decisions={int(decisions_exists)} "
+        f"games={int(games_exists)} "
+        f"summary={int(summary_exists)}"
+    )
+
+
+def _artifact_submitted_at(artifact_paths: Any) -> str | None:
+    candidate_paths = [artifact_paths.summary, artifact_paths.games, artifact_paths.decisions]
+    timestamps = []
+    for path in candidate_paths:
+        try:
+            timestamps.append(path.stat().st_mtime)
+        except OSError:
+            continue
+    if not timestamps:
+        return None
+    return datetime.fromtimestamp(max(timestamps), UTC).isoformat()
+
+
+def _scan_unexpected_artifact_indices(*, output_dir: Path, known_task_indices: set[int]) -> list[int]:
+    unexpected_indices: set[int] = set()
+    for directory, suffix in (
+        (output_dir / "decisions", ".jsonl"),
+        (output_dir / "games", ".jsonl"),
+        (output_dir / "summaries", ".json"),
+    ):
+        if not directory.exists():
+            continue
+        for path in directory.glob(f"shard_*{suffix}"):
+            suffix_length = len(suffix)
+            stem = path.name[:-suffix_length]
+            task_index = _parse_shard_task_index(stem)
+            if task_index is None or task_index in known_task_indices:
+                continue
+            unexpected_indices.add(task_index)
+    return sorted(unexpected_indices)
+
+
+def _parse_shard_task_index(value: str) -> int | None:
+    if not value.startswith("shard_"):
+        return None
+    index_text = value.removeprefix("shard_")
+    try:
+        return int(index_text)
+    except ValueError:
+        return None
+
+
+def _fsync_directory(path: Path) -> None:
+    try:
+        descriptor = os.open(path, os.O_RDONLY)
+    except OSError:
+        return
+    try:
+        os.fsync(descriptor)
+    except OSError:
+        pass
+    finally:
+        os.close(descriptor)
 
 
 def _utc_now() -> datetime:

@@ -40,6 +40,7 @@ except (urllib_error.URLError, TimeoutError, OSError) as exc:
 aggregate = payload.get("aggregate", {})
 workers = payload.get("workers", {})
 deck_wins = aggregate.get("deck_wins", {})
+recovery = payload.get("recovery", {})
 
 print(f"run_id: {payload.get('run_id')}")
 print(
@@ -60,6 +61,12 @@ print(
     "wins: "
     f"ampharos={deck_wins.get('ampharos-ex-battle-deck', 0)} "
     f"lucario={deck_wins.get('lucario-ex-battle-deck', 0)}"
+)
+print(
+    "recovery: "
+    f"completed_on_disk={recovery.get('completed_tasks_from_artifacts', 0)} "
+    f"legacy_upgrades={recovery.get('upgraded_legacy_summaries', 0)} "
+    f"issues={recovery.get('integrity_issue_count', 0)}"
 )
 print(f"run_complete: {payload.get('run_complete')}")
 print()
