@@ -24,6 +24,7 @@ class StandardTacticalSuiteTests(unittest.TestCase):
                 "attach_to_enable_immediate_win",
                 "retreat_into_ready_attacker",
                 "retreat_into_ready_attacker_over_supporter",
+                "attack_over_redundant_retreat_when_active_already_wins",
             ],
         )
 
@@ -43,7 +44,7 @@ class StandardTacticalSuiteTests(unittest.TestCase):
             planner_config=PlannerConfig(max_depth=2, beam_width=4, opponent_branch_width=2),
         )
 
-        self.assertEqual(len(results), 5)
+        self.assertEqual(len(results), 6)
         self.assertTrue(all(result.passed for result in results))
         self.assertEqual(
             {result.chosen_action_type for result in results},
@@ -58,7 +59,7 @@ class StandardTacticalSuiteTests(unittest.TestCase):
             suite="strategic",
         )
 
-        self.assertEqual(len(results), 8)
+        self.assertEqual(len(results), 10)
         self.assertTrue(all(result.passed for result in results))
         self.assertEqual(
             [result.name for result in results],
@@ -71,11 +72,13 @@ class StandardTacticalSuiteTests(unittest.TestCase):
                 "ultra_ball_lucario_ex_for_immediate_conversion",
                 "ultra_ball_ampharos_ex_for_immediate_conversion",
                 "youngster_over_low_value_ultra_ball",
+                "energy_retrieval_non_empty_over_empty_variant",
+                "pokegear_empty_hand_thinning_when_no_supporter_found",
             ],
         )
         self.assertEqual(
             {result.chosen_action_type for result in results},
-            {"attack", "play_energy", "play_item", "play_supporter"},
+            {"attack", "play_energy", "play_item", "play_supporter", "retreat"},
         )
         self.assertEqual({result.tier for result in results}, {"strategic"})
 

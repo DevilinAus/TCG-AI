@@ -381,31 +381,10 @@ class FallbackStandardDecisionProvider(StandardDecisionProvider):
         )
 
     def choose_action(self, request: DecisionRequest) -> DecisionResult:
-        if request.decision_type != "opening_active":
-            if not self.config.remote_enabled or not self.config.remote_url:
-                raise StandardRemoteDecisionError("Remote Standard policy is disabled.")
+        if self.config.remote_enabled and self.config.remote_url:
             result = self._remote.choose_action(request)
             self._remember_decision(request, result)
             return result
-
-        if self.config.remote_enabled and self.config.remote_url:
-            try:
-                result = self._remote.choose_action(request)
-                self._remember_decision(request, result)
-                return result
-            except StandardRemoteDecisionError as exc:
-                local_result = self._local.choose_action(request)
-                fallback_result = DecisionResult(
-                    chosen_action=local_result.chosen_action,
-                    action_id=local_result.action_id,
-                    source="local",
-                    diagnostics={
-                        **local_result.diagnostics,
-                        "fallback_reason": str(exc),
-                    },
-                )
-                self._remember_decision(request, fallback_result)
-                return fallback_result
 
         result = self._local.choose_action(request)
         self._remember_decision(request, result)

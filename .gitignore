@@ -6,3 +6,4 @@ standard_policy_progress.json
 standard_ml_data/
 node_modules/
 .playwright-browsers/
+start_macbook_workers.command

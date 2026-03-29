@@ -182,6 +182,79 @@ class StandardNeuralPolicyEncodingTests(unittest.TestCase):
         self.assertEqual(len(bench_vector), ACTION_VECTOR_SIZE)
         self.assertNotEqual(active_vector, bench_vector)
 
+    def test_action_vector_includes_intent_and_quality_analysis_features(self) -> None:
+        belief_state = _sample_belief_state()
+        base_action = {
+            "type": "play_item",
+            "source_card": {
+                "kind": "trainer",
+                "is_basic": False,
+                "is_basic_energy": False,
+                "prize_card_value": 0,
+                "stage": None,
+            },
+            "target": {"player_index": 0, "zone": None, "bench_index": None},
+            "resource_costs": {
+                "hand_card_count": 1,
+                "discard_from_hand_count": 0,
+                "discard_attached_energy_count": 0,
+                "recover_from_discard_count": 0,
+                "search_selection_count": 0,
+                "attack_energy_cost": 0,
+                "retreat_energy_cost": 0,
+            },
+            "expected_state_delta": {
+                "cards_drawn_known": 0,
+                "hand_count_delta_known": -1,
+                "bench_count_delta": 0,
+                "discard_count_delta_known": 1,
+                "active_changes": False,
+                "turn_ends": False,
+            },
+            "effect_tags": ["recover_from_discard"],
+            "consumes_supporter_for_turn": False,
+            "consumes_attachment_for_turn": False,
+            "consumes_retreat_for_turn": False,
+            "tactical_outcomes": {
+                "wins_game_now": False,
+                "takes_prize_now": False,
+                "prizes_taken_now": 0,
+                "creates_same_turn_prize_line": False,
+                "creates_live_attack_this_turn": False,
+                "changes_active": False,
+                "saves_board_investment": False,
+                "reduces_active_ko_risk": False,
+            },
+            "resolution_facts": {
+                "optional_choice_empty": True,
+                "productive_variant_exists": False,
+                "net_known_hand_delta": -1,
+                "net_known_bench_delta": 0,
+                "net_known_discard_delta": 1,
+            },
+            "intent_tags": [],
+            "quality_flags": [],
+        }
+        analyzed_action = deepcopy(base_action)
+        analyzed_action["tactical_outcomes"] = {
+            **base_action["tactical_outcomes"],
+            "takes_prize_now": True,
+            "prizes_taken_now": 1,
+        }
+        analyzed_action["resolution_facts"] = {
+            **base_action["resolution_facts"],
+            "productive_variant_exists": True,
+        }
+        analyzed_action["intent_tags"] = ["take_prize", "recover_resource"]
+        analyzed_action["quality_flags"] = ["dominated_optional_play"]
+
+        base_vector = encode_action_vector(base_action, belief_state=belief_state)
+        analyzed_vector = encode_action_vector(analyzed_action, belief_state=belief_state)
+
+        self.assertEqual(len(base_vector), ACTION_VECTOR_SIZE)
+        self.assertEqual(len(analyzed_vector), ACTION_VECTOR_SIZE)
+        self.assertNotEqual(base_vector, analyzed_vector)
+
     def test_checkpoint_dimension_inference_prefers_explicit_model_config(self) -> None:
         checkpoint = {
             "model_config": {"state_dim": 99, "action_dim": 44},

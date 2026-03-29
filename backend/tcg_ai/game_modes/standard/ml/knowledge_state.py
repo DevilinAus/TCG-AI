@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from ..action_analysis import analyze_legal_actions
 from ..action_metadata import build_action_metadata
 from ..engine import action_id_for, card_definition, get_top_card_definition
 from ..models import GameState, PokemonInPlay
@@ -56,8 +57,18 @@ def serialize_knowledge_actions(
     acting_player_index: int,
     legal_actions: list[dict[str, Any]],
 ) -> list[dict[str, Any]]:
+    analysis_by_action_id = analyze_legal_actions(
+        state,
+        acting_player_index=acting_player_index,
+        legal_actions=legal_actions,
+    )
     return [
-        _serialize_knowledge_action(state, acting_player_index, action)
+        _serialize_knowledge_action(
+            state,
+            acting_player_index,
+            action,
+            analysis=analysis_by_action_id.get(action_id_for(action)),
+        )
         for action in legal_actions
     ]
 
@@ -117,6 +128,8 @@ def _serialize_knowledge_action(
     state: GameState,
     acting_player_index: int,
     action: dict[str, Any],
+    *,
+    analysis: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     source_card = None
     hand_card_id = action.get("hand_card_id")
@@ -153,6 +166,19 @@ def _serialize_knowledge_action(
         "effect_specs": list(source_card.get("effect_specs", [])) if isinstance(source_card, dict) else [],
     }
     payload.update(build_action_metadata(state, acting_player_index, action))
+    if isinstance(analysis, dict):
+        payload.update(
+            {
+                "tactical_outcomes": dict(analysis.get("tactical_outcomes") or {}),
+                "resolution_facts": dict(analysis.get("resolution_facts") or {}),
+                "intent_tags": list(analysis.get("intent_tags") or []),
+                "quality_flags": list(analysis.get("quality_flags") or []),
+                "reason_tags": list(analysis.get("reason_tags") or []),
+                "reason_summary": analysis.get("reason_summary"),
+                "dominance_context": dict(analysis.get("dominance_context") or {}),
+                "penalty_breakdown": dict(analysis.get("penalty_breakdown") or {}),
+            }
+        )
     return payload
 
 

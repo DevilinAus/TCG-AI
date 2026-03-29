@@ -92,7 +92,7 @@ def choose_action(
 
     if player_index == 1 and state.setup_phase is None:
         from .ml.planner import StandardTurnPlanner
-        from .policy import StandardRemoteDecisionError, build_turn_action_request
+        from .policy import DecisionResult, build_turn_action_request
 
         provider = getattr(runtime, "provider", None)
         config = getattr(provider, "config", None)
@@ -104,17 +104,14 @@ def choose_action(
             and isinstance(getattr(config, "remote_url", None), str)
             and config.remote_url
         ):
-            try:
-                decision_request = build_turn_action_request(
-                    state,
-                    runtime=runtime,
-                    acting_player_index=player_index,
-                    legal_actions=legal_actions,
-                )
-                decision_result = provider.choose_action(decision_request)
-                return decision_result.chosen_action
-            except StandardRemoteDecisionError:
-                pass
+            decision_request = build_turn_action_request(
+                state,
+                runtime=runtime,
+                acting_player_index=player_index,
+                legal_actions=legal_actions,
+            )
+            decision_result = provider.choose_action(decision_request)
+            return decision_result.chosen_action
 
         planner = StandardTurnPlanner()
         decision = planner.plan(
@@ -122,6 +119,22 @@ def choose_action(
             acting_player_index=player_index,
             legal_actions=legal_actions,
         )
+        if runtime is not None and provider is not None:
+            decision_request = build_turn_action_request(
+                state,
+                runtime=runtime,
+                acting_player_index=player_index,
+                legal_actions=legal_actions,
+            )
+            provider._remember_decision(
+                decision_request,
+                DecisionResult(
+                    chosen_action=decision["chosen_action"],
+                    action_id=decision["chosen_action_id"],
+                    source="local",
+                    diagnostics=dict(decision["diagnostics"]),
+                ),
+            )
         return decision["chosen_action"]
     return legal_actions[0]
 

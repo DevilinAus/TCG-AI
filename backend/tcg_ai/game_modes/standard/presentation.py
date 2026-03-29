@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from typing import Any
 
+from .action_analysis import AI_REASON_LOG_PREFIX, analyze_legal_actions
 from .engine import action_id_for, card_definition, get_top_card_definition, list_legal_actions
 from .models import EffectOption, EffectSpec, GameState, PlayerState, PokemonInPlay
 
@@ -19,7 +20,15 @@ def serialize_state(
     ai_learning: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     raw_actions = list_legal_actions(state) if state.current_player == viewer else []
-    action_views = [_serialize_action(state, action) for action in raw_actions]
+    analysis_by_action_id = analyze_legal_actions(
+        state,
+        acting_player_index=state.current_player,
+        legal_actions=raw_actions,
+    ) if raw_actions else {}
+    action_views = [
+        _serialize_action(state, action, analysis=analysis_by_action_id.get(action_id_for(action)))
+        for action in raw_actions
+    ]
     return {
         "session_id": session_id,
         "seed": state.seed,
@@ -282,7 +291,12 @@ def _should_hide_opening_active(
     )
 
 
-def _serialize_action(state: GameState, action: dict[str, Any]) -> dict[str, Any]:
+def _serialize_action(
+    state: GameState,
+    action: dict[str, Any],
+    *,
+    analysis: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     player_index = state.current_player
     view = {
         "action_id": action_id_for(action),
@@ -303,6 +317,12 @@ def _serialize_action(state: GameState, action: dict[str, Any]) -> dict[str, Any
         view["changes_hidden_information"] = any(
             effect_spec.changes_hidden_information for effect_spec in card.effect_specs
         )
+    if isinstance(analysis, dict):
+        view["tactical_outcomes"] = dict(analysis.get("tactical_outcomes") or {})
+        view["resolution_facts"] = dict(analysis.get("resolution_facts") or {})
+        view["intent_tags"] = list(analysis.get("intent_tags") or [])
+        view["quality_flags"] = list(analysis.get("quality_flags") or [])
+        view["reason_summary"] = analysis.get("reason_summary")
     return view
 
 
@@ -544,7 +564,10 @@ def _serialize_log_entry(
         side = "ai"
 
     kind = "system"
-    if "drew" in entry:
+    if entry.startswith(AI_REASON_LOG_PREFIX):
+        kind = "reason"
+        side = "ai"
+    elif "drew" in entry:
         kind = "draw"
 
     return {"text": entry, "side": side, "kind": kind}

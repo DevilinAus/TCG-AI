@@ -5,6 +5,7 @@ from dataclasses import dataclass
 from math import inf
 from typing import Any
 
+from ..action_analysis import analyze_legal_actions, planner_adjustment_for_analysis
 from ..engine import action_id_for, apply_action_for_player, list_legal_actions
 from ..models import GameState
 from .oracle import (
@@ -32,6 +33,7 @@ class RankedAction:
     continuation_score: float
     successor_state: GameState
     successor_legal_actions: list[dict[str, Any]]
+    analysis: dict[str, Any]
 
 
 class StandardTurnPlanner:
@@ -55,11 +57,17 @@ class StandardTurnPlanner:
             raise ValueError("Planner needs at least one legal action.")
 
         self._nodes_evaluated = 0
+        root_analysis = analyze_legal_actions(
+            state,
+            acting_player_index=acting_player_index,
+            legal_actions=legal_actions,
+        )
         baseline_score, ranked_actions = self._rank_actions(
             state,
             acting_player_index,
             legal_actions,
             acting_player_index,
+            analysis_by_action_id=root_analysis,
         )
         candidates: list[dict[str, Any]] = []
         for ranked_action in ranked_actions[: self.config.beam_width]:
@@ -81,6 +89,10 @@ class StandardTurnPlanner:
                     "prior": round(ranked_action.prior, 6),
                     "one_step_score": round(ranked_action.one_step_score, 6),
                     "continuation_score": round(ranked_action.continuation_score, 6),
+                    "reason_tags": list(ranked_action.analysis.get("reason_tags") or []),
+                    "reason_summary": ranked_action.analysis.get("reason_summary"),
+                    "penalty_breakdown": dict(ranked_action.analysis.get("penalty_breakdown") or {}),
+                    "dominance_context": dict(ranked_action.analysis.get("dominance_context") or {}),
                 }
             )
 
@@ -106,12 +118,20 @@ class StandardTurnPlanner:
                         "score": candidate["score"],
                         "delta": candidate["delta"],
                         "line": candidate["line"],
+                        "reason_tags": candidate["reason_tags"],
+                        "reason_summary": candidate["reason_summary"],
+                        "penalty_breakdown": candidate["penalty_breakdown"],
+                        "dominance_context": candidate["dominance_context"],
                     }
                     for candidate in sorted(
                         candidates,
                         key=lambda candidate: (-candidate["score"], candidate["action_id"]),
                     )[:3]
                 ],
+                "reason_tags": best["reason_tags"],
+                "reason_summary": best["reason_summary"],
+                "penalty_breakdown": best["penalty_breakdown"],
+                "dominance_context": best["dominance_context"],
                 "policy_target_scores": policy_target_scores,
             },
         }
@@ -203,7 +223,14 @@ class StandardTurnPlanner:
         legal_actions: list[dict[str, Any]],
         root_player_index: int,
         baseline_score: float | None = None,
+        analysis_by_action_id: dict[str, dict[str, Any]] | None = None,
     ) -> tuple[float, list[RankedAction]]:
+        if analysis_by_action_id is None:
+            analysis_by_action_id = analyze_legal_actions(
+                state,
+                acting_player_index=acting_player_index,
+                legal_actions=legal_actions,
+            )
         oracle_result = self._evaluate_requests(
             [
                 PolicyValueRequest(
@@ -254,6 +281,8 @@ class StandardTurnPlanner:
         ), one_step_result in zip(simulated_actions, one_step_results):
             one_step_score = float(one_step_result.value)
             prior = float(oracle_result.action_priors.get(action_id, 0.0))
+            analysis = analysis_by_action_id.get(action_id, {})
+            planner_adjustment, penalty_breakdown = planner_adjustment_for_analysis(analysis)
             continuation_score = self._same_turn_continuation_score(
                 simulated_state,
                 acting_player_index=acting_player_index,
@@ -265,7 +294,8 @@ class StandardTurnPlanner:
                 one_step_score
                 + prior * 8.0
                 + (one_step_score - baseline_score) * 0.3
-                + self._continuation_rank_bonus(one_step_score, continuation_score),
+                + self._continuation_rank_bonus(one_step_score, continuation_score)
+                + planner_adjustment,
                 6,
             )
             ranked.append(
@@ -278,6 +308,11 @@ class StandardTurnPlanner:
                     continuation_score=continuation_score,
                     successor_state=simulated_state,
                     successor_legal_actions=_next_legal_actions,
+                    analysis={
+                        **analysis,
+                        "penalty_breakdown": penalty_breakdown,
+                        "planner_adjustment": planner_adjustment,
+                    },
                 )
             )
         ranked.sort(key=lambda item: (-item.rank_score, item.action_id))
