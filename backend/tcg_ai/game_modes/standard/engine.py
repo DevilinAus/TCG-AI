@@ -92,39 +92,36 @@ def choose_action(
 
     if player_index == 1 and state.setup_phase is None:
         from .ml.planner import StandardTurnPlanner
-        from .ml.remote_oracle import RemotePolicyValueOracle, RemotePolicyValueOracleError
+        from .policy import StandardRemoteDecisionError, build_turn_action_request
 
-        remote_oracle = None
         provider = getattr(runtime, "provider", None)
         config = getattr(provider, "config", None)
-        batch_eval_url = config.resolved_remote_batch_eval_url() if config is not None else None
         if (
-            config is not None
+            runtime is not None
+            and provider is not None
+            and config is not None
             and getattr(config, "remote_enabled", False)
-            and isinstance(batch_eval_url, str)
-            and batch_eval_url
+            and isinstance(getattr(config, "remote_url", None), str)
+            and config.remote_url
         ):
-            remote_oracle = RemotePolicyValueOracle(
-                batch_eval_url=batch_eval_url,
-                timeout_ms=int(config.remote_timeout_ms),
-                api_token=getattr(config, "remote_api_token", None),
-                session_id=getattr(provider, "session_id", None),
-            )
+            try:
+                decision_request = build_turn_action_request(
+                    state,
+                    runtime=runtime,
+                    acting_player_index=player_index,
+                    legal_actions=legal_actions,
+                )
+                decision_result = provider.choose_action(decision_request)
+                return decision_result.chosen_action
+            except StandardRemoteDecisionError:
+                pass
 
-        planner = StandardTurnPlanner(oracle=remote_oracle)
-        try:
-            decision = planner.plan(
-                state,
-                acting_player_index=player_index,
-                legal_actions=legal_actions,
-            )
-        except RemotePolicyValueOracleError:
-            fallback_planner = StandardTurnPlanner()
-            decision = fallback_planner.plan(
-                state,
-                acting_player_index=player_index,
-                legal_actions=legal_actions,
-            )
+        planner = StandardTurnPlanner()
+        decision = planner.plan(
+            state,
+            acting_player_index=player_index,
+            legal_actions=legal_actions,
+        )
         return decision["chosen_action"]
     return legal_actions[0]
 

@@ -8,6 +8,7 @@ from ..engine import action_id_for, list_legal_actions
 from .canonical_state import SCHEMA_VERSION as FULL_STATE_SCHEMA_VERSION, deserialize_state
 from .experience import StandardExperienceStore
 from .neural_policy import PolicyValueBackend
+from .oracle import BackendPolicyValueOracle
 from .planner import PlannerConfig, StandardTurnPlanner
 
 
@@ -61,7 +62,10 @@ class StandardMlService:
         acting_player_index = int(payload.get("acting_player_index", state.current_player))
         legal_actions = list_legal_actions(state, player_index=acting_player_index)
         config = _planner_config_from_payload(payload.get("search_config"))
-        planner = StandardTurnPlanner(config=config)
+        planner = StandardTurnPlanner(
+            config=config,
+            oracle=BackendPolicyValueOracle(backend=self.policy_backend),
+        )
         decision = planner.plan(
             state,
             acting_player_index=acting_player_index,

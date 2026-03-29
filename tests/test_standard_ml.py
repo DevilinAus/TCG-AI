@@ -12,7 +12,12 @@ from backend.tcg_ai.game_modes.standard.ml.knowledge_state import (
     serialize_knowledge_actions,
     serialize_knowledge_state,
 )
-from backend.tcg_ai.game_modes.standard.ml.neural_policy import PolicyValueBackend
+from backend.tcg_ai.game_modes.standard.ml.neural_policy import (
+    ActionConditionedPolicyValueNet,
+    PolicyValueBackend,
+    PolicyValueBackendStatus,
+    torch,
+)
 from backend.tcg_ai.game_modes.standard.ml.oracle import (
     BackendPolicyValueOracle,
     PolicyValueRequest,
@@ -106,6 +111,107 @@ class StandardMlTests(unittest.TestCase):
         self.assertIn(response["chosen_action_id"], legal_action_ids)
         self.assertEqual(response["decision_id"], "session-a:turn_action")
         self.assertTrue((Path(self.temp_dir.name) / "decisions.jsonl").exists())
+
+    def test_service_full_state_path_uses_backend_oracle(self) -> None:
+        class RecordingBackend:
+            def __init__(self) -> None:
+                self.calls = 0
+                self.status = PolicyValueBackendStatus(
+                    backend="recording",
+                    model_loaded=True,
+                    checkpoint_path="/tmp/fake.pt",
+                )
+
+            def evaluate_batch(self, evaluations):
+                self.calls += 1
+                responses = []
+                for evaluation in evaluations:
+                    legal_actions = list(evaluation.get("legal_actions", []))
+                    action_ids = [str(action.get("action_id", "")) for action in legal_actions]
+                    uniform = round(1.0 / len(action_ids), 6) if action_ids else 0.0
+                    responses.append(
+                        {
+                            "value": 0.0,
+                            "action_priors": {action_id: uniform for action_id in action_ids},
+                            "diagnostics": {"backend": "recording", "model_loaded": True},
+                        }
+                    )
+                return responses
+
+        state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck", ai_name="Brock")
+        self.service.policy_backend = RecordingBackend()
+        payload = {
+            "schema_version": 2,
+            "decision_id": "session-a:turn_action",
+            "decision_type": "turn_action",
+            "acting_player_index": 0,
+            "search_config": {
+                "max_depth": 2,
+                "beam_width": 3,
+                "opponent_branch_width": 2,
+            },
+            "state": serialize_state(state),
+        }
+
+        response = self.service.choose_action(payload)
+
+        legal_action_ids = {action_id_for(action) for action in list_legal_actions(state, player_index=0)}
+        self.assertGreater(self.service.policy_backend.calls, 0)
+        self.assertIn(response["chosen_action_id"], legal_action_ids)
+
+    def test_service_full_state_decision_matches_local_backend_planner(self) -> None:
+        class DeterministicBackend:
+            status = PolicyValueBackendStatus(
+                backend="deterministic",
+                model_loaded=True,
+                checkpoint_path="/tmp/fake.pt",
+            )
+
+            @staticmethod
+            def evaluate_batch(evaluations):
+                responses = []
+                for evaluation in evaluations:
+                    legal_actions = list(evaluation.get("legal_actions", []))
+                    action_ids = [str(action.get("action_id", "")) for action in legal_actions]
+                    priors = {action_id: 0.0 for action_id in action_ids}
+                    if action_ids:
+                        priors[min(action_ids)] = 1.0
+                    responses.append(
+                        {
+                            "value": 0.0,
+                            "action_priors": priors,
+                            "diagnostics": {"backend": "deterministic", "model_loaded": True},
+                        }
+                    )
+                return responses
+
+        backend = DeterministicBackend()
+        self.service.policy_backend = backend
+        state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck", ai_name="Brock")
+        config = PlannerConfig(max_depth=2, beam_width=3, opponent_branch_width=2)
+        local_planner = StandardTurnPlanner(
+            config=config,
+            oracle=BackendPolicyValueOracle(backend=backend),
+        )
+
+        local_decision = local_planner.plan(state, acting_player_index=0)
+        response = self.service.choose_action(
+            {
+                "schema_version": 2,
+                "decision_id": "session-a:turn_action",
+                "decision_type": "turn_action",
+                "acting_player_index": 0,
+                "search_config": {
+                    "max_depth": config.max_depth,
+                    "beam_width": config.beam_width,
+                    "opponent_branch_width": config.opponent_branch_width,
+                    "include_opponent_turn": config.include_opponent_turn,
+                },
+                "state": serialize_state(state),
+            }
+        )
+
+        self.assertEqual(response["chosen_action_id"], local_decision["chosen_action_id"])
 
     def test_service_handles_legacy_payload(self) -> None:
         state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck", ai_name="Brock")
@@ -221,6 +327,62 @@ class StandardMlTests(unittest.TestCase):
         self.assertEqual(len(results), 1)
         self.assertEqual(set(results[0].action_priors), {action_id_for(action) for action in legal_actions})
         self.assertEqual(results[0].diagnostics["backend"], "heuristic")
+
+    @unittest.skipIf(torch is None, "PyTorch is not available.")
+    def test_model_backed_batch_eval_matches_single_item_path(self) -> None:
+        backend = PolicyValueBackend(checkpoint_path=Path(self.temp_dir.name) / "missing.pt")
+        torch.manual_seed(7)
+        backend._model = ActionConditionedPolicyValueNet(
+            state_dim=backend._state_dim,
+            action_dim=backend._action_dim,
+        )
+        backend._model.eval()
+        backend._status = PolicyValueBackendStatus(
+            backend="torch:cpu",
+            model_loaded=True,
+            checkpoint_path=None,
+        )
+
+        state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck", ai_name="Brock")
+        legal_actions = list_legal_actions(state, player_index=0)
+        evaluations = [
+            {
+                "acting_player_index": 0,
+                "root_player_index": 0,
+                "belief_state": serialize_knowledge_state(state, perspective_player_index=0),
+                "legal_actions": serialize_knowledge_actions(
+                    state,
+                    acting_player_index=0,
+                    legal_actions=legal_actions,
+                ),
+            },
+            {
+                "acting_player_index": 0,
+                "root_player_index": 0,
+                "belief_state": serialize_knowledge_state(state, perspective_player_index=0),
+                "legal_actions": serialize_knowledge_actions(
+                    state,
+                    acting_player_index=0,
+                    legal_actions=legal_actions[:2],
+                ),
+            },
+            {
+                "acting_player_index": 0,
+                "root_player_index": 0,
+                "belief_state": serialize_knowledge_state(state, perspective_player_index=0),
+                "legal_actions": [],
+            },
+        ]
+
+        expected = [backend._model_evaluation(evaluation) for evaluation in evaluations]
+        actual = backend.evaluate_batch(evaluations)
+
+        self.assertEqual(len(actual), len(expected))
+        for expected_row, actual_row in zip(expected, actual):
+            self.assertAlmostEqual(actual_row["value"], expected_row["value"], places=6)
+            self.assertEqual(set(actual_row["action_priors"]), set(expected_row["action_priors"]))
+            for action_id, expected_prior in expected_row["action_priors"].items():
+                self.assertAlmostEqual(actual_row["action_priors"][action_id], expected_prior, places=6)
 
     def test_self_play_game_produces_completed_training_records(self) -> None:
         summary, records = play_self_play_game(
