@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from time import perf_counter
 from typing import Any
 
+from ....logging_utils import get_logger
 from ..cards import load_deck_cards
 from ..decision_payload import SCHEMA_VERSION as LEGACY_SCHEMA_VERSION
 from ..engine import action_id_for, list_legal_actions
@@ -11,6 +13,8 @@ from .neural_policy import PolicyValueBackend
 from .oracle import BackendPolicyValueOracle
 from .planner import PlannerConfig, StandardTurnPlanner
 
+logger = get_logger(__name__)
+
 
 class StandardMlService:
     def __init__(self, experience_store: StandardExperienceStore | None = None) -> None:
@@ -18,11 +22,34 @@ class StandardMlService:
         self.policy_backend = PolicyValueBackend()
 
     def choose_action(self, payload: dict[str, Any]) -> dict[str, Any]:
+        start_time = perf_counter()
         if _is_full_state_payload(payload):
+            logger.info(
+                "worker decision start decision_id=%s type=%s turn=%s acting_player=%s schema_version=%s",
+                payload.get("decision_id"),
+                payload.get("decision_type", "turn_action"),
+                payload.get("turn_number"),
+                payload.get("acting_player_index"),
+                payload.get("schema_version"),
+            )
             response = self._choose_full_state_action(payload)
         else:
             response = self._choose_legacy_action(payload)
         self.experience_store.record_decision(payload, response)
+        elapsed_ms = round((perf_counter() - start_time) * 1000, 1)
+        diagnostics = response.get("diagnostics", {})
+        if not isinstance(diagnostics, dict):
+            diagnostics = {}
+        logger.info(
+            "worker decision done decision_id=%s type=%s elapsed_ms=%s chosen_action_id=%s nodes_evaluated=%s reason=%s planned_action_sequence=%s",
+            response.get("decision_id"),
+            response.get("decision_type"),
+            elapsed_ms,
+            response.get("chosen_action_id"),
+            diagnostics.get("nodes_evaluated"),
+            diagnostics.get("reason_summary"),
+            response.get("planned_action_sequence"),
+        )
         return response
 
     def record_outcome(self, payload: dict[str, Any]) -> dict[str, Any]:
@@ -36,9 +63,14 @@ class StandardMlService:
         evaluations = payload.get("evaluations", [])
         if not isinstance(evaluations, list) or not evaluations:
             raise ValueError("Batch evaluation payload is missing evaluations.")
+        start_time = perf_counter()
+        logger.info("worker batch-eval start evaluation_count=%s", len(evaluations))
+        results = self.policy_backend.evaluate_batch(evaluations)
+        elapsed_ms = round((perf_counter() - start_time) * 1000, 1)
+        logger.info("worker batch-eval done evaluation_count=%s elapsed_ms=%s", len(evaluations), elapsed_ms)
         return {
             "schema_version": FULL_STATE_SCHEMA_VERSION,
-            "evaluations": self.policy_backend.evaluate_batch(evaluations),
+            "evaluations": results,
         }
 
     def health(self) -> dict[str, Any]:

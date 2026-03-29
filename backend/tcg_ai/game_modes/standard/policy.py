@@ -3,10 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 import json
 import os
+from time import perf_counter
 from typing import Any
 from urllib import error, request as urllib_request
 from urllib.parse import urlsplit, urlunsplit
 
+from ...logging_utils import get_logger
 from .decision_payload import build_decision_request
 from .engine import action_id_for, apply_action_for_player, card_definition, list_legal_actions
 from .ml.canonical_state import serialize_state
@@ -18,6 +20,7 @@ DEFAULT_REMOTE_TIMEOUT_MS = 2_000
 DEFAULT_EXPLORATION_RATE = 0.20
 DEFAULT_MIN_EXPLORATION_RATE = 0.05
 FULL_STATE_REQUEST_SCHEMA_VERSION = 2
+logger = get_logger(__name__)
 
 
 @dataclass(frozen=True)
@@ -308,6 +311,17 @@ class RemoteStandardDecisionProvider(StandardDecisionProvider):
             headers=headers,
             method="POST",
         )
+        start_time = perf_counter()
+        logger.info(
+            "remote decision request start session=%s decision_id=%s type=%s turn=%s player=%s url=%s legal_action_count=%s",
+            self.session_id,
+            request.decision_id,
+            request.decision_type,
+            request.state.turn_number,
+            request.acting_player_index,
+            self.config.remote_url,
+            len(request.legal_actions),
+        )
         try:
             with urllib_request.urlopen(
                 http_request,
@@ -315,15 +329,48 @@ class RemoteStandardDecisionProvider(StandardDecisionProvider):
             ) as response:
                 payload = json.loads(response.read().decode("utf-8"))
         except (TimeoutError, error.URLError, json.JSONDecodeError, OSError) as exc:
+            elapsed_ms = round((perf_counter() - start_time) * 1000, 1)
+            logger.error(
+                "remote decision request failed session=%s decision_id=%s type=%s elapsed_ms=%s error=%s",
+                self.session_id,
+                request.decision_id,
+                request.decision_type,
+                elapsed_ms,
+                exc,
+            )
             raise StandardRemoteDecisionError(str(exc)) from exc
 
         if not isinstance(payload, dict):
+            elapsed_ms = round((perf_counter() - start_time) * 1000, 1)
+            logger.error(
+                "remote decision request malformed session=%s decision_id=%s elapsed_ms=%s payload_type=%s",
+                self.session_id,
+                request.decision_id,
+                elapsed_ms,
+                type(payload).__name__,
+            )
             raise StandardRemoteDecisionError("Remote Standard policy returned a malformed payload.")
         if payload.get("decision_id") != request.decision_id:
+            elapsed_ms = round((perf_counter() - start_time) * 1000, 1)
+            logger.error(
+                "remote decision request wrong-id session=%s decision_id=%s elapsed_ms=%s returned_decision_id=%s",
+                self.session_id,
+                request.decision_id,
+                elapsed_ms,
+                payload.get("decision_id"),
+            )
             raise StandardRemoteDecisionError("Remote Standard policy returned the wrong decision ID.")
 
         chosen_action_id = payload.get("chosen_action_id")
         if not isinstance(chosen_action_id, str) or not chosen_action_id:
+            elapsed_ms = round((perf_counter() - start_time) * 1000, 1)
+            logger.error(
+                "remote decision request missing-action session=%s decision_id=%s elapsed_ms=%s payload=%s",
+                self.session_id,
+                request.decision_id,
+                elapsed_ms,
+                payload,
+            )
             raise StandardRemoteDecisionError("Remote Standard policy omitted chosen_action_id.")
 
         action_by_id = {
@@ -331,11 +378,31 @@ class RemoteStandardDecisionProvider(StandardDecisionProvider):
         }
         chosen_action = action_by_id.get(chosen_action_id)
         if chosen_action is None:
+            elapsed_ms = round((perf_counter() - start_time) * 1000, 1)
+            logger.error(
+                "remote decision request illegal-action session=%s decision_id=%s elapsed_ms=%s chosen_action_id=%s legal_action_ids=%s",
+                self.session_id,
+                request.decision_id,
+                elapsed_ms,
+                chosen_action_id,
+                sorted(action_by_id),
+            )
             raise StandardRemoteDecisionError("Remote Standard policy returned an illegal action.")
 
         diagnostics = payload.get("diagnostics")
         if not isinstance(diagnostics, dict):
             diagnostics = {}
+        elapsed_ms = round((perf_counter() - start_time) * 1000, 1)
+        logger.info(
+            "remote decision request accepted session=%s decision_id=%s type=%s elapsed_ms=%s chosen_action_id=%s planned_action_sequence=%s reason=%s",
+            self.session_id,
+            request.decision_id,
+            request.decision_type,
+            elapsed_ms,
+            chosen_action_id,
+            payload.get("planned_action_sequence"),
+            diagnostics.get("reason_summary"),
+        )
         result = DecisionResult(
             chosen_action=chosen_action,
             action_id=chosen_action_id,

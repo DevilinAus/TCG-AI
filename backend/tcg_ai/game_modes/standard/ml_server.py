@@ -5,7 +5,11 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
 
+from ...logging_utils import configure_tcg_ai_logging, default_log_path, get_logger
 from .ml.service import StandardMlService
+
+logger = get_logger(__name__)
+_WORKER_LOG_PATH = default_log_path("standard-ml-worker.log")
 
 
 class StandardMlRequestHandler(BaseHTTPRequestHandler):
@@ -74,6 +78,8 @@ class StandardMlRequestHandler(BaseHTTPRequestHandler):
 
 
 def run(host: str = "0.0.0.0", port: int = 8100) -> None:
+    configure_tcg_ai_logging(log_file=_WORKER_LOG_PATH)
+    logger.info("standard ml worker logging to %s", _WORKER_LOG_PATH)
     server = ThreadingHTTPServer((host, port), StandardMlRequestHandler)
     print(f"Standard ML server listening on http://{host}:{port}")
     server.serve_forever()

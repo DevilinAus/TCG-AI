@@ -8,10 +8,12 @@ import json
 from pathlib import Path
 import secrets
 import threading
+from time import perf_counter
 from typing import Any
 from urllib.parse import parse_qs, urlparse
 from urllib import error as urllib_error, request as urllib_request
 
+from .logging_utils import configure_tcg_ai_logging, default_log_path, get_logger
 from .game_modes import (
     DEFAULT_GAME_MODE,
     GameModeDefinition,   
@@ -32,6 +34,7 @@ OPENING_DIE_SIDES = 6
 STANDARD_AI_MODE_LOCAL = "local"
 STANDARD_AI_MODE_REMOTE = "remote"
 STANDARD_GAME_MODE = "standard"
+logger = get_logger(__name__)
 
 
 class ApiError(Exception):
@@ -187,6 +190,15 @@ class GameSession:
             return None
 
         delay_ms = self._resolved_ai_replay_delay_ms()
+        step_started = perf_counter()
+        logger.info(
+            "ai step start session=%s game_mode=%s standard_ai_mode=%s turn=%s current_player=%s",
+            self.session_id,
+            self.game_mode,
+            self.standard_ai_mode,
+            self.state.turn_number,
+            self.state.current_player,
+        )
 
         try:
             action = self.mode.choose_action(
@@ -198,6 +210,13 @@ class GameSession:
         except StandardRemoteDecisionError as exc:
             self._raise_remote_decision_api_error(exc)
         if action is None:
+            elapsed_ms = round((perf_counter() - step_started) * 1000, 1)
+            logger.info(
+                "ai step no-action session=%s turn=%s elapsed_ms=%s",
+                self.session_id,
+                self.state.turn_number,
+                elapsed_ms,
+            )
             return None
 
         if self.learner is None or any(
@@ -210,6 +229,17 @@ class GameSession:
         ):
             self.mode.apply_action(self.state, action)
             self._append_ai_reason_log()
+            elapsed_ms = round((perf_counter() - step_started) * 1000, 1)
+            logger.info(
+                "ai step applied session=%s turn=%s elapsed_ms=%s action_type=%s action_label=%s next_player=%s winner=%s",
+                self.session_id,
+                self.state.turn_number,
+                elapsed_ms,
+                action["type"],
+                action["label"],
+                self.state.current_player,
+                self.state.winner,
+            )
             return {
                 "action": {
                     "type": action["type"],
@@ -233,6 +263,17 @@ class GameSession:
         self.ai_damage_dealt += max(0, before.opponent.total_remaining_hp - after.opponent.total_remaining_hp)
         self.ai_prizes_taken += max(0, after.player.prizes_taken - before.player.prizes_taken)
         self._finalize_ai_episode_if_finished(completed_by_ai_action=True)
+        elapsed_ms = round((perf_counter() - step_started) * 1000, 1)
+        logger.info(
+            "ai step applied session=%s turn=%s elapsed_ms=%s action_type=%s action_label=%s next_player=%s winner=%s",
+            self.session_id,
+            self.state.turn_number,
+            elapsed_ms,
+            action["type"],
+            action["label"],
+            self.state.current_player,
+            self.state.winner,
+        )
         return {
             "action": {
                 "type": action["type"],
@@ -313,6 +354,13 @@ class GameSession:
             self._raise_remote_decision_api_error(exc)
 
     def _raise_remote_decision_api_error(self, exc: StandardRemoteDecisionError) -> None:
+        logger.error(
+            "remote decision rejected session=%s game_mode=%s standard_ai_mode=%s error=%s",
+            self.session_id,
+            self.game_mode,
+            self.standard_ai_mode,
+            exc,
+        )
         raise ApiError(
             f"Remote Standard NN decision failed: {exc}",
             "standard_remote_decision_failed",
@@ -838,7 +886,10 @@ def build_server(
 
 
 def run_server(host: str = "127.0.0.1", port: int = 8000) -> None:
+    log_path = default_log_path("backend-server.log")
+    configure_tcg_ai_logging(log_file=log_path)
     server = build_server(host=host, port=port)
+    logger.info("backend server logging to %s", log_path)
     print(f"Serving TCG AI starter at http://{host}:{port}")
     try:
         server.serve_forever()
