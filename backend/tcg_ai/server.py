@@ -18,7 +18,8 @@ from .game_modes import (
     available_game_mode_snapshots,
     get_game_mode,
 )
-from .game_modes.standard.policy import StandardPolicyConfig
+from .game_modes.standard.action_analysis import ai_reason_log_line
+from .game_modes.standard.policy import StandardPolicyConfig, StandardRemoteDecisionError
 from .game_modes.standard.policy_store import StandardPolicyStore
 from .learning import EpisodeStep
 from .trainers import TrainerProfile, TrainerStore
@@ -187,12 +188,15 @@ class GameSession:
 
         delay_ms = self._resolved_ai_replay_delay_ms()
 
-        action = self.mode.choose_action(
-            self.state,
-            1,
-            learner=self.learner,
-            runtime=self.mode_runtime,
-        )
+        try:
+            action = self.mode.choose_action(
+                self.state,
+                1,
+                learner=self.learner,
+                runtime=self.mode_runtime,
+            )
+        except StandardRemoteDecisionError as exc:
+            self._raise_remote_decision_api_error(exc)
         if action is None:
             return None
 
@@ -205,6 +209,7 @@ class GameSession:
             )
         ):
             self.mode.apply_action(self.state, action)
+            self._append_ai_reason_log()
             return {
                 "action": {
                     "type": action["type"],
@@ -217,6 +222,7 @@ class GameSession:
         before = self.mode.summarize_state(self.state, 1)
         features = self.mode.extract_action_features(self.state, 1, action)
         self.mode.apply_action(self.state, action)
+        self._append_ai_reason_log()
         after = self.mode.summarize_state(self.state, 1)
         reward = self.mode.calculate_reward(before, after, action)
         self.learner.record_step_reward(features, action["type"], reward)
@@ -235,6 +241,27 @@ class GameSession:
             "delay_ms": delay_ms,
             "state": self._serialize_state(session_id),
         }
+
+    def _append_ai_reason_log(self) -> None:
+        runtime_snapshot = (
+            self.mode.runtime_snapshot(self.mode_runtime)
+            if self.mode.runtime_snapshot is not None
+            else {}
+        )
+        if not isinstance(runtime_snapshot, dict):
+            return
+        last_decision = runtime_snapshot.get("last_decision")
+        if not isinstance(last_decision, dict):
+            return
+        diagnostics = last_decision.get("diagnostics")
+        if not isinstance(diagnostics, dict):
+            return
+        reason_summary = diagnostics.get("reason_summary")
+        if not isinstance(reason_summary, str) or not reason_summary:
+            return
+        reason_line = ai_reason_log_line(self.trainer.name, reason_summary)
+        if reason_line and (not self.state.log or self.state.log[-1] != reason_line):
+            self.state.log.append(reason_line)
 
     def _resolved_ai_replay_delay_ms(self) -> int:
         if self.game_mode == STANDARD_GAME_MODE and self.standard_ai_mode == STANDARD_AI_MODE_REMOTE:
@@ -272,15 +299,25 @@ class GameSession:
     def _initialize_mode_runtime(self) -> Any:
         if self.mode.initialize_session is None:
             return None
-        return self.mode.initialize_session(
-            self.state,
-            session_id=self.session_id,
-            trainer_id=self.trainer.trainer_id,
-            ai_deck_id=self.ai_deck_id,
-            human_deck_id=self.human_deck_id,
-            policy_store=self.standard_policy_store,
-            policy_config=self.standard_policy_config,
-        )
+        try:
+            return self.mode.initialize_session(
+                self.state,
+                session_id=self.session_id,
+                trainer_id=self.trainer.trainer_id,
+                ai_deck_id=self.ai_deck_id,
+                human_deck_id=self.human_deck_id,
+                policy_store=self.standard_policy_store,
+                policy_config=self.standard_policy_config,
+            )
+        except StandardRemoteDecisionError as exc:
+            self._raise_remote_decision_api_error(exc)
+
+    def _raise_remote_decision_api_error(self, exc: StandardRemoteDecisionError) -> None:
+        raise ApiError(
+            f"Remote Standard NN decision failed: {exc}",
+            "standard_remote_decision_failed",
+            HTTPStatus.BAD_GATEWAY,
+        ) from exc
 
 
 class SessionStore:

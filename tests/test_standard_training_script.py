@@ -81,6 +81,66 @@ class StandardTrainingScriptTests(unittest.TestCase):
 
         self.assertEqual(vector, [0.0, 1.0, 0.0])
 
+    def test_encode_training_record_builds_auxiliary_intent_and_quality_targets(self) -> None:
+        training_module = _load_training_module()
+
+        payload = {
+            "belief_state": {"players": [{}, {}]},
+            "legal_actions": [
+                {
+                    "action_id": "a",
+                    "type": "attack",
+                    "intent_tags": ["take_prize"],
+                    "quality_flags": [],
+                },
+                {
+                    "action_id": "b",
+                    "type": "play_item",
+                    "intent_tags": ["hand_thinning"],
+                    "quality_flags": ["dominated_optional_play"],
+                },
+            ],
+            "chosen_action_id": "a",
+            "value_target": 12.5,
+        }
+
+        encoded = training_module._encode_training_record(
+            payload,
+            state_dim=training_module.STATE_VECTOR_SIZE,
+            action_dim=training_module.ACTION_VECTOR_SIZE,
+        )
+
+        self.assertIsNotNone(encoded)
+        self.assertEqual(len(encoded["intent_targets"]), 2)
+        self.assertEqual(len(encoded["quality_targets"]), 2)
+        self.assertEqual(
+            encoded["intent_targets"][0][training_module.INTENT_TAGS.index("take_prize")],
+            1.0,
+        )
+        self.assertEqual(
+            encoded["intent_targets"][1][training_module.INTENT_TAGS.index("hand_thinning")],
+            1.0,
+        )
+        self.assertEqual(
+            encoded["quality_targets"][1][training_module.QUALITY_FLAGS.index("dominated_optional_play")],
+            1.0,
+        )
+
+    def test_quality_label_weights_emphasize_dominated_and_missed_conversions(self) -> None:
+        training_module = _load_training_module()
+
+        weights = training_module._quality_label_weights()
+
+        self.assertEqual(len(weights), len(training_module.QUALITY_FLAGS))
+        self.assertGreater(
+            weights[training_module.QUALITY_FLAGS.index("dominated_optional_play")],
+            weights[training_module.QUALITY_FLAGS.index("wastes_item")],
+        )
+        self.assertGreater(
+            weights[training_module.QUALITY_FLAGS.index("misses_immediate_win")],
+            weights[training_module.QUALITY_FLAGS.index("low_value_retreat")],
+        )
+
     def test_resolve_input_dir_can_point_at_latest_incomplete_run(self) -> None:
         training_module = _load_training_module()
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -7,6 +7,8 @@ from pathlib import Path
 import pickle
 from typing import Any
 
+from ..action_analysis import INTENT_TAGS, QUALITY_FLAGS
+
 try:
     import torch
     from torch import nn
@@ -18,9 +20,9 @@ except Exception:  # pragma: no cover - torch is optional in the test environmen
 MAX_BENCH_SIZE = 5
 POKEMON_SLOT_VECTOR_SIZE = 14
 STATE_VECTOR_SIZE = 204
-ACTION_VECTOR_SIZE = 72
+ACTION_VECTOR_SIZE = 128
 DEFAULT_HIDDEN_SIZE = 128
-ENCODER_VERSION = 3
+ENCODER_VERSION = 4
 DEFAULT_CHECKPOINT_PATH = Path(__file__).resolve().parents[5] / "standard_ml_data" / "champion.pt"
 _TORCH_BASE = nn.Module if nn is not None else object
 
@@ -53,22 +55,32 @@ class ActionConditionedPolicyValueNet(_TORCH_BASE):  # type: ignore[misc]
         )
         self.policy_head = nn.Linear(DEFAULT_HIDDEN_SIZE * 2, 1)
         self.value_head = nn.Linear(DEFAULT_HIDDEN_SIZE, 1)
+        self.intent_head = nn.Linear(DEFAULT_HIDDEN_SIZE * 2, len(INTENT_TAGS))
+        self.quality_head = nn.Linear(DEFAULT_HIDDEN_SIZE * 2, len(QUALITY_FLAGS))
 
-    def forward(self, state_vector: torch.Tensor, action_vectors: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    def forward(
+        self,
+        state_vector: torch.Tensor,
+        action_vectors: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
         state_hidden = self.state_encoder(state_vector)
         action_hidden = self.action_encoder(action_vectors)
         if state_hidden.ndim == 1:
             repeated_state = state_hidden.unsqueeze(0).expand(action_hidden.shape[0], -1)
-            policy_logits = self.policy_head(torch.cat([repeated_state, action_hidden], dim=1)).squeeze(-1)
+            fused_hidden = torch.cat([repeated_state, action_hidden], dim=1)
+            policy_logits = self.policy_head(fused_hidden).squeeze(-1)
+            intent_logits = self.intent_head(fused_hidden)
+            quality_logits = self.quality_head(fused_hidden)
             value = torch.tanh(self.value_head(state_hidden)).squeeze(-1) * 100.0
-            return policy_logits, value
+            return policy_logits, value, intent_logits, quality_logits
         if state_hidden.ndim == 2:
             repeated_state = state_hidden.unsqueeze(1).expand(-1, action_hidden.shape[1], -1)
-            policy_logits = self.policy_head(
-                torch.cat([repeated_state, action_hidden], dim=-1)
-            ).squeeze(-1)
+            fused_hidden = torch.cat([repeated_state, action_hidden], dim=-1)
+            policy_logits = self.policy_head(fused_hidden).squeeze(-1)
+            intent_logits = self.intent_head(fused_hidden)
+            quality_logits = self.quality_head(fused_hidden)
             value = torch.tanh(self.value_head(state_hidden)).squeeze(-1) * 100.0
-            return policy_logits, value
+            return policy_logits, value, intent_logits, quality_logits
         raise ValueError("Unsupported ActionConditionedPolicyValueNet input shape.")
 
 
@@ -100,13 +112,16 @@ class PolicyValueBackend:
         if torch is None or nn is None or self.checkpoint_path is None or not self.checkpoint_path.exists():
             return
         device = "cuda" if torch.cuda.is_available() else "cpu"
-        checkpoint = load_trusted_checkpoint(self.checkpoint_path, map_location=device)
-        state_dim, action_dim = infer_checkpoint_model_dimensions(checkpoint)
-        model = ActionConditionedPolicyValueNet(state_dim=state_dim, action_dim=action_dim)
-        state_dict = checkpoint.get("state_dict") if isinstance(checkpoint, dict) else checkpoint
-        model.load_state_dict(state_dict)
-        model.eval()
-        model.to(device)
+        try:
+            checkpoint = load_trusted_checkpoint(self.checkpoint_path, map_location=device)
+            state_dim, action_dim = infer_checkpoint_model_dimensions(checkpoint)
+            model = ActionConditionedPolicyValueNet(state_dim=state_dim, action_dim=action_dim)
+            state_dict = checkpoint.get("state_dict") if isinstance(checkpoint, dict) else checkpoint
+            model.load_state_dict(state_dict, strict=False)
+            model.eval()
+            model.to(device)
+        except Exception:
+            return
         self._model = model
         self._state_dim = state_dim
         self._action_dim = action_dim
@@ -145,7 +160,7 @@ class PolicyValueBackend:
             device=state_vector.device,
         )
         with torch.no_grad():
-            policy_logits, value = self._model(state_vector, action_vectors)
+            policy_logits, value, _intent_logits, _quality_logits = self._model(state_vector, action_vectors)
         priors = _softmax_from_logits(
             [float(logit) for logit in policy_logits.detach().cpu().tolist()],
             [str(action.get("action_id", "")) for action in legal_actions],
@@ -203,7 +218,7 @@ class PolicyValueBackend:
                     dtype=torch.float32,
                     device=device,
                 )
-                policy_logits, values = model(state_tensor, action_tensor)
+                policy_logits, values, _intent_logits, _quality_logits = model(state_tensor, action_tensor)
                 policy_logits_rows = policy_logits.detach().cpu().tolist()
             else:
                 state_hidden = model.state_encoder(state_tensor)
@@ -383,6 +398,14 @@ def encode_action_vector(
     expected_state_delta = (
         action.get("expected_state_delta") if isinstance(action.get("expected_state_delta"), dict) else {}
     )
+    tactical_outcomes = (
+        action.get("tactical_outcomes") if isinstance(action.get("tactical_outcomes"), dict) else {}
+    )
+    resolution_facts = (
+        action.get("resolution_facts") if isinstance(action.get("resolution_facts"), dict) else {}
+    )
+    intent_tags = {str(tag) for tag in action.get("intent_tags", []) if isinstance(tag, str)}
+    quality_flags = {str(flag) for flag in action.get("quality_flags", []) if isinstance(flag, str)}
     target_pokemon = _resolve_target_pokemon(belief_state, action)
     player = _player_payload(belief_state, 0)
     active = player.get("active") if isinstance(player, dict) else None
@@ -479,6 +502,21 @@ def encode_action_vector(
         _turn_ratio_or_zero(retreat_target_ready),
         1.0 if _search_selection_contains(action, kind="pokemon") else 0.0,
         1.0 if _search_selection_contains(action, kind="pokemon", is_basic=True) else 0.0,
+        1.0 if tactical_outcomes.get("wins_game_now") else 0.0,
+        1.0 if tactical_outcomes.get("takes_prize_now") else 0.0,
+        _cap(float(tactical_outcomes.get("prizes_taken_now", 0) or 0), 3) / 3.0,
+        1.0 if tactical_outcomes.get("creates_same_turn_prize_line") else 0.0,
+        1.0 if tactical_outcomes.get("creates_live_attack_this_turn") else 0.0,
+        1.0 if tactical_outcomes.get("changes_active") else 0.0,
+        1.0 if tactical_outcomes.get("saves_board_investment") else 0.0,
+        1.0 if tactical_outcomes.get("reduces_active_ko_risk") else 0.0,
+        1.0 if resolution_facts.get("optional_choice_empty") else 0.0,
+        1.0 if resolution_facts.get("productive_variant_exists") else 0.0,
+        _normalize_signed(float(resolution_facts.get("net_known_hand_delta", 0) or 0), limit=7),
+        _normalize_signed(float(resolution_facts.get("net_known_bench_delta", 0) or 0), limit=2),
+        _normalize_signed(float(resolution_facts.get("net_known_discard_delta", 0) or 0), limit=6),
+        *[1.0 if tag in intent_tags else 0.0 for tag in INTENT_TAGS],
+        *[1.0 if flag in quality_flags else 0.0 for flag in QUALITY_FLAGS],
     ]
     return _fit_vector_size(vector, vector_size)
 

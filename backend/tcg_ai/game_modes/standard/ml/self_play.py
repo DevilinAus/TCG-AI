@@ -10,7 +10,7 @@ from .knowledge_state import serialize_knowledge_actions, serialize_knowledge_st
 from .oracle import HeuristicPolicyValueOracle, PolicyValueOracle
 from .planner import PlannerConfig, StandardTurnPlanner
 
-SELF_PLAY_SCHEMA_VERSION = 3
+SELF_PLAY_SCHEMA_VERSION = 4
 POLICY_TARGET_SCORE_TEMPERATURE = 6.0
 TERMINAL_OUTCOME_WEIGHT = 0.65
 PRIZE_PROGRESS_WEIGHT = 0.35

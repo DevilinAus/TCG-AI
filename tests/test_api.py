@@ -377,14 +377,7 @@ class ApiTests(unittest.TestCase):
 
         with patch(
             "backend.tcg_ai.server.urllib_request.urlopen",
-            return_value=_FakeResponse(
-                {
-                    "ready": True,
-                    "backend": "torch",
-                    "model_loaded": True,
-                    "checkpoint_path": "/models/champion.pt",
-                }
-            ),
+            side_effect=self._fake_remote_ready_or_opening_decision,
         ):
             state = app.new_game(
                 {
@@ -404,6 +397,35 @@ class ApiTests(unittest.TestCase):
             session.standard_policy_config.remote_batch_eval_url,
             "http://127.0.0.1:8100/api/standard-ml/batch-eval",
         )
+
+    def test_standard_remote_game_fails_when_opening_decision_fails(self) -> None:
+        app = TcgApplication(
+            trainer_state_path=self.state_path,
+            standard_policy_state_path=self.policy_state_path,
+            standard_policy_config=StandardPolicyConfig(
+                remote_enabled=True,
+                remote_url="http://127.0.0.1:8100/api/standard-ml/decision",
+                remote_batch_eval_url="http://127.0.0.1:8100/api/standard-ml/batch-eval",
+            ),
+        )
+
+        with patch(
+            "backend.tcg_ai.server.urllib_request.urlopen",
+            side_effect=self._fake_remote_ready_then_opening_failure,
+        ):
+            with self.assertRaises(ApiError) as exc_info:
+                app.new_game(
+                    {
+                        "game_mode": "standard",
+                        "human_first": True,
+                        "human_deck_id": "ampharos-ex-battle-deck",
+                        "seed": 1,
+                        "standard_ai_mode": "remote",
+                    }
+                )
+
+        self.assertEqual(exc_info.exception.code, "standard_remote_decision_failed")
+        self.assertIn("worker unavailable", exc_info.exception.message)
 
     def test_standard_local_game_disables_remote_config_for_the_session(self) -> None:
         app = TcgApplication(
@@ -1663,6 +1685,51 @@ class ApiTests(unittest.TestCase):
         self.assertGreaterEqual(legal_action_types.count("bench_basic"), 2)
         self.assertGreaterEqual(legal_action_types.count("play_supporter"), 2)
 
+    def test_standard_ai_turn_adds_visible_reason_log_entries(self) -> None:
+        state = self.app.new_game(
+            {
+                "game_mode": "standard",
+                "human_first": True,
+                "human_deck_id": "ampharos-ex-battle-deck",
+                "seed": 1,
+            }
+        )
+        after_active = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": state["legal_actions"][0]["action"],
+            }
+        )
+        end_setup_action = next(
+            action for action in after_active["legal_actions"] if action["type"] == "end_setup"
+        )
+        after_setup = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": end_setup_action["action"],
+            }
+        )
+        end_turn_action = next(
+            action for action in after_setup["legal_actions"] if action["type"] == "end_turn"
+        )
+        ai_state = self.app.human_action(
+            {
+                "session_id": state["session_id"],
+                "action": end_turn_action["action"],
+            }
+        )
+
+        for _ in range(10):
+            ai_state = self.app.ai_step({"session_id": state["session_id"]})
+            if ai_state["current_player"] == 0:
+                break
+
+        reason_entries = [entry for entry in ai_state["log"] if entry.get("kind") == "reason"]
+
+        self.assertTrue(reason_entries)
+        self.assertTrue(all(entry.get("side") == "ai" for entry in reason_entries))
+        self.assertTrue(any("AI Reason:" in entry.get("text", "") for entry in reason_entries))
+
     def test_standard_ai_step_can_play_a_supporter_and_draw_cards(self) -> None:
         state = self.app.new_game(
             {
@@ -1717,8 +1784,9 @@ class ApiTests(unittest.TestCase):
 
         self.assertEqual(ai_step["players"][1]["discard_count"], 1)
         self.assertEqual(card_definition(session.state, session.state.players[1].discard[-1]).name, "Nemona")
-        self.assertIn("played Nemona", ai_step["log"][-2]["text"])
-        self.assertIn("drew 3 cards", ai_step["log"][-1]["text"])
+        recent_log = [entry["text"] for entry in ai_step["log"][-3:]]
+        self.assertTrue(any("played Nemona" in entry for entry in recent_log))
+        self.assertTrue(any("drew 3 cards" in entry for entry in recent_log))
 
     def test_standard_ai_step_can_attach_energy_to_its_active_pokemon(self) -> None:
         state = self.app.new_game(
@@ -2022,7 +2090,7 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(second_step["players"][0]["active"]["damage"], 10)
         self.assertEqual(second_step["current_player"], 0)
 
-    def test_standard_remote_ai_step_skips_fake_replay_delay(self) -> None:
+    def test_standard_remote_ai_step_fails_when_worker_is_unavailable(self) -> None:
         app = TcgApplication(
             trainer_state_path=self.state_path,
             standard_policy_state_path=self.policy_state_path,
@@ -2036,14 +2104,7 @@ class ApiTests(unittest.TestCase):
 
         with patch(
             "backend.tcg_ai.server.urllib_request.urlopen",
-            return_value=_FakeResponse(
-                {
-                    "ready": True,
-                    "backend": "torch:cuda",
-                    "model_loaded": True,
-                    "checkpoint_path": "/models/champion.pt",
-                }
-            ),
+            side_effect=self._fake_remote_ready_or_opening_decision,
         ):
             state = app.new_game(
                 {
@@ -2088,13 +2149,13 @@ class ApiTests(unittest.TestCase):
             "backend.tcg_ai.game_modes.standard.policy.RemoteStandardDecisionProvider.choose_action",
             side_effect=StandardRemoteDecisionError("worker unavailable"),
         ):
-            ai_step = app.ai_step({"session_id": state["session_id"]})
+            with self.assertRaises(ApiError) as exc_info:
+                app.ai_step({"session_id": state["session_id"]})
 
         self.assertEqual(session.standard_ai_mode, "remote")
         self.assertEqual(session.ai_replay_delay_ms, 0)
-        self.assertEqual(ai_step["standard_ai_mode"], "remote")
-        self.assertEqual(ai_step["ai_step"]["action"]["type"], "play_energy")
-        self.assertEqual(ai_step["ai_step"]["delay_ms"], 0)
+        self.assertEqual(exc_info.exception.code, "standard_remote_decision_failed")
+        self.assertIn("worker unavailable", exc_info.exception.message)
 
     def test_standard_remote_ai_step_uses_full_state_decision_endpoint_without_batch_eval(self) -> None:
         from backend.tcg_ai.game_modes.standard.engine import action_id_for, list_legal_actions
@@ -2196,7 +2257,7 @@ class ApiTests(unittest.TestCase):
         self.assertTrue(request_urls)
         self.assertTrue(all(url == "http://127.0.0.1:8100/api/standard-ml/decision" for url in request_urls))
 
-    def test_standard_remote_ai_turn_replay_skips_fake_replay_delay(self) -> None:
+    def test_standard_remote_ai_turn_fails_when_worker_is_unavailable(self) -> None:
         app = TcgApplication(
             trainer_state_path=self.state_path,
             standard_policy_state_path=self.policy_state_path,
@@ -2210,14 +2271,7 @@ class ApiTests(unittest.TestCase):
 
         with patch(
             "backend.tcg_ai.server.urllib_request.urlopen",
-            return_value=_FakeResponse(
-                {
-                    "ready": True,
-                    "backend": "torch:cuda",
-                    "model_loaded": True,
-                    "checkpoint_path": "/models/champion.pt",
-                }
-            ),
+            side_effect=self._fake_remote_ready_or_opening_decision,
         ):
             state = app.new_game(
                 {
@@ -2262,13 +2316,12 @@ class ApiTests(unittest.TestCase):
             "backend.tcg_ai.game_modes.standard.policy.RemoteStandardDecisionProvider.choose_action",
             side_effect=StandardRemoteDecisionError("worker unavailable"),
         ):
-            replay = app.ai_turn({"session_id": state["session_id"]})
+            with self.assertRaises(ApiError) as exc_info:
+                app.ai_turn({"session_id": state["session_id"]})
 
         self.assertEqual(session.standard_ai_mode, "remote")
-        self.assertEqual(replay["standard_ai_mode"], "remote")
-        self.assertEqual(replay["ai_turn_replay"]["step_delay_ms"], 0)
-        self.assertTrue(replay["ai_turn_replay"]["steps"])
-        self.assertTrue(all(step["delay_ms"] == 0 for step in replay["ai_turn_replay"]["steps"]))
+        self.assertEqual(exc_info.exception.code, "standard_remote_decision_failed")
+        self.assertIn("worker unavailable", exc_info.exception.message)
 
     def test_promotion_actions_reference_a_benched_source_and_empty_active_target(self) -> None:
         state = self.app.new_game({"human_first": True})
@@ -2328,14 +2381,7 @@ class ApiTests(unittest.TestCase):
     def _start_standard_remote_ai_turn(self, app: TcgApplication):
         with patch(
             "backend.tcg_ai.server.urllib_request.urlopen",
-            return_value=_FakeResponse(
-                {
-                    "ready": True,
-                    "backend": "torch:cuda",
-                    "model_loaded": True,
-                    "checkpoint_path": "/models/champion.pt",
-                }
-            ),
+            side_effect=self._fake_remote_ready_or_opening_decision,
         ):
             state = app.new_game(
                 {
@@ -2372,6 +2418,45 @@ class ApiTests(unittest.TestCase):
             }
         )
         return state, session
+
+    def _fake_remote_ready_or_opening_decision(self, request, timeout):
+        del timeout
+        if request.full_url.endswith("/readyz"):
+            return _FakeResponse(
+                {
+                    "ready": True,
+                    "backend": "torch:cuda",
+                    "model_loaded": True,
+                    "checkpoint_path": "/models/champion.pt",
+                }
+            )
+        return self._fake_remote_opening_decision(request)
+
+    def _fake_remote_ready_then_opening_failure(self, request, timeout):
+        del timeout
+        if request.full_url.endswith("/readyz"):
+            return _FakeResponse(
+                {
+                    "ready": True,
+                    "backend": "torch:cuda",
+                    "model_loaded": True,
+                    "checkpoint_path": "/models/champion.pt",
+                }
+            )
+        raise StandardRemoteDecisionError("worker unavailable")
+
+    def _fake_remote_opening_decision(self, request):
+        payload = json.loads((request.data or b"{}").decode("utf-8"))
+        legal_actions = payload.get("legal_actions", [])
+        if not legal_actions:
+            raise AssertionError("expected opening legal_actions in remote opener payload")
+        return _FakeResponse(
+            {
+                "decision_id": payload["decision_id"],
+                "chosen_action_id": legal_actions[0]["action_id"],
+                "diagnostics": {"planner": "remote"},
+            }
+        )
 
     def assertDelayInRange(self, delay_ms: int) -> None:
         self.assertGreaterEqual(delay_ms, AI_ACTION_DELAY_MIN_MS)

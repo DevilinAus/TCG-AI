@@ -13,6 +13,7 @@ from backend.tcg_ai.game_modes.standard.policy import (
     FallbackStandardDecisionProvider,
     LocalStandardDecisionProvider,
     StandardPolicyConfig,
+    StandardRemoteDecisionError,
 )
 from backend.tcg_ai.game_modes.standard.policy_store import StandardPolicyStore
 
@@ -213,7 +214,7 @@ class StandardPolicyTests(unittest.TestCase):
             sorted(f"play_basic_to_active:{action['hand_card_id']}" for action in actions),
         )
 
-    def test_fallback_provider_uses_local_when_remote_response_is_invalid(self) -> None:
+    def test_remote_provider_raises_when_remote_response_is_invalid(self) -> None:
         state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck", ai_name="Brock")
         actions = list_legal_actions(state, player_index=1)
         provider = FallbackStandardDecisionProvider(
@@ -251,10 +252,8 @@ class StandardPolicyTests(unittest.TestCase):
             "backend.tcg_ai.game_modes.standard.policy.urllib_request.urlopen",
             return_value=_FakeResponse({"decision_id": "session-a:opening_active", "chosen_action_id": "illegal"}),
         ):
-            result = provider.choose_action(request)
-
-        self.assertEqual(result.source, "local")
-        self.assertIn("fallback_reason", result.diagnostics)
+            with self.assertRaises(StandardRemoteDecisionError):
+                provider.choose_action(request)
 
 
 class _FakeResponse:

@@ -78,6 +78,14 @@ def core_tactical_scenarios() -> list[TacticalScenario]:
             expectation=lambda action: action.get("type") == "retreat" and action.get("target_bench_index") == 0,
             explanation="The game can be won now by retreating; a draw supporter is legal but unnecessary.",
         ),
+        TacticalScenario(
+            name="attack_over_redundant_retreat_when_active_already_wins",
+            description="If the active already has a winning attack, do not retreat into a redundant same-turn line.",
+            tags=("attack", "retreat", "finisher"),
+            builder=_build_attack_over_redundant_retreat_state,
+            expectation=lambda action: action.get("type") == "attack",
+            explanation="Retreat still wins here, but it wastes tempo and energy because the active already closes the game.",
+        ),
     ]
 
 
@@ -98,7 +106,12 @@ def strategic_tactical_scenarios() -> list[TacticalScenario]:
             description="If attaching to the bench unlocks retreat into a winning attack this turn, invest there first.",
             tags=("energy", "retreat", "attack_setup", "pivot"),
             builder=_build_attach_to_bench_for_retreat_win_state,
-            expectation=lambda action: action.get("type") == "play_energy" and action.get("target_zone") == "bench" and action.get("target_bench_index") == 0,
+            expectation=lambda state, action, decision: _matches_attach_to_bench_or_retreat_win_line(
+                state,
+                action,
+                decision,
+                bench_index=0,
+            ),
             explanation="The active only supplies retreat; the bench attacker needs the attachment to convert the turn into an immediate knockout.",
             tier="strategic",
             planner_config=PlannerConfig(max_depth=3, beam_width=6, opponent_branch_width=2),
@@ -108,7 +121,12 @@ def strategic_tactical_scenarios() -> list[TacticalScenario]:
             description="If the active is about to be knocked out anyway, invest in the bench line that converts immediately.",
             tags=("energy", "retreat", "attack_setup", "pivot", "sacrifice"),
             builder=_build_attach_to_bench_from_doomed_active_for_retreat_win_state,
-            expectation=lambda action: action.get("type") == "play_energy" and action.get("target_zone") == "bench" and action.get("target_bench_index") == 0,
+            expectation=lambda state, action, decision: _matches_attach_to_bench_or_retreat_win_line(
+                state,
+                action,
+                decision,
+                bench_index=0,
+            ),
             explanation="The active is effectively a sacrifice piece here; the only meaningful attachment is the one that powers the bench attacker for the winning retreat line.",
             tier="strategic",
             planner_config=PlannerConfig(max_depth=4, beam_width=6, opponent_branch_width=2),
@@ -189,6 +207,28 @@ def strategic_tactical_scenarios() -> list[TacticalScenario]:
             explanation="Youngster is only correct here because it turns a dead hand into real follow-up board development; forcing Ultra Ball would burn resources for a weak line.",
             tier="strategic",
             planner_config=PlannerConfig(max_depth=4, beam_width=10, opponent_branch_width=2),
+        ),
+        TacticalScenario(
+            name="energy_retrieval_non_empty_over_empty_variant",
+            description="If Energy Retrieval has real targets, choose the productive recovery instead of the empty burn.",
+            tags=("item", "resource_conversion", "recovery"),
+            builder=_build_energy_retrieval_non_empty_state,
+            expectation=lambda state, action: action.get("type") == "play_item"
+            and _action_hand_card_name(state, action) == "Energy Retrieval"
+            and len(action.get("recover_from_discard_ids", [])) == 2,
+            explanation="The empty line stays legal, but recovering both energy cards is the clearly better conversion in this state.",
+            tier="strategic",
+        ),
+        TacticalScenario(
+            name="pokegear_empty_hand_thinning_when_no_supporter_found",
+            description="If Pokégear 3.0 cannot find a supporter, the empty line can still be a reasonable hand-thinning play.",
+            tags=("item", "hand_thinning", "resource_management"),
+            builder=_build_pokegear_empty_hand_thinning_state,
+            expectation=lambda state, action: action.get("type") == "play_item"
+            and _action_hand_card_name(state, action) == "Pokégear 3.0"
+            and action.get("search_deck_ids", []) == [],
+            explanation="With no supporter available in the inspected range, cashing in Pokégear 3.0 as a low-value burn is acceptable.",
+            tier="strategic",
         ),
     ]
 
@@ -277,6 +317,29 @@ def _action_reason_label(state, action: dict[str, Any]) -> str:
     return base_label
 
 
+def _matches_attach_to_bench_or_retreat_win_line(
+    state,
+    action: dict[str, Any],
+    decision: dict[str, Any] | None,
+    *,
+    bench_index: int,
+) -> bool:
+    if (
+        action.get("type") == "play_energy"
+        and action.get("target_zone") == "bench"
+        and action.get("target_bench_index") == bench_index
+    ):
+        return True
+
+    if action.get("type") != "retreat" or action.get("target_bench_index") != bench_index:
+        return False
+
+    planned_action_ids = list((decision or {}).get("planned_action_sequence", []))[1:]
+    return any(action_id.startswith("play_energy:") for action_id in planned_action_ids) and any(
+        action_id.startswith("attack:") for action_id in planned_action_ids
+    )
+
+
 def _build_attack_for_immediate_win_state():
     state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck")
     _reset_to_midgame_turn(state, current_player=0)
@@ -327,6 +390,20 @@ def _build_retreat_into_ready_attacker_with_supporter_state():
     nemona_id = _move_named_card_to_hand(state, 0, "Nemona")
     _set_exact_hand(state, 0, [nemona_id])
     return state, acting_player_index
+
+
+def _build_attack_over_redundant_retreat_state():
+    state = create_game(seed=1, human_deck_id="lucario-ex-battle-deck")
+    _reset_to_midgame_turn(state, current_player=0)
+    _set_named_active_pokemon(state, 0, "Primeape")
+    _set_named_bench_pokemon(state, 0, "Mankey")
+    _set_named_active_pokemon(state, 1, "Mareep")
+    state.players[0].active.attached_energy = [_take_named_card(state, 0, "Basic Fighting Energy")]
+    state.players[0].bench[0].attached_energy = [_take_named_card(state, 0, "Basic Fighting Energy")]
+    state.players[1].active.damage = 20
+    _set_exact_hand(state, 0, [])
+    _set_exact_hand(state, 1, [])
+    return state, 0
 
 
 def _build_call_for_family_over_supporter_draw_state():
@@ -397,6 +474,15 @@ def _build_nest_ball_unique_target_for_retreat_win_state():
     state.players[0].active.attached_energy = [_take_named_card(state, 0, "Basic Fighting Energy")]
     state.players[1].active.damage = 30
     nest_ball_id = _move_named_card_to_hand(state, 0, "Nest Ball")
+    # Remove the deck's Call for Family pivots so this scenario stays focused on the
+    # unique retreat-win target instead of broader board-development heuristics.
+    for zone_name in ("hand", "deck", "prizes"):
+        zone = getattr(state.players[0], zone_name)
+        for instance_id in list(zone):
+            if card_definition(state, instance_id).name != "Squawkabilly":
+                continue
+            zone.remove(instance_id)
+            state.players[0].discard.append(instance_id)
     energy_id = _move_named_card_to_hand(state, 0, "Basic Fighting Energy")
     _set_exact_hand(state, 0, [nest_ball_id, energy_id])
     _set_exact_hand(state, 1, [])
@@ -448,6 +534,38 @@ def _build_youngster_over_low_value_ultra_ball_state():
     potion_id = _move_named_card_to_hand(state, 0, "Potion")
     youngster_id = _move_named_card_to_hand(state, 0, "Youngster")
     _set_exact_hand(state, 0, [ultra_ball_id, potion_id, youngster_id])
+    _set_exact_hand(state, 1, [])
+    return state, 0
+
+
+def _build_energy_retrieval_non_empty_state():
+    state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck")
+    _reset_to_midgame_turn(state, current_player=0)
+    _set_named_active_pokemon(state, 0, "Mareep")
+    _set_named_active_pokemon(state, 1, "Squawkabilly")
+    energy_retrieval_id = _move_named_card_to_hand(state, 0, "Energy Retrieval")
+    lightning_a_id = _take_named_card(state, 0, "Basic Lightning Energy")
+    lightning_b_id = _take_named_card(state, 0, "Basic Lightning Energy")
+    state.players[0].discard.extend([lightning_a_id, lightning_b_id])
+    _set_exact_hand(state, 0, [energy_retrieval_id])
+    _set_exact_hand(state, 1, [])
+    return state, 0
+
+
+def _build_pokegear_empty_hand_thinning_state():
+    state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck")
+    _reset_to_midgame_turn(state, current_player=0)
+    _set_named_active_pokemon(state, 0, "Mareep")
+    _set_named_active_pokemon(state, 1, "Squawkabilly")
+    pokegear_id = _move_named_card_to_hand(state, 0, "Pokégear 3.0")
+    supporters: list[str] = []
+    for instance_id in list(state.players[0].deck):
+        card = card_definition(state, instance_id)
+        if card.kind == "trainer" and "supporter" in card.card_tags:
+            state.players[0].deck.remove(instance_id)
+            supporters.append(instance_id)
+    state.players[0].deck.extend(supporters)
+    _set_exact_hand(state, 0, [pokegear_id])
     _set_exact_hand(state, 1, [])
     return state, 0
 

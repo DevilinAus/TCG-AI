@@ -5,6 +5,7 @@ import argparse
 from collections.abc import Iterable
 from datetime import UTC, datetime
 import json
+import os
 from pathlib import Path
 import shutil
 import sys
@@ -16,6 +17,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[1]
 if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
+from backend.tcg_ai.game_modes.standard.action_analysis import INTENT_TAGS, QUALITY_FLAGS
 from backend.tcg_ai.game_modes.standard.ml.neural_policy import (
     ACTION_VECTOR_SIZE,
     DEFAULT_HIDDEN_SIZE,
@@ -246,6 +248,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--learning-rate", type=float, default=3e-4)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--value-loss-weight", type=float, default=0.5)
+    parser.add_argument("--intent-loss-weight", type=float, default=0.2)
+    parser.add_argument("--quality-loss-weight", type=float, default=0.35)
     parser.add_argument("--log-every", type=int, default=50)
     parser.add_argument("--save-every", type=int, default=500)
     parser.add_argument("--eval-batches", type=int, default=20)
@@ -328,6 +332,8 @@ def main() -> int:
         epoch_metrics = {
             "policy_loss": 0.0,
             "value_loss": 0.0,
+            "intent_loss": 0.0,
+            "quality_loss": 0.0,
             "total_loss": 0.0,
             "batches": 0,
             "samples": 0,
@@ -338,21 +344,42 @@ def main() -> int:
             global_step += 1
             batch = _move_batch_to_device(batch, device)
             optimizer.zero_grad(set_to_none=True)
-            policy_logits, values = model(batch["state_vectors"], batch["action_vectors"])
+            policy_logits, values, intent_logits, quality_logits = model(
+                batch["state_vectors"],
+                batch["action_vectors"],
+            )
             policy_logits = policy_logits.masked_fill(~batch["action_mask"], -1e9)
             policy_loss = _soft_target_policy_loss(policy_logits, batch["policy_targets"])
             value_loss = F.smooth_l1_loss(values, batch["value_targets"])
-            total_loss = policy_loss + value_loss * args.value_loss_weight
+            intent_loss = _masked_multilabel_loss(
+                intent_logits,
+                batch["intent_targets"],
+                batch["action_mask"],
+            )
+            quality_loss = _masked_multilabel_loss(
+                quality_logits,
+                batch["quality_targets"],
+                batch["action_mask"],
+                label_weights=batch["quality_label_weights"],
+            )
+            total_loss = (
+                policy_loss
+                + value_loss * args.value_loss_weight
+                + intent_loss * args.intent_loss_weight
+                + quality_loss * args.quality_loss_weight
+            )
             total_loss.backward()
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=5.0)
             optimizer.step()
 
-            batch_size = int(batch["state_vectors"].shape[0])
-            epoch_metrics["policy_loss"] += float(policy_loss.detach().cpu().item()) * batch_size
-            epoch_metrics["value_loss"] += float(value_loss.detach().cpu().item()) * batch_size
-            epoch_metrics["total_loss"] += float(total_loss.detach().cpu().item()) * batch_size
+            sample_count = int(batch["state_vectors"].shape[0])
+            epoch_metrics["policy_loss"] += float(policy_loss.detach().cpu().item()) * sample_count
+            epoch_metrics["value_loss"] += float(value_loss.detach().cpu().item()) * sample_count
+            epoch_metrics["intent_loss"] += float(intent_loss.detach().cpu().item()) * sample_count
+            epoch_metrics["quality_loss"] += float(quality_loss.detach().cpu().item()) * sample_count
+            epoch_metrics["total_loss"] += float(total_loss.detach().cpu().item()) * sample_count
             epoch_metrics["batches"] += 1
-            epoch_metrics["samples"] += batch_size
+            epoch_metrics["samples"] += sample_count
 
             if global_step % max(1, args.log_every) == 0:
                 elapsed = max(time.perf_counter() - epoch_start, 1e-6)
@@ -363,6 +390,8 @@ def main() -> int:
                     f"loss={total_loss.detach().cpu().item():.4f} "
                     f"policy={policy_loss.detach().cpu().item():.4f} "
                     f"value={value_loss.detach().cpu().item():.4f} "
+                    f"intent={intent_loss.detach().cpu().item():.4f} "
+                    f"quality={quality_loss.detach().cpu().item():.4f} "
                     f"lr={optimizer.param_groups[0]['lr']:.2e} "
                     f"samples/s={samples_per_second:.1f}"
                 )
@@ -382,11 +411,14 @@ def main() -> int:
 
         train_policy = epoch_metrics["policy_loss"] / epoch_metrics["samples"]
         train_value = epoch_metrics["value_loss"] / epoch_metrics["samples"]
+        train_intent = epoch_metrics["intent_loss"] / epoch_metrics["samples"]
+        train_quality = epoch_metrics["quality_loss"] / epoch_metrics["samples"]
         train_total = epoch_metrics["total_loss"] / epoch_metrics["samples"]
         print(
             "[train] "
             f"epoch={epoch} complete "
-            f"policy={train_policy:.4f} value={train_value:.4f} total={train_total:.4f}"
+            f"policy={train_policy:.4f} value={train_value:.4f} "
+            f"intent={train_intent:.4f} quality={train_quality:.4f} total={train_total:.4f}"
         )
 
         eval_metrics = _run_eval(
@@ -395,6 +427,8 @@ def main() -> int:
             device=device,
             max_batches=max(0, args.eval_batches),
             value_loss_weight=args.value_loss_weight,
+            intent_loss_weight=args.intent_loss_weight,
+            quality_loss_weight=args.quality_loss_weight,
         )
         if eval_metrics["samples"] > 0:
             print(
@@ -402,6 +436,8 @@ def main() -> int:
                 f"epoch={epoch} "
                 f"policy={eval_metrics['policy_loss'] / eval_metrics['samples']:.4f} "
                 f"value={eval_metrics['value_loss'] / eval_metrics['samples']:.4f} "
+                f"intent={eval_metrics['intent_loss'] / eval_metrics['samples']:.4f} "
+                f"quality={eval_metrics['quality_loss'] / eval_metrics['samples']:.4f} "
                 f"total={eval_metrics['total_loss'] / eval_metrics['samples']:.4f}"
             )
 
@@ -460,20 +496,30 @@ def _encode_training_record(
     if not isinstance(value_target, (int, float)):
         return None
     action_ids = [str(action.get("action_id", "")) for action in legal_actions if isinstance(action, dict)]
+    encoded_actions = [action for action in legal_actions if isinstance(action, dict)]
     if chosen_action_id not in action_ids:
         return None
     return {
         "state_vector": encode_state_vector(belief_state, vector_size=state_dim),
         "action_vectors": [
             encode_action_vector(action, belief_state=belief_state, vector_size=action_dim)
-            for action in legal_actions
-            if isinstance(action, dict)
+            for action in encoded_actions
         ],
         "chosen_action_index": action_ids.index(chosen_action_id),
         "policy_target": _build_policy_target_vector(
             payload=payload,
             action_ids=action_ids,
             chosen_action_id=chosen_action_id,
+        ),
+        "intent_targets": _build_multilabel_targets(
+            encoded_actions,
+            field_name="intent_tags",
+            vocabulary=INTENT_TAGS,
+        ),
+        "quality_targets": _build_multilabel_targets(
+            encoded_actions,
+            field_name="quality_flags",
+            vocabulary=QUALITY_FLAGS,
         ),
         "value_target": float(value_target),
     }
@@ -495,6 +541,12 @@ def _collate_training_batch(samples: list[dict[str, object]]):
     chosen_indices = torch.zeros(batch_size, dtype=torch.long)
     policy_targets = torch.zeros(batch_size, max_actions, dtype=torch.float32)
     value_targets = torch.zeros(batch_size, dtype=torch.float32)
+    intent_targets = torch.zeros(batch_size, max_actions, len(INTENT_TAGS), dtype=torch.float32)
+    quality_targets = torch.zeros(batch_size, max_actions, len(QUALITY_FLAGS), dtype=torch.float32)
+    quality_label_weights = torch.tensor(
+        _quality_label_weights(),
+        dtype=torch.float32,
+    )
 
     for sample_index, sample in enumerate(samples):
         state_vectors[sample_index] = torch.tensor(sample["state_vector"], dtype=torch.float32)
@@ -505,6 +557,10 @@ def _collate_training_batch(samples: list[dict[str, object]]):
         chosen_indices[sample_index] = int(sample["chosen_action_index"])
         policy_target = torch.tensor(sample["policy_target"], dtype=torch.float32)
         policy_targets[sample_index, :action_count] = policy_target
+        sample_intent_targets = torch.tensor(sample["intent_targets"], dtype=torch.float32)
+        intent_targets[sample_index, :action_count] = sample_intent_targets
+        sample_quality_targets = torch.tensor(sample["quality_targets"], dtype=torch.float32)
+        quality_targets[sample_index, :action_count] = sample_quality_targets
         value_targets[sample_index] = float(sample["value_target"])
 
     return {
@@ -514,6 +570,9 @@ def _collate_training_batch(samples: list[dict[str, object]]):
         "chosen_indices": chosen_indices,
         "policy_targets": policy_targets,
         "value_targets": value_targets,
+        "intent_targets": intent_targets,
+        "quality_targets": quality_targets,
+        "quality_label_weights": quality_label_weights,
     }
 
 
@@ -558,6 +617,44 @@ def _soft_target_policy_loss(policy_logits, policy_targets):
     return -(normalized_targets * log_probs).sum(dim=1).mean()
 
 
+def _masked_multilabel_loss(logits, targets, action_mask, *, label_weights=None):
+    per_label_loss = F.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+    if label_weights is not None:
+        per_label_loss = per_label_loss * label_weights.view(1, 1, -1)
+    masked_loss = per_label_loss * action_mask.unsqueeze(-1).float()
+    normalizer = (
+        action_mask.sum().clamp_min(1).float()
+        * logits.shape[-1]
+    )
+    return masked_loss.sum() / normalizer
+
+
+def _build_multilabel_targets(
+    legal_actions: list[dict[str, object]],
+    *,
+    field_name: str,
+    vocabulary: tuple[str, ...],
+) -> list[list[float]]:
+    encoded_targets: list[list[float]] = []
+    for action in legal_actions:
+        values = {
+            str(value)
+            for value in action.get(field_name, [])
+            if isinstance(value, str)
+        }
+        encoded_targets.append([1.0 if token in values else 0.0 for token in vocabulary])
+    return encoded_targets
+
+
+def _quality_label_weights() -> list[float]:
+    emphasized = {
+        "dominated_optional_play": 2.5,
+        "misses_immediate_prize": 3.0,
+        "misses_immediate_win": 3.0,
+    }
+    return [float(emphasized.get(label, 1.0)) for label in QUALITY_FLAGS]
+
+
 def _run_eval(
     *,
     model: ActionConditionedPolicyValueNet,
@@ -565,26 +662,63 @@ def _run_eval(
     device: torch.device,
     max_batches: int,
     value_loss_weight: float,
+    intent_loss_weight: float,
+    quality_loss_weight: float,
 ) -> dict[str, float]:
     if max_batches <= 0:
-        return {"policy_loss": 0.0, "value_loss": 0.0, "total_loss": 0.0, "samples": 0}
-    metrics = {"policy_loss": 0.0, "value_loss": 0.0, "total_loss": 0.0, "samples": 0}
+        return {
+            "policy_loss": 0.0,
+            "value_loss": 0.0,
+            "intent_loss": 0.0,
+            "quality_loss": 0.0,
+            "total_loss": 0.0,
+            "samples": 0,
+        }
+    metrics = {
+        "policy_loss": 0.0,
+        "value_loss": 0.0,
+        "intent_loss": 0.0,
+        "quality_loss": 0.0,
+        "total_loss": 0.0,
+        "samples": 0,
+    }
     model.eval()
     with torch.no_grad():
         for batch_index, batch in enumerate(eval_loader, start=1):
             if batch is None:
                 continue
             batch = _move_batch_to_device(batch, device)
-            policy_logits, values = model(batch["state_vectors"], batch["action_vectors"])
+            policy_logits, values, intent_logits, quality_logits = model(
+                batch["state_vectors"],
+                batch["action_vectors"],
+            )
             policy_logits = policy_logits.masked_fill(~batch["action_mask"], -1e9)
             policy_loss = _soft_target_policy_loss(policy_logits, batch["policy_targets"])
             value_loss = F.smooth_l1_loss(values, batch["value_targets"])
-            total_loss = policy_loss + value_loss * value_loss_weight
-            batch_size = int(batch["state_vectors"].shape[0])
-            metrics["policy_loss"] += float(policy_loss.detach().cpu().item()) * batch_size
-            metrics["value_loss"] += float(value_loss.detach().cpu().item()) * batch_size
-            metrics["total_loss"] += float(total_loss.detach().cpu().item()) * batch_size
-            metrics["samples"] += batch_size
+            intent_loss = _masked_multilabel_loss(
+                intent_logits,
+                batch["intent_targets"],
+                batch["action_mask"],
+            )
+            quality_loss = _masked_multilabel_loss(
+                quality_logits,
+                batch["quality_targets"],
+                batch["action_mask"],
+                label_weights=batch["quality_label_weights"],
+            )
+            total_loss = (
+                policy_loss
+                + value_loss * value_loss_weight
+                + intent_loss * intent_loss_weight
+                + quality_loss * quality_loss_weight
+            )
+            sample_count = int(batch["state_vectors"].shape[0])
+            metrics["policy_loss"] += float(policy_loss.detach().cpu().item()) * sample_count
+            metrics["value_loss"] += float(value_loss.detach().cpu().item()) * sample_count
+            metrics["intent_loss"] += float(intent_loss.detach().cpu().item()) * sample_count
+            metrics["quality_loss"] += float(quality_loss.detach().cpu().item()) * sample_count
+            metrics["total_loss"] += float(total_loss.detach().cpu().item()) * sample_count
+            metrics["samples"] += sample_count
             if batch_index >= max_batches:
                 break
     model.train()
