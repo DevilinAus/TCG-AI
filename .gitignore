@@ -7,3 +7,4 @@ standard_ml_data/
 node_modules/
 .playwright-browsers/
 start_macbook_workers.command
+runtime_logs/

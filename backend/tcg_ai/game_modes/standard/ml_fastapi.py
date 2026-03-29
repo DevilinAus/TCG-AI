@@ -15,7 +15,11 @@ except Exception as exc:  # pragma: no cover - optional dependency path
 else:  # pragma: no cover - exercised when optional dependencies are installed
     _IMPORT_ERROR = None
 
+from ...logging_utils import configure_tcg_ai_logging, default_log_path, get_logger
 from .ml.service import StandardMlService
+
+logger = get_logger(__name__)
+_WORKER_LOG_PATH = default_log_path("standard-ml-worker.log")
 
 
 def create_app() -> Any:
@@ -74,6 +78,8 @@ def run(host: str = "0.0.0.0", port: int = 8100) -> None:  # pragma: no cover - 
         raise RuntimeError(
             "uvicorn is not installed. Install the 'standard-ml' extras to use this server."
         ) from _IMPORT_ERROR
+    configure_tcg_ai_logging(log_file=_WORKER_LOG_PATH)
+    logger.info("standard ml worker logging to %s", _WORKER_LOG_PATH)
     uvicorn.run(create_app(), host=host, port=port)
 
 
