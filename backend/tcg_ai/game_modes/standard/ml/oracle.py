@@ -18,6 +18,7 @@ class PolicyValueRequest:
     acting_player_index: int
     root_player_index: int
     legal_actions: list[dict[str, object]]
+    action_analysis_by_id: dict[str, dict[str, object]] | None = None
 
 
 @dataclass(frozen=True)
@@ -59,6 +60,7 @@ class BackendPolicyValueOracle:
                         request.state,
                         acting_player_index=request.acting_player_index,
                         legal_actions=request.legal_actions,
+                        analysis_by_action_id=request.action_analysis_by_id,
                     )
                 payload.append(
                     {

@@ -3,7 +3,9 @@ from __future__ import annotations
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
+from backend.tcg_ai.game_modes.standard.action_analysis import analyze_legal_actions
 from backend.tcg_ai.game_modes.standard.decision_payload import build_decision_request
 from backend.tcg_ai.game_modes.standard.engine import action_id_for, apply_action, create_game, list_legal_actions
 from backend.tcg_ai.game_modes.standard.ml.canonical_state import deserialize_state, serialize_state
@@ -162,6 +164,34 @@ class StandardMlTests(unittest.TestCase):
         legal_action_ids = {action_id_for(action) for action in list_legal_actions(state, player_index=0)}
         self.assertGreater(self.service.policy_backend.calls, 0)
         self.assertIn(response["chosen_action_id"], legal_action_ids)
+
+    def test_backend_oracle_reuses_provided_action_analysis(self) -> None:
+        state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck", ai_name="Brock")
+        legal_actions = list_legal_actions(state, player_index=0)
+        analysis_by_action_id = analyze_legal_actions(
+            state,
+            acting_player_index=0,
+            legal_actions=legal_actions,
+        )
+        request = PolicyValueRequest(
+            state=state,
+            acting_player_index=0,
+            root_player_index=0,
+            legal_actions=legal_actions,
+            action_analysis_by_id=analysis_by_action_id,
+        )
+        oracle = BackendPolicyValueOracle(
+            backend=PolicyValueBackend(checkpoint_path=Path(self.temp_dir.name) / "missing.pt")
+        )
+
+        with patch(
+            "backend.tcg_ai.game_modes.standard.ml.knowledge_state.analyze_legal_actions",
+            side_effect=AssertionError("provided analysis should be reused"),
+        ):
+            results = oracle.evaluate_batch([request])
+
+        self.assertEqual(len(results), 1)
+        self.assertEqual(results[0].diagnostics["backend"], "heuristic")
 
     def test_service_full_state_decision_matches_local_backend_planner(self) -> None:
         class DeterministicBackend:

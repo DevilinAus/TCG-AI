@@ -59,17 +59,22 @@ def serialize_knowledge_actions(
     *,
     acting_player_index: int,
     legal_actions: list[dict[str, Any]],
+    analysis_by_action_id: dict[str, dict[str, Any]] | None = None,
 ) -> list[dict[str, Any]]:
     record_counter("knowledge_actions.calls")
     record_counter("knowledge_actions.actions", len(legal_actions))
     observe_max("knowledge_actions.max_actions", len(legal_actions))
     with time_metric("knowledge_actions.total"):
-        with time_metric("knowledge_actions.analysis"):
-            analysis_by_action_id = analyze_legal_actions(
-                state,
-                acting_player_index=acting_player_index,
-                legal_actions=legal_actions,
-            )
+        if analysis_by_action_id is None:
+            record_counter("knowledge_actions.analysis_cache_misses")
+            with time_metric("knowledge_actions.analysis"):
+                analysis_by_action_id = analyze_legal_actions(
+                    state,
+                    acting_player_index=acting_player_index,
+                    legal_actions=legal_actions,
+                )
+        else:
+            record_counter("knowledge_actions.analysis_cache_hits")
         card_cache: dict[str, dict[str, Any]] = {}
         with time_metric("knowledge_actions.serialize_actions"):
             return [

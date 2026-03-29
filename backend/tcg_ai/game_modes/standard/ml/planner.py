@@ -42,6 +42,7 @@ class RankedAction:
     continuation_score: float
     successor_state: GameState
     successor_legal_actions: list[dict[str, Any]]
+    successor_action_analysis_by_id: dict[str, dict[str, Any]]
     analysis: dict[str, Any]
 
 
@@ -54,6 +55,7 @@ class StandardTurnPlanner:
         self.config = config or PlannerConfig()
         self.oracle = oracle or HeuristicPolicyValueOracle()
         self._nodes_evaluated = 0
+        self._analysis_cache: dict[tuple[int, int, tuple[str, ...]], dict[str, dict[str, Any]]] = {}
 
     def plan(
         self,
@@ -69,18 +71,19 @@ class StandardTurnPlanner:
         profile_context = use_profile(profile) if current_profile() is None else nullcontext(profile)
         with profile_context:
             self._nodes_evaluated = 0
+            self._analysis_cache = {}
             record_counter("planner.plan.calls")
             observe_max("planner.max_legal_actions", len(legal_actions))
             observe_max("planner.max_depth_config", self.config.max_depth)
             observe_max("planner.max_beam_width_config", self.config.beam_width)
             observe_max("planner.max_opponent_branch_width_config", self.config.opponent_branch_width)
             with time_metric("planner.plan_total"):
-                with time_metric("planner.root_analysis"):
-                    root_analysis = analyze_legal_actions(
-                        state,
-                        acting_player_index=acting_player_index,
-                        legal_actions=legal_actions,
-                    )
+                root_analysis = self._analysis_for_state(
+                    state,
+                    acting_player_index=acting_player_index,
+                    legal_actions=legal_actions,
+                    profile_metric="planner.root_analysis",
+                )
                 baseline_score, ranked_actions = self._rank_actions(
                     state,
                     acting_player_index,
@@ -96,6 +99,7 @@ class StandardTurnPlanner:
                             acting_player_index,
                             depth=1,
                             legal_actions=ranked_action.successor_legal_actions,
+                            analysis_by_action_id=ranked_action.successor_action_analysis_by_id,
                             current_score=ranked_action.one_step_score,
                         )
                         candidates.append(
@@ -164,6 +168,7 @@ class StandardTurnPlanner:
         root_player_index: int,
         depth: int,
         legal_actions: list[dict[str, Any]] | None = None,
+        analysis_by_action_id: dict[str, dict[str, Any]] | None = None,
         current_score: float | None = None,
     ) -> tuple[float, list[str]]:
         record_counter("planner.search.calls")
@@ -178,6 +183,7 @@ class StandardTurnPlanner:
                     state.current_player,
                     root_player_index,
                     legal_actions=legal_actions,
+                    analysis_by_action_id=analysis_by_action_id,
                     current_score=current_score,
                 ),
                 [],
@@ -191,6 +197,7 @@ class StandardTurnPlanner:
                     acting_player_index,
                     root_player_index,
                     legal_actions=legal_actions,
+                    analysis_by_action_id=analysis_by_action_id,
                     current_score=current_score,
                 ),
                 [],
@@ -204,6 +211,7 @@ class StandardTurnPlanner:
                     acting_player_index,
                     root_player_index,
                     legal_actions=legal_actions,
+                    analysis_by_action_id=analysis_by_action_id,
                     current_score=current_score,
                 ),
                 [],
@@ -215,6 +223,7 @@ class StandardTurnPlanner:
             legal_actions,
             root_player_index,
             baseline_score=current_score,
+            analysis_by_action_id=analysis_by_action_id,
         )
         branch_width = (
             self.config.beam_width
@@ -229,6 +238,7 @@ class StandardTurnPlanner:
                 root_player_index,
                 depth + 1,
                 legal_actions=ranked_action.successor_legal_actions,
+                analysis_by_action_id=ranked_action.successor_action_analysis_by_id,
                 current_score=ranked_action.one_step_score,
             )
             if acting_player_index == root_player_index:
@@ -255,12 +265,12 @@ class StandardTurnPlanner:
         observe_max("planner.rank_actions.max_legal_actions", len(legal_actions))
         with time_metric("planner.rank_actions.total"):
             if analysis_by_action_id is None:
-                with time_metric("planner.rank_actions.analysis"):
-                    analysis_by_action_id = analyze_legal_actions(
-                        state,
-                        acting_player_index=acting_player_index,
-                        legal_actions=legal_actions,
-                    )
+                analysis_by_action_id = self._analysis_for_state(
+                    state,
+                    acting_player_index=acting_player_index,
+                    legal_actions=legal_actions,
+                    profile_metric="planner.rank_actions.analysis",
+                )
             oracle_result = self._evaluate_requests(
                 [
                     PolicyValueRequest(
@@ -268,12 +278,15 @@ class StandardTurnPlanner:
                         acting_player_index=acting_player_index,
                         root_player_index=root_player_index,
                         legal_actions=legal_actions,
+                        action_analysis_by_id=analysis_by_action_id,
                     )
                 ]
             )[0]
             baseline_score = float(oracle_result.value) if baseline_score is None else float(baseline_score)
             ranked: list[RankedAction] = []
-            simulated_actions: list[tuple[dict[str, Any], str, GameState, int, list[dict[str, Any]]]] = []
+            simulated_actions: list[
+                tuple[dict[str, Any], str, GameState, int, list[dict[str, Any]], dict[str, dict[str, Any]]]
+            ] = []
             for action in legal_actions:
                 record_counter("planner.simulated_actions")
                 with time_metric("planner.simulation.deepcopy"):
@@ -287,6 +300,12 @@ class StandardTurnPlanner:
                         simulated_state,
                         player_index=next_player_index,
                     )
+                next_analysis_by_id = self._analysis_for_state(
+                    simulated_state,
+                    acting_player_index=next_player_index,
+                    legal_actions=next_legal_actions,
+                    profile_metric="planner.simulation.analysis",
+                )
                 simulated_actions.append(
                     (
                         action,
@@ -294,6 +313,7 @@ class StandardTurnPlanner:
                         simulated_state,
                         next_player_index,
                         next_legal_actions,
+                        next_analysis_by_id,
                     )
                 )
             one_step_requests = [
@@ -302,8 +322,9 @@ class StandardTurnPlanner:
                     acting_player_index=next_player_index,
                     root_player_index=root_player_index,
                     legal_actions=next_legal_actions,
+                    action_analysis_by_id=next_analysis_by_id,
                 )
-                for _, _, simulated_state, next_player_index, next_legal_actions in simulated_actions
+                for _, _, simulated_state, next_player_index, next_legal_actions, next_analysis_by_id in simulated_actions
             ]
             one_step_results = self._evaluate_requests(one_step_requests)
             for (
@@ -312,6 +333,7 @@ class StandardTurnPlanner:
                 simulated_state,
                 _next_player_index,
                 _next_legal_actions,
+                next_analysis_by_id,
             ), one_step_result in zip(simulated_actions, one_step_results):
                 one_step_score = float(one_step_result.value)
                 prior = float(oracle_result.action_priors.get(action_id, 0.0))
@@ -342,6 +364,7 @@ class StandardTurnPlanner:
                         continuation_score=continuation_score,
                         successor_state=simulated_state,
                         successor_legal_actions=_next_legal_actions,
+                        successor_action_analysis_by_id=next_analysis_by_id,
                         analysis={
                             **analysis,
                             "penalty_breakdown": penalty_breakdown,
@@ -424,6 +447,12 @@ class StandardTurnPlanner:
                     acting_player_index=next_player_index,
                     root_player_index=root_player_index,
                     legal_actions=next_legal_actions,
+                    action_analysis_by_id=self._analysis_for_state(
+                        simulated_state,
+                        acting_player_index=next_player_index,
+                        legal_actions=next_legal_actions,
+                        profile_metric="planner.same_turn_continuation.analysis",
+                    ),
                 )
                 for _, simulated_state, next_player_index, next_legal_actions in followup_states
             ]
@@ -461,6 +490,7 @@ class StandardTurnPlanner:
         root_player_index: int,
         *,
         legal_actions: list[dict[str, Any]] | None = None,
+        analysis_by_action_id: dict[str, dict[str, Any]] | None = None,
         current_score: float | None = None,
     ) -> float:
         if current_score is not None:
@@ -477,6 +507,7 @@ class StandardTurnPlanner:
                         acting_player_index=acting_player_index,
                         root_player_index=root_player_index,
                         legal_actions=legal_actions,
+                        action_analysis_by_id=analysis_by_action_id,
                     )
                 ]
             )[0]
@@ -493,6 +524,30 @@ class StandardTurnPlanner:
         observe_max("planner.oracle.max_batch_size", len(requests))
         with time_metric("planner.oracle.total"):
             return self.oracle.evaluate_batch(requests)
+
+    def _analysis_for_state(
+        self,
+        state: GameState,
+        *,
+        acting_player_index: int,
+        legal_actions: list[dict[str, Any]],
+        profile_metric: str,
+    ) -> dict[str, dict[str, Any]]:
+        action_ids = tuple(_safe_action_id(action) for action in legal_actions)
+        cache_key = (id(state), acting_player_index, action_ids)
+        cached = self._analysis_cache.get(cache_key)
+        if cached is not None:
+            record_counter("planner.analysis_cache_hits")
+            return cached
+        record_counter("planner.analysis_cache_misses")
+        with time_metric(profile_metric):
+            analysis = analyze_legal_actions(
+                state,
+                acting_player_index=acting_player_index,
+                legal_actions=legal_actions,
+            )
+        self._analysis_cache[cache_key] = analysis
+        return analysis
 
 
 def _safe_action_id(action: dict[str, Any]) -> str:
