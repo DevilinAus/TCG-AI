@@ -204,14 +204,25 @@ bash scripts/start_standard_ml_worker.sh --checkpoint standard_ml_data/champion.
 
 ## Testing
 
-Full preflight:
+Fast local preflight:
 
 ```bash
 npm run preflight
 ```
 
+`preflight` is intentionally lightweight now. It runs:
+- a small JS smoke subset
+- Python syntax compilation
+- a small Python smoke subset around Standard AI planning/policy
+
+Full CI-equivalent suite:
+
+```bash
+npm run test:full
+```
+
 Python tests only:
 
 ```bash
-python3 -m unittest discover -s tests
+python3 -m pytest -q
 ```

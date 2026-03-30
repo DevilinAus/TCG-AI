@@ -1,6 +1,11 @@
 {
   "scripts": {
-    "preflight": "node --test tests/test_selection_state.js tests/test_pokegear_popup.js tests/test_ultra_ball_popup.js tests/test_call_for_family_popup.js tests/test_standard_ai_toggle.js tests/test_ultra_ball_popup_playwright.js && ./.venv/bin/pytest -q"
+    "test:js:smoke": "node --test tests/test_selection_state.js tests/test_standard_ai_toggle.js",
+    "test:js:full": "node --test tests/*.js",
+    "test:py:smoke": "./.venv/bin/python -m compileall -q backend tests && ./.venv/bin/python -m unittest tests.test_standard_action_analysis tests.test_standard_policy tests.test_standard_ml.StandardMlTests.test_planner_returns_legal_action_for_full_state_payload tests.test_api.ApiTests.test_standard_remote_ai_step_fails_when_worker_is_unavailable",
+    "test:py:full": "./.venv/bin/pytest -q",
+    "preflight": "npm run test:js:smoke && npm run test:py:smoke",
+    "test:full": "npm run test:js:full && npm run test:py:full"
   },
   "devDependencies": {
     "@playwright/test": "^1.58.2",
