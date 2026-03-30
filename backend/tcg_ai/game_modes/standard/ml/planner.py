@@ -55,7 +55,9 @@ class StandardTurnPlanner:
         self.config = config or PlannerConfig()
         self.oracle = oracle or HeuristicPolicyValueOracle()
         self._nodes_evaluated = 0
-        self._analysis_cache: dict[tuple[int, int, tuple[str, ...]], dict[str, dict[str, Any]]] = {}
+        self._analysis_cache: dict[tuple[tuple[Any, ...], int, tuple[str, ...]], dict[str, dict[str, Any]]] = {}
+        self._state_signature_cache: dict[int, tuple[Any, ...]] = {}
+        self._same_turn_outcomes_cache: dict[tuple[tuple[Any, ...], int, int], dict[str, bool]] = {}
 
     def plan(
         self,
@@ -72,6 +74,8 @@ class StandardTurnPlanner:
         with profile_context:
             self._nodes_evaluated = 0
             self._analysis_cache = {}
+            self._state_signature_cache = {}
+            self._same_turn_outcomes_cache = {}
             record_counter("planner.plan.calls")
             observe_max("planner.max_legal_actions", len(legal_actions))
             observe_max("planner.max_depth_config", self.config.max_depth)
@@ -534,7 +538,7 @@ class StandardTurnPlanner:
         profile_metric: str,
     ) -> dict[str, dict[str, Any]]:
         action_ids = tuple(_safe_action_id(action) for action in legal_actions)
-        cache_key = (id(state), acting_player_index, action_ids)
+        cache_key = (self._state_signature(state), acting_player_index, action_ids)
         cached = self._analysis_cache.get(cache_key)
         if cached is not None:
             record_counter("planner.analysis_cache_hits")
@@ -545,9 +549,19 @@ class StandardTurnPlanner:
                 state,
                 acting_player_index=acting_player_index,
                 legal_actions=legal_actions,
+                same_turn_outcomes_cache=self._same_turn_outcomes_cache,
             )
         self._analysis_cache[cache_key] = analysis
         return analysis
+
+    def _state_signature(self, state: GameState) -> tuple[Any, ...]:
+        cache_key = id(state)
+        cached = self._state_signature_cache.get(cache_key)
+        if cached is not None:
+            return cached
+        signature = _state_signature(state)
+        self._state_signature_cache[cache_key] = signature
+        return signature
 
 
 def _safe_action_id(action: dict[str, Any]) -> str:
@@ -555,6 +569,60 @@ def _safe_action_id(action: dict[str, Any]) -> str:
         return action_id_for(action)
     except Exception:
         return str(action)
+
+
+def _state_signature(state: GameState) -> tuple[Any, ...]:
+    return (
+        state.current_player,
+        state.starting_player,
+        state.turn_number,
+        state.winner,
+        state.setup_phase,
+        state.pending_promotion_for,
+        tuple(state.pending_promotion_queue),
+        state.pending_promotion_attacker_index,
+        tuple(_player_signature(player) for player in state.players),
+    )
+
+
+def _player_signature(player: Any) -> tuple[Any, ...]:
+    return (
+        tuple(player.deck),
+        tuple(player.hand),
+        tuple(player.discard),
+        tuple(player.prizes),
+        _pokemon_signature(player.active),
+        tuple(_pokemon_signature(pokemon) for pokemon in player.bench),
+        player.prize_cards_remaining,
+        player.mulligans_taken,
+        player.supporter_played_this_turn,
+        player.energy_attached_this_turn,
+        player.retreated_this_turn,
+        player.turns_taken,
+        player.deck_inspected_this_game,
+    )
+
+
+def _pokemon_signature(pokemon: Any) -> tuple[Any, ...] | None:
+    if pokemon is None:
+        return None
+    return (
+        tuple(pokemon.stack),
+        pokemon.damage,
+        tuple(pokemon.attached_energy),
+        pokemon.entered_play_turn,
+        tuple(
+            (
+                effect.effect_type,
+                effect.source_player,
+                effect.expires_end_of_player_turn,
+                effect.activation_turn,
+                effect.condition,
+                effect.blocked_attack_index,
+            )
+            for effect in pokemon.lingering_effects
+        ),
+    )
 
 
 def _same_turn_followup_priority(action: dict[str, Any]) -> int:

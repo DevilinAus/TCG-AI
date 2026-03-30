@@ -75,9 +75,11 @@ def analyze_legal_actions(
     *,
     acting_player_index: int,
     legal_actions: list[dict[str, Any]],
+    same_turn_outcomes_cache: dict[tuple[tuple[Any, ...], int, int], dict[str, bool]] | None = None,
 ) -> dict[str, dict[str, Any]]:
     if not legal_actions:
         return {}
+    same_turn_outcomes_cache = same_turn_outcomes_cache or {}
 
     opponent_index = 1 - acting_player_index
     before_active = state.players[acting_player_index].active
@@ -104,6 +106,7 @@ def analyze_legal_actions(
             simulated_state,
             acting_player_index=acting_player_index,
             depth=2,
+            cache=same_turn_outcomes_cache,
         )
         changes_active = bool(metadata["expected_state_delta"].get("active_changes"))
         reduces_active_ko_risk = _reduces_active_ko_risk(
@@ -303,18 +306,33 @@ def _best_same_turn_outcomes(
     *,
     acting_player_index: int,
     depth: int,
+    cache: dict[tuple[tuple[Any, ...], int, int], dict[str, bool]] | None = None,
 ) -> dict[str, bool]:
+    cache_key = (_analysis_state_signature(state), acting_player_index, depth)
+    if cache is not None:
+        cached = cache.get(cache_key)
+        if cached is not None:
+            return cached
     can_attack_now = False
     takes_prize = False
     wins_game = state.winner == acting_player_index
     if wins_game:
-        return {"can_attack": False, "takes_prize": True, "wins_game": True}
+        result = {"can_attack": False, "takes_prize": True, "wins_game": True}
+        if cache is not None:
+            cache[cache_key] = result
+        return result
     if depth <= 0 or state.current_player != acting_player_index:
-        return {"can_attack": False, "takes_prize": False, "wins_game": False}
+        result = {"can_attack": False, "takes_prize": False, "wins_game": False}
+        if cache is not None:
+            cache[cache_key] = result
+        return result
 
     legal_actions = list_legal_actions(state, player_index=acting_player_index)
     if not legal_actions:
-        return {"can_attack": False, "takes_prize": False, "wins_game": False}
+        result = {"can_attack": False, "takes_prize": False, "wins_game": False}
+        if cache is not None:
+            cache[cache_key] = result
+        return result
 
     ordered_actions = sorted(
         [
@@ -337,17 +355,21 @@ def _best_same_turn_outcomes(
             simulated_state,
             acting_player_index=acting_player_index,
             depth=depth - 1,
+            cache=cache,
         )
         can_attack_now = can_attack_now or child_outcomes["can_attack"]
         takes_prize = takes_prize or child_outcomes["takes_prize"]
         wins_game = wins_game or child_outcomes["wins_game"]
         if can_attack_now and takes_prize and wins_game:
             break
-    return {
+    result = {
         "can_attack": can_attack_now,
         "takes_prize": takes_prize,
         "wins_game": wins_game,
     }
+    if cache is not None:
+        cache[cache_key] = result
+    return result
 
 
 def _reduces_active_ko_risk(
@@ -681,6 +703,60 @@ def _safe_action_id(action: dict[str, Any]) -> str:
         return action_id_for(action)
     except Exception:
         return str(action)
+
+
+def _analysis_state_signature(state: GameState) -> tuple[Any, ...]:
+    return (
+        state.current_player,
+        state.starting_player,
+        state.turn_number,
+        state.winner,
+        state.setup_phase,
+        state.pending_promotion_for,
+        tuple(state.pending_promotion_queue),
+        state.pending_promotion_attacker_index,
+        tuple(_analysis_player_signature(player) for player in state.players),
+    )
+
+
+def _analysis_player_signature(player: Any) -> tuple[Any, ...]:
+    return (
+        tuple(player.deck),
+        tuple(player.hand),
+        tuple(player.discard),
+        tuple(player.prizes),
+        _analysis_pokemon_signature(player.active),
+        tuple(_analysis_pokemon_signature(pokemon) for pokemon in player.bench),
+        player.prize_cards_remaining,
+        player.mulligans_taken,
+        player.supporter_played_this_turn,
+        player.energy_attached_this_turn,
+        player.retreated_this_turn,
+        player.turns_taken,
+        player.deck_inspected_this_game,
+    )
+
+
+def _analysis_pokemon_signature(pokemon: PokemonInPlay | None) -> tuple[Any, ...] | None:
+    if pokemon is None:
+        return None
+    return (
+        tuple(pokemon.stack),
+        pokemon.damage,
+        tuple(pokemon.attached_energy),
+        pokemon.entered_play_turn,
+        tuple(
+            (
+                effect.effect_type,
+                effect.source_player,
+                effect.expires_end_of_player_turn,
+                effect.activation_turn,
+                effect.condition,
+                effect.blocked_attack_index,
+            )
+            for effect in pokemon.lingering_effects
+        ),
+    )
 
 
 def _remaining_hp(state: GameState, pokemon: PokemonInPlay | None) -> int:
