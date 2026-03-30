@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import deepcopy
 from pathlib import Path
 import tempfile
 import unittest
@@ -192,6 +193,33 @@ class StandardMlTests(unittest.TestCase):
 
         self.assertEqual(len(results), 1)
         self.assertEqual(results[0].diagnostics["backend"], "heuristic")
+
+    def test_planner_reuses_analysis_for_equivalent_copied_states(self) -> None:
+        state = create_game(seed=1, human_deck_id="ampharos-ex-battle-deck", ai_name="Brock")
+        legal_actions = list_legal_actions(state, player_index=0)
+        copied_state = deepcopy(state)
+        copied_legal_actions = list_legal_actions(copied_state, player_index=0)
+        planner = StandardTurnPlanner(config=PlannerConfig(max_depth=1, beam_width=1))
+
+        with patch(
+            "backend.tcg_ai.game_modes.standard.ml.planner.analyze_legal_actions",
+            wraps=analyze_legal_actions,
+        ) as analyze_mock:
+            first = planner._analysis_for_state(
+                state,
+                acting_player_index=0,
+                legal_actions=legal_actions,
+                profile_metric="test.analysis",
+            )
+            second = planner._analysis_for_state(
+                copied_state,
+                acting_player_index=0,
+                legal_actions=copied_legal_actions,
+                profile_metric="test.analysis",
+            )
+
+        self.assertEqual(analyze_mock.call_count, 1)
+        self.assertEqual(first, second)
 
     def test_service_full_state_decision_matches_local_backend_planner(self) -> None:
         class DeterministicBackend:
