@@ -501,11 +501,38 @@ class TcgApplication:
             raise ApiError("Missing action payload.", "missing_action", HTTPStatus.BAD_REQUEST)
 
         session = self.sessions.get(session_id)
+        action_type = str(action.get("type") or "unknown")
+        request_started = perf_counter()
+        logger.info(
+            "human action start session=%s game_mode=%s standard_ai_mode=%s action_type=%s turn=%s current_player=%s",
+            session_id,
+            session.game_mode,
+            session.standard_ai_mode,
+            action_type,
+            session.state.turn_number,
+            session.state.current_player,
+        )
+        apply_started = perf_counter()
         try:
             session.human_action(action)
         except ValueError as exc:
             raise ApiError(str(exc), "illegal_action", HTTPStatus.BAD_REQUEST) from exc
-        return self._build_snapshot(session_id, session)
+        apply_elapsed_ms = round((perf_counter() - apply_started) * 1000, 1)
+        snapshot_started = perf_counter()
+        snapshot = self._build_snapshot(session_id, session)
+        snapshot_elapsed_ms = round((perf_counter() - snapshot_started) * 1000, 1)
+        total_elapsed_ms = round((perf_counter() - request_started) * 1000, 1)
+        logger.info(
+            "human action done session=%s action_type=%s apply_elapsed_ms=%s snapshot_elapsed_ms=%s total_elapsed_ms=%s next_player=%s winner=%s",
+            session_id,
+            action_type,
+            apply_elapsed_ms,
+            snapshot_elapsed_ms,
+            total_elapsed_ms,
+            session.state.current_player,
+            session.state.winner,
+        )
+        return snapshot
 
     def ai_turn(self, payload: dict[str, Any]) -> dict[str, Any]:
         session_id = self._require_string(payload, "session_id", "missing_session_id")

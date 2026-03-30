@@ -173,6 +173,41 @@ class ApiTests(unittest.TestCase):
         self.assertEqual(state["ai_decision_debug"]["pending_traces"][0]["chosen_card_id"], "sv1-124")
         self.assertFalse(self.policy_state_path.exists())
 
+    def test_standard_snapshot_trims_heavy_last_decision_diagnostics(self) -> None:
+        state = self.app.new_game(
+            {
+                "game_mode": "standard",
+                "human_first": True,
+                "human_deck_id": "ampharos-ex-battle-deck",
+                "seed": 1,
+            }
+        )
+
+        session = self.app.sessions.get(state["session_id"])
+        provider = session.mode_runtime.provider
+        provider.last_decision = {
+            "decision_id": "session:turn_action:turn1:p1:d2",
+            "decision_type": "turn_action",
+            "chosen_action_id": "end_turn",
+            "chosen_card_id": None,
+            "source": "remote",
+            "diagnostics": {
+                "reason_summary": "ended the turn.",
+                "nodes_evaluated": 124,
+                "performance_profile": {"timing_ms": {"planner.plan_total": 1234.5}},
+                "policy_target_scores": [{"action_id": "end_turn", "score": 1.0}],
+            },
+        }
+
+        snapshot = self.app.get_game(state["session_id"])
+        diagnostics = snapshot["ai_decision_debug"]["last_decision"]["diagnostics"]
+
+        self.assertEqual(snapshot["ai_decision_debug"]["last_decision"]["source"], "remote")
+        self.assertEqual(diagnostics["reason_summary"], "ended the turn.")
+        self.assertEqual(diagnostics["nodes_evaluated"], 124)
+        self.assertNotIn("performance_profile", diagnostics)
+        self.assertNotIn("policy_target_scores", diagnostics)
+
     def test_standard_supporters_expose_machine_readable_effect_specs_in_hand_and_actions(self) -> None:
         state = self.app.new_game(
             {
