@@ -352,6 +352,7 @@ async function submitAction(actionView) {
     currentState = payload;
     sanitizeSelections(currentState);
     render(currentState);
+    await waitForPaint();
     maybeRunAiTurn(currentState);
   } catch (error) {
     if (requestEpoch !== stateRequestEpoch) {

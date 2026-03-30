@@ -20,6 +20,15 @@ DEFAULT_REMOTE_TIMEOUT_MS = 1_800_000
 DEFAULT_EXPLORATION_RATE = 0.20
 DEFAULT_MIN_EXPLORATION_RATE = 0.05
 FULL_STATE_REQUEST_SCHEMA_VERSION = 2
+_SNAPSHOT_DIAGNOSTIC_KEYS: tuple[str, ...] = (
+    "reason_summary",
+    "selection_mode",
+    "resolved_candidates",
+    "resolved_samples",
+    "average_terminal_reward",
+    "win_rate",
+    "nodes_evaluated",
+)
 logger = get_logger(__name__)
 
 
@@ -221,7 +230,7 @@ class StandardDecisionProvider:
                 card_id: stats.snapshot()
                 for card_id, stats in sorted(deck_stats.items(), key=lambda item: item[0])
             },
-            "last_decision": self.last_decision,
+            "last_decision": _snapshot_last_decision(self.last_decision),
         }
 
     def _remember_decision(self, request: DecisionRequest, result: DecisionResult) -> None:
@@ -595,3 +604,22 @@ def _exploit_sort_key(stats: OpenerPolicyStats, card_id: str) -> tuple[float, fl
         -stats.resolved_samples,
         card_id,
     )
+
+
+def _snapshot_last_decision(last_decision: dict[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(last_decision, dict):
+        return None
+    snapshot = dict(last_decision)
+    snapshot["diagnostics"] = _snapshot_diagnostics(last_decision.get("diagnostics"))
+    return snapshot
+
+
+def _snapshot_diagnostics(diagnostics: Any) -> dict[str, Any]:
+    if not isinstance(diagnostics, dict):
+        return {}
+    snapshot: dict[str, Any] = {}
+    for key in _SNAPSHOT_DIAGNOSTIC_KEYS:
+        value = diagnostics.get(key)
+        if isinstance(value, (str, int, float, bool)):
+            snapshot[key] = value
+    return snapshot
